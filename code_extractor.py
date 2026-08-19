@@ -56,19 +56,44 @@ def _get_parser(language: str) -> Parser:
         raise RuntimeError(f"Failed to create tree-sitter parser. Tried: {excs}")
     return _PARSERS[lang_key]
 
-# Cache file text to avoid re-reading
+# Cache file text to avoid re-reading — bounded LRU to avoid OOM on large trees
 _FILE_CACHE = {}
+_FILE_CACHE_MAX = 500  # max files cached; ~500*~50KB = 25MB
+import collections as _coll
+_FILE_CACHE_ORDER = _coll.OrderedDict()
 
 def _read_file(filepath: str) -> Optional[str]:
     if filepath in _FILE_CACHE:
+        # Move to MRU
+        try:
+            _FILE_CACHE_ORDER.move_to_end(filepath)
+        except Exception:
+            pass
         return _FILE_CACHE[filepath]
     try:
+        # Skip caching huge files (>1MB) — they are rare and bloat cache
+        try:
+            if os.path.getsize(filepath) > 1_000_000:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    return f.read()
+        except Exception:
+            pass
         with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         _FILE_CACHE[filepath] = content
+        _FILE_CACHE_ORDER[filepath] = True
+        # Evict oldest if over limit
+        if len(_FILE_CACHE) > _FILE_CACHE_MAX:
+            oldest, _ = _FILE_CACHE_ORDER.popitem(last=False)
+            _FILE_CACHE.pop(oldest, None)
         return content
     except Exception:
         return None
+
+def clear_file_cache():
+    """Clear file content cache (call when source root changes)."""
+    _FILE_CACHE.clear()
+    _FILE_CACHE_ORDER.clear()
 
 # Cache parsed trees per (filepath, language) keyed by mtime, so a source file is
 # tree-sitter-parsed ONCE even when many defects live in the same file. Repeated

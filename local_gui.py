@@ -575,6 +575,8 @@ class AnalysisPage(Page):
                                    font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_ACCENT)
         self._pbar_time.pack(side="right")
         self._start_time = None
+        self._defect_start_time = None
+        self._index_secs = 0.0
         self._ticker_id  = None
 
         self._log = scrolledtext.ScrolledText(self,
@@ -698,7 +700,11 @@ class AnalysisPage(Page):
         self.after(200, self._start_ticker)
 
     def _start_ticker(self):
-        self._start_time = time.time()
+        if self._start_time is None:
+            self._start_time = time.time()
+        self._defect_start_time = None
+        self._index_secs = 0.0
+        self._eta_str = "indexing..."
         self._tick_timer()
 
     def _tick_timer(self):
@@ -706,7 +712,11 @@ class AnalysisPage(Page):
             return
         elapsed = time.time() - self._start_time
         e_str   = str(timedelta(seconds=int(elapsed)))
-        eta_str = getattr(self, "_eta_str", "---")
+        # During indexing show ETC as indexing, after defects started show real ETC
+        if self._defect_start_time is None:
+            eta_str = "indexing..."
+        else:
+            eta_str = getattr(self, "_eta_str", "calculating...")
         self._pbar_time.configure(
             text=f"Elapsed  {e_str}     ETC  {eta_str}")
         self._ticker_id = self.after(500, self._tick_timer)
@@ -1133,11 +1143,14 @@ class AnalysisPage(Page):
             self._pbar.configure(mode="determinate", maximum=total or 1, value=0)
             self._pbar_label.configure(text=f"0 / {total}   analysing...")
             self._pbar_stat.configure(text="0%   (0 / " + str(total) + " defects)")
-            # Reset the timer so the one-time indexing time is NOT counted in the
-            # per-defect ETA (otherwise the ETA starts wildly overestimated).
-            self._start_time = time.time()
+            # Keep total elapsed running, but start defect-loop timing for ETA
+            self._index_secs = idx_secs
+            self._defect_start_time = time.time()
             self._eta_str = "calculating..."
-            self._pbar_time.configure(text="Elapsed  0:00:00     ETC  calculating...")
+            # Show total elapsed including indexing rather than resetting to 0
+            total_elapsed = time.time() - self._start_time if self._start_time else idx_secs
+            e_str = str(timedelta(seconds=int(total_elapsed)))
+            self._pbar_time.configure(text=f"Elapsed  {e_str}     ETC  calculating...")
             self._log.configure(state="normal")
             self._log.insert("end",
                              f"Workspace indexed in {idx_secs:.1f}s — starting per-defect analysis.\n",
@@ -1153,13 +1166,17 @@ class AnalysisPage(Page):
                 text=f"{done} / {total}   —   analysing...")
             self._pbar_stat.configure(
                 text=f"{pct}%   ({done} / {total} defects)")
-            if self._start_time and done > 1:
-                elapsed   = time.time() - self._start_time
-                rate      = done / elapsed
+            # ETA based on defect loop only (indexing excluded) for realistic estimate
+            def_start = getattr(self, "_defect_start_time", None) or self._start_time
+            if def_start and done > 1:
+                elapsed   = time.time() - def_start
+                rate      = done / elapsed if elapsed > 0 else 0
                 remaining = (total - done) / rate if rate > 0 else 0
+                # Cap ETC at reasonable bound (avoid showing 100h for slow start)
+                remaining = min(remaining, 48 * 3600)
                 self._eta_str = str(timedelta(seconds=int(remaining)))
                 # Warn if analysis is suspiciously fast (< 50ms per defect on average)
-                avg_ms = (elapsed / done) * 1000
+                avg_ms = (elapsed / done) * 1000 if elapsed > 0 else 0
                 if avg_ms < 50 and done > 5:
                     self._pbar_label.configure(
                         text=f"{done} / {total}   —   WARNING: Analysis very fast ({avg_ms:.0f}ms/defect). Source files may not be loading.")
@@ -1182,11 +1199,13 @@ class AnalysisPage(Page):
                 self.after_cancel(self._ticker_id)
                 self._ticker_id = None
             elapsed = time.time() - self._start_time if self._start_time else 0
+            # Include indexing time in final elapsed (already included via _start_time)
             e_str   = str(timedelta(seconds=int(elapsed)))
             self._pbar_label.configure(text="Analysis complete!")
             self._pbar_time.configure(
                 text=f"Elapsed  {e_str}     ETC  Done \u2713")
             self._start_time = None
+            self._defect_start_time = None
             self._eta_str    = "Done"
 
             # Count source loading statistics
@@ -1249,7 +1268,7 @@ class ResultsPage(Page):
         self._sv_pass      = tk.StringVar()
         self._sv_store     = tk.StringVar(value="Default")
         self._sv_ssl       = tk.BooleanVar(value=True)
-        self._sv_verify_ssl = tk.BooleanVar(value=False)  # off by default for corporate self-signed certs
+        self._sv_verify_ssl = tk.BooleanVar(value=True)  # secure by default (verify on) — previously False
         self._sv_push_mode = tk.StringVar(value="all")
         self._build()
 
@@ -2360,6 +2379,7 @@ class PullDialog(tk.Toplevel):
         self._sv_limit   = tk.StringVar(value="5000")
         self._sv_save    = tk.StringVar()
         self._sv_use_rest = tk.BooleanVar(value=True)  # fix current lines via Connect REST API
+        self._sv_insecure = tk.BooleanVar(value=True)  # allow self-signed cert (verify off) — default True for corp compatibility
         self._set_save_path("", out_default)
 
         self._build()
@@ -2411,6 +2431,14 @@ class PullDialog(tk.Toplevel):
         _conn_row(s1, "Port", self._sv_port)
         _conn_row(s1, "Username", self._sv_user)
         _conn_row(s1, "Password", self._sv_pass, show="*")
+        # SSL verification toggle — secure default is unchecked (verify on); corp self-signed needs checked
+        sec_f = tk.Frame(s1, bg=C_PANEL)
+        sec_f.pack(fill="x", padx=10, pady=2)
+        tk.Checkbutton(sec_f, text="Allow self-signed certificate (insecure — verify off)",
+                       variable=self._sv_insecure, onvalue=True, offvalue=False,
+                       bg=C_PANEL, fg=C_INTENT, selectcolor=C_CARD,
+                       activebackground=C_PANEL, font=("Segoe UI", 8, "bold"), cursor="hand2").pack(side="left")
+        tk.Label(sec_f, text="  (uncheck for production with valid cert)", font=("Segoe UI", 7), bg=C_PANEL, fg=C_SUBTEXT).pack(side="left", padx=4)
 
         tst_f = tk.Frame(s1, bg=C_PANEL)
         tst_f.pack(fill="x", padx=10, pady=(6, 10))
@@ -2608,8 +2636,9 @@ class PullDialog(tk.Toplevel):
             # Allow optional pre-supplied REST token / API key via env vars
             rest_tok = os.environ.get("COVERITY_REST_TOKEN")
             rest_key = os.environ.get("COVERITY_API_KEY")
+            verify = not self._sv_insecure.get()
             client = CoveritySOAPClient(host, port, user, pw,
-                rest_token=rest_tok, api_key=rest_key)
+                verify_ssl=verify, rest_token=rest_tok, api_key=rest_key)
             ok, msg = client.test_connection()
 
             def _done():
@@ -2781,9 +2810,11 @@ class PullDialog(tk.Toplevel):
             if self._sv_use_rest.get():
                 try:
                     from coverity_rest_client import CoverityRESTClient, apply_rest_lines
+                    verify_rest = not self._sv_insecure.get()
                     rc = CoverityRESTClient(
                         self._sv_host.get().strip(), self._sv_port.get().strip(),
                         self._sv_user.get().strip(), self._sv_pass.get(),
+                        verify_ssl=verify_rest,
                         auth_token=os.environ.get("COVERITY_REST_TOKEN"))
                     ok, msg = rc.login()
                     if ok:
@@ -2936,6 +2967,7 @@ class PushDialog(tk.Toplevel):
         self._sv_stream  = tk.StringVar()
         self._sv_store   = tk.StringVar(value=rp._sv_store.get()   if rp else "Default")
         self._sv_csv     = tk.StringVar()
+        self._sv_insecure = tk.BooleanVar(value=True)  # allow self-signed cert
 
         self._build()
 
@@ -3010,6 +3042,13 @@ class PushDialog(tk.Toplevel):
 
         _row(s1, "Username", self._sv_user, 18)
         _row(s1, "Password", self._sv_pass, 18, show="*")
+        sec_f = tk.Frame(s1, bg=C_PANEL)
+        sec_f.pack(fill="x", padx=10, pady=2)
+        tk.Checkbutton(sec_f, text="Allow self-signed certificate (insecure — verify off)",
+                       variable=self._sv_insecure, onvalue=True, offvalue=False,
+                       bg=C_PANEL, fg=C_INTENT, selectcolor=C_CARD,
+                       activebackground=C_PANEL, font=("Segoe UI", 8, "bold"), cursor="hand2").pack(side="left")
+        tk.Label(sec_f, text="  (uncheck for production with valid cert)", font=("Segoe UI", 7), bg=C_PANEL, fg=C_SUBTEXT).pack(side="left", padx=4)
 
         conn_f = tk.Frame(s1, bg=C_PANEL)
         conn_f.pack(fill="x", padx=10, pady=(2, 8))
@@ -3203,10 +3242,8 @@ class PushDialog(tk.Toplevel):
         self._stream_cb.configure(state="disabled")
 
         def _worker():
-            # Fixed connection profile: HTTPS on the corporate port with cert
-            # verification disabled (self-signed corporate cert). The SSL /
-            # Verify cert options were removed from the UI.
-            client = CoveritySOAPClient(host, port, user, pw)
+            verify = not self._sv_insecure.get()
+            client = CoveritySOAPClient(host, port, user, pw, verify_ssl=verify)
             ok, msg = client.test_connection()
 
             def _done():

@@ -79,7 +79,8 @@ def _get_func_name(node) -> Optional[str]:
 def build_symbol_index(src_root: str, language: str = 'c') -> Dict[str, List[FunctionEntry]]:
     """
     Scan all C/C++ files under src_root and return a combined function index.
-    Results are cached per src_root+language.
+    Results are cached per src_root+language. Skips files >500KB and handles
+    parse errors gracefully to avoid stalls on large/generated files.
     """
     cache_key = f"{src_root}::{language}"
     if cache_key in _INDEX_CACHE:
@@ -88,12 +89,22 @@ def build_symbol_index(src_root: str, language: str = 'c') -> Dict[str, List[Fun
     combined: Dict[str, List[FunctionEntry]] = {}
     lang_key = language.lower()
     extensions = ('.c', '.h', '.cpp', '.hpp', '.cxx', '.cc', '.C')
+    skipped_large = 0
 
     for root, _dirs, files in os.walk(src_root):
+        # Skip common build/output dirs that bloat indexing
+        _dirs[:] = [d for d in _dirs if d not in ('.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target', 'node_modules', '.venv', 'venv', 'dist')]
         for fname in files:
             if not fname.endswith(extensions):
                 continue
             full = os.path.join(root, fname)
+            # Skip very large files (generated)
+            try:
+                if os.path.getsize(full) > 500_000:
+                    skipped_large += 1
+                    continue
+            except Exception:
+                pass
             file_lang = 'cpp' if fname.endswith(('.cpp', '.hpp', '.cxx', '.cc')) else lang_key
             try:
                 entries = _scan_file(full, file_lang)

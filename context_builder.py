@@ -28,7 +28,7 @@ def _build_callsite_index(src_root: str) -> Tuple[List[str], Dict[str, List[Tupl
     Returns (paths, index) where `paths` is the list of normalized file paths and
     `index[func]` holds (path_id, line) tuples. Building this once per src_root
     replaces the old per-defect full-tree walk, which was the main cause of the
-    tool appearing stuck on large reports.
+    tool appearing stuck on large reports. Skips build/output dirs and large files.
     """
     cached = _CALLSITE_CACHE.get(src_root)
     if cached is not None:
@@ -38,10 +38,18 @@ def _build_callsite_index(src_root: str) -> Tuple[List[str], Dict[str, List[Tupl
     index: Dict[str, List[Tuple[int, int]]] = {}
     pat = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
     for root, _dirs, files in os.walk(src_root):
+        # Skip build/output/VC dirs that bloat scanning
+        _dirs[:] = [d for d in _dirs if d not in ('.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target', 'node_modules', '.venv', 'venv', 'dist', '.idea', '.vscode')]
         for f in files:
             if not f.endswith(('.c', '.cpp', '.h', '.hpp', '.C', '.cxx')):
                 continue
             full = os.path.normpath(os.path.join(root, f))
+            # Skip very large files
+            try:
+                if os.path.getsize(full) > 500_000:
+                    continue
+            except Exception:
+                pass
             try:
                 content = _read_file(full)
             except Exception:

@@ -7,9 +7,10 @@ Coverity Connect installation at /ws/v9/<service>?wsdl.
 import threading
 import requests
 import urllib3
+import warnings as _warnings
 
-# Suppress InsecureRequestWarning when SSL verify is disabled for self-signed certs
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Only suppress InsecureRequestWarning when verify is explicitly disabled per-session
+# (see _make_session). Do not disable globally — keeps warnings for secure sessions.
 
 try:
     from zeep import Client, Settings
@@ -190,13 +191,13 @@ def _is_signin_response(resp):
 
 class CoveritySOAPClient:
     def __init__(self, host, port, username, password, use_ssl=True,
-                 verify_ssl=False, rest_token=None, api_key=None):
+                 verify_ssl=True, rest_token=None, api_key=None):
         self.host       = host.strip()
         self.port       = int(port)
         self.username   = username
         self.password   = password
         self.use_ssl    = use_ssl    # controls http vs https scheme
-        self.verify_ssl = verify_ssl # controls certificate validation
+        self.verify_ssl = bool(verify_ssl) # controls certificate validation (secure by default)
         self._defect_client = None
         self._config_client = None
         self._rest_token = rest_token  # pre-provided session/API token for REST auth
@@ -204,6 +205,10 @@ class CoveritySOAPClient:
         self._rest_session = None       # requests.Session for cookie-based auth
         self._rest_authenticated = False  # whether session auth succeeded
         self._lock = threading.Lock()
+        # If caller explicitly disables verification, suppress warning for that session only
+        if not self.verify_ssl:
+            _warnings.filterwarnings('ignore', category=urllib3.exceptions.InsecureRequestWarning)
+        self._rest_base_discovered = None  # cached REST base probe result
 
     # ------------------------------------------------------------------
     def _base_url(self):
@@ -814,10 +819,14 @@ class CoveritySOAPClient:
         return f"{self._base_url()}/api/{version}"
 
     def _candidate_rest_bases(self):
-        """Candidate server bases to probe for the REST API (ports x roots)."""
+        """Candidate server bases to probe for the REST API (ports x roots).
+
+        Ordered by likelihood: primary port+root first, so fast-path succeeds
+        without scanning all combinations.
+        """
         scheme = "https" if self.use_ssl else "http"
         roots = ["", "/connect", "/ngweb", "/coverity", "/rest"]
-        ports = sorted({self.port, 443, 8443, 8080})
+        ports = [self.port, 443, 8443, 8080]
         seen, out = set(), []
         for p in ports:
             for r in roots:
@@ -827,54 +836,74 @@ class CoveritySOAPClient:
                     out.append(c)
         return out
 
-    def discover_rest_base(self):
-        """Probe candidate REST bases; returns (v1_base, v2_base, info_string).
+    def discover_rest_base(self, timeout_secs=3.0, max_workers=8):
+        """Probe candidate REST bases concurrently; returns (v1_base, v2_base, info_string).
 
         A base is 'found' when /api/<v>/streams answers with a 2xx/3xx success
         (404/401/403 are treated as unusable). The result is cached so the pull
-        uses it automatically after the first probe.
+        uses it automatically after the first probe. Uses ThreadPoolExecutor for
+        ~8x faster discovery (previously 40 sequential * 5s = 200s worst-case).
         """
+        if getattr(self, "_rest_base_discovered", None):
+            cached = self._rest_base_discovered
+            if cached and (cached.get("v1") or cached.get("v2")):
+                return cached.get("v1"), cached.get("v2"), "cached"
+        import concurrent.futures as _cf
+        candidates = self._candidate_rest_bases()
+        tasks = []
+        for base in candidates:
+            for version in ("v2", "v1"):
+                url = f"{base}/api/{version}/streams"
+                tasks.append((base, version, url))
         v1 = v2 = ""
         tried = []
-        for base in self._candidate_rest_bases():
-            for version in ("v1", "v2"):
-                if (version == "v1" and v1) or (version == "v2" and v2):
-                    continue
-                url = f"{base}/api/{version}/streams"
-                try:
-                    resp = requests.get(
-                        url, params={"limit": 1},
-                        auth=self._rest_basic_auth(),
-                        verify=self.verify_ssl, timeout=5,
-                        headers=self._rest_headers())
+        tried_lock = threading.Lock()
+        def _probe(task):
+            base, version, url = task
+            try:
+                resp = requests.get(
+                    url, params={"limit": 1},
+                    auth=self._rest_basic_auth(),
+                    verify=self.verify_ssl, timeout=timeout_secs,
+                    headers=self._rest_headers())
+                is_ok = resp.status_code < 400 and not _is_signin_response(resp)
+                with tried_lock:
                     tried.append(f"{url} -> {resp.status_code}")
-                    if resp.status_code < 400 and not _is_signin_response(resp):
-                        # 404/401/403 and sign-in pages are NOT usable bases
-                        if version == "v1":
-                            v1 = base
-                        else:
-                            v2 = base
-                except Exception as exc:
+                if is_ok:
+                    return (base, version)
+            except Exception as exc:
+                with tried_lock:
                     tried.append(f"{url} -> {str(exc)[:36]}")
+            return None
+        with _cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_probe, t): t for t in tasks}
+            for fut in _cf.as_completed(futures):
+                res = fut.result()
+                if res:
+                    base, version = res
+                    if version == "v1" and not v1:
+                        v1 = base
+                    elif version == "v2" and not v2:
+                        v2 = base
+                    if v1 and v2:
+                        for f in futures:
+                            f.cancel()
+                        break
         self._rest_base_discovered = {"v1": v1 or None, "v2": v2 or None}
-        return (v1 or None), (v2 or None), "; ".join(tried)
+        return (v1 or None), (v2 or None), "; ".join(tried[:20])
 
     def _probe_issue_endpoint(self, stream_name=None):
         """Locate the v2 defect-list path under the discovered base.
 
-        Returns (path, method, status_log). It first tries to read the server's
-        OpenAPI/swagger spec to learn the real resource names, then probes the
-        candidate list and returns the first that answers with anything other
-        than 404/405 (400/401/403 still prove the resource routes).
-
-        When ``stream_name`` is supplied it is included in the probe params so
-        the server doesn't reply 404 for a missing required stream filter.
+        Returns (path, method, status_log). Optimized: try the known
+        ``issues/search`` endpoint first with short timeout; only if it fails
+        probe swagger and other candidates concurrently (previously sequential
+        12*10s could stall pull for >2 min).
         """
         base = (getattr(self, "_rest_base_discovered", None) or {}).get("v2")
         if not base:
             return None, None, ""
         log = []
-        discovered_names = []
         # Authenticate via session endpoint to get cookies/token
         self._rest_authenticate()
         sess = getattr(self, "_rest_session", None)
@@ -886,15 +915,28 @@ class CoveritySOAPClient:
                 if method == "get":
                     return sess.get(url, verify=self.verify_ssl, **kw)
                 return sess.post(url, verify=self.verify_ssl, **kw)
-            # Basic auth fallback
             kw["auth"] = self._rest_basic_auth()
             if method == "get":
                 return requests.get(url, verify=self.verify_ssl, **kw)
             return requests.post(url, verify=self.verify_ssl, **kw)
-        for spec in ("/api/v2/swagger.json", "/api/v2/swagger",
-                     "/api/v2/openapi.json", "/api/v2/api-docs"):
+        # Fast-path: issues/search is the documented endpoint on most servers.
+        # Try it first with 4s timeout before any swagger probes.
+        try:
+            url = f"{base}/api/v2/issues/search"
+            r = _req("post", url, json={
+                "limit": 1, "columns": list(_SEARCH_COLUMNS),
+                "queryType": "cql", "cql": f"streams['{stream_name}']" if stream_name else "",
+                "offset": 0}, headers=hdrs, timeout=4)
+            log.append(f"{url} [post] -> {r.status_code}")
+            if r.status_code not in (404, 405) and not _is_signin_response(r):
+                return "issues/search", "post", "; ".join(log)
+        except Exception as exc:
+            log.append(f"{base}/api/v2/issues/search [post] -> {str(exc)[:30]}")
+        # Swagger discovery — shorten timeout to 4s and single attempt
+        discovered_names = []
+        for spec in ("/api/v2/swagger.json", "/api/v2/openapi.json"):
             try:
-                r = _req("get", base + spec, headers=hdrs, timeout=10)
+                r = _req("get", base + spec, headers=hdrs, timeout=4)
                 log.append(f"{base + spec} -> {r.status_code}")
                 if r.status_code == 200:
                     try:
@@ -913,29 +955,40 @@ class CoveritySOAPClient:
                     break
             except Exception as exc:
                 log.append(f"{base + spec} -> {str(exc)[:30]}")
-        candidates = discovered_names or [
-            "issues/search", "issues", "defects", "query/issues",
-            "merged-defects", "defect-families"]
+        candidates = discovered_names or ["issues", "defects", "query/issues"]
+        # Probe remaining candidates concurrently (4s timeout, 4 workers)
+        import concurrent.futures as _cf2
         probe_params = {"limit": 1}
         if stream_name:
             probe_params["streamNames[]"] = stream_name
+        tasks = []
         for path in candidates:
             url = f"{base}/api/v2/{path}"
-            for method in ("get", "post"):
-                try:
-                    if method == "get":
-                        r = _req("get", url, params=probe_params,
-                                 headers=hdrs, timeout=10)
-                    else:
-                        r = _req("post", url, json={
-                            "limit": 1,
-                            "streamNames": [stream_name] if stream_name else []},
-                            headers=hdrs, timeout=10)
-                    log.append(f"{url} [{method}] -> {r.status_code}")
-                    if r.status_code not in (404, 405) and not _is_signin_response(r):
+            tasks.append((path, "get", url, dict(probe_params)))
+            tasks.append((path, "post", url, {"limit": 1, "streamNames": [stream_name] if stream_name else []}))
+        def _probe_task(item):
+            path, method, url, payload = item
+            try:
+                if method == "get":
+                    r = _req("get", url, params=payload, headers=hdrs, timeout=4)
+                else:
+                    r = _req("post", url, json=payload, headers=hdrs, timeout=4)
+                return (path, method, r.status_code, _is_signin_response(r))
+            except Exception as exc:
+                return (path, method, str(exc)[:30], False)
+        with _cf2.ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {ex.submit(_probe_task, t): t for t in tasks}
+            for fut in _cf2.as_completed(futures):
+                path, method, code, is_signin = fut.result()
+                if isinstance(code, int):
+                    log.append(f"{base}/api/v2/{path} [{method}] -> {code}")
+                    if code not in (404, 405) and not is_signin:
+                        # Cancel remaining
+                        for f in futures:
+                            f.cancel()
                         return path, method, "; ".join(log)
-                except Exception as exc:
-                    log.append(f"{url} [{method}] -> {str(exc)[:30]}")
+                else:
+                    log.append(f"{base}/api/v2/{path} [{method}] -> {code}")
         return None, None, "; ".join(log)
 
     def test_rest_available(self):

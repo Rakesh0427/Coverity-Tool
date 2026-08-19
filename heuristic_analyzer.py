@@ -411,21 +411,67 @@ def _lines(code: str) -> List[str]:
     return code.splitlines()
 
 
+# Semgrep per-file cache and enable flag — semgrep is heavy (2-30s per file) and
+# caused the tool to appear stuck. Default OFF; enable via COVERITY_ENABLE_SEMGREP=1.
+_SEMGREP_CACHE: dict = {}
+_SEMGREP_AVAILABLE: Optional[bool] = None
+
+def _semgrep_enabled() -> bool:
+    if os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip() not in ("1", "true", "yes", "on"):
+        return False
+    global _SEMGREP_AVAILABLE
+    if _SEMGREP_AVAILABLE is None:
+        try:
+            import shutil
+            if shutil.which("semgrep") is None:
+                _SEMGREP_AVAILABLE = False
+            else:
+                # Quick probe: semgrep --version must succeed within 3s
+                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=3)
+                _SEMGREP_AVAILABLE = (r.returncode == 0)
+        except Exception:
+            _SEMGREP_AVAILABLE = False
+    return bool(_SEMGREP_AVAILABLE)
+
 def _run_semgrep_check(file_path: str, defect_line: int, checker: str) -> Optional[str]:
-    """Run semgrep on the source file and return the first matching rule_id near defect_line."""
+    """Run semgrep on the source file and return the first matching rule_id near defect_line.
+
+    Cached per-file (first defect in a file pays the cost, rest hit cache).
+    Disabled by default — set COVERITY_ENABLE_SEMGREP=1 to enable. Previously
+    this ran per-defect and made 1000-defect runs take 30+ minutes.
+    """
     if not file_path or not os.path.isfile(file_path):
+        return None
+    if not _semgrep_enabled():
+        return None
+    # Check cache: file_path -> list of hits
+    cached = _SEMGREP_CACHE.get(file_path)
+    if cached is not None:
+        # cached is list of (line, check_id) or None for no hits / failed
+        if not cached:
+            return None
+        for hit_line, check_id in cached:
+            if abs(hit_line - defect_line) <= 3:
+                return check_id
         return None
     try:
         result = subprocess.run(
             ['semgrep', '--json', '--config', 'p/c-and-cpp', '--no-git-ignore', file_path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=10
         )
         data = json.loads(result.stdout or '{}')
+        hits = []
         for hit in data.get('results', []):
-            hit_line = hit.get('start', {}).get('line', 0)
+            hl = hit.get('start', {}).get('line', 0)
+            cid = hit.get('check_id', '')
+            if hl and cid:
+                hits.append((hl, cid))
+        _SEMGREP_CACHE[file_path] = hits
+        for hit_line, check_id in hits:
             if abs(hit_line - defect_line) <= 3:
-                return hit.get('check_id', '')
+                return check_id
     except Exception:
+        _SEMGREP_CACHE[file_path] = []
         pass
     return None
 

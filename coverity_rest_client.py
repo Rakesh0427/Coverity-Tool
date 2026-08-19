@@ -66,7 +66,7 @@ class CoverityRESTClient:
     """Minimal Coverity Connect REST API client."""
 
     def __init__(self, host, port, username, password,
-                 use_ssl=True, verify_ssl=False, auth_token=None):
+                 use_ssl=True, verify_ssl=True, auth_token=None):
         self.host = (host or "").strip()
         try:
             self.port = int(port or 443)
