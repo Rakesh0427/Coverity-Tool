@@ -21,6 +21,12 @@ so the caller falls back to its existing comment and never degrades output.
 import re
 from typing import Dict, List, Optional, Tuple
 
+# Optional AST helper (tree-sitter based); degrades to regex when unavailable.
+try:
+    from ast_analyzer import find_declaration
+except Exception:  # pragma: no cover - optional
+    find_declaration = None
+
 # Sinks whose 3rd argument (index 2) is the byte/char count.
 _COUNT_ARG_INDEX = {
     'strncpy': 2, 'strncat': 2, 'snprintf': 2, 'strlcpy': 2,
@@ -443,22 +449,96 @@ def _render_sizeof_mismatch(classification: str, checker: str, ctx: Dict, code: 
     return None
 
 
+_UNINIT_KEYWORDS = {
+    'if', 'else', 'elif', 'while', 'for', 'do', 'switch', 'case', 'break', 'continue',
+    'return', 'goto', 'sizeof', 'struct', 'union', 'enum', 'typedef', 'int', 'char',
+    'void', 'bool', 'const', 'static', 'unsigned', 'signed', 'long', 'short', 'float',
+    'double', 'true', 'false', 'NULL', 'auto', 'register', 'extern', 'volatile',
+}
+
+
+def _first_local_identifier(expr: str) -> str:
+    """Pick the most plausible local-variable name from a source expression.
+
+    Skips keywords and function-call names (an identifier directly followed by `(`),
+    so e.g. ``printf("%d", retcode)`` yields ``retcode`` rather than ``printf``.
+    """
+    if not expr:
+        return ""
+    ids = re.findall(r'([A-Za-z_][A-Za-z0-9_]*)\s*(\(|\b)', expr)
+    for name, nxt in ids:
+        if name.lower() in _UNINIT_KEYWORDS or name.startswith('_'):
+            continue
+        if nxt == '(':
+            continue  # function name, not a variable
+        return name
+    return ""
+
+
+def _uninit_usage(var: str, code: str) -> str:
+    """Describe, from the freed/surrounding code, how the indeterminate value is consumed."""
+    if var and var != 'this local':
+        if re.search(rf'\b{re.escape(var)}\s*\[', code):
+            return ("That indeterminate value is then used as an array index / offset, so the access "
+                    "target cannot be derived from the input — it can walk outside the array and read "
+                    "or write unrelated memory.")
+        if re.search(rf'\b{re.escape(var)}\b\s*(?:==|!=|<=|>=|<|>)\s*[^\n;]+', code):
+            return ("That indeterminate value then feeds a branch condition, so the path taken — and "
+                    "everything downstream of it — is nondeterministic: identical inputs can take "
+                    "different branches on successive runs.")
+        if re.search(
+            rf'\b(?:strlen|memcpy|memmove|sprintf|snprintf|strcpy|strncpy|strcat|'
+            rf'write|send|recv|read|printf|fprintf|Log)\s*\([^)]*\b{re.escape(var)}\b',
+                code):
+            return ("That indeterminate value is then passed into a string / memory / I/O routine, "
+                    "where it acts as an unvalidated length or is copied out — stale stack bytes can "
+                    "be emitted (an uninitialized-memory / information-disclosure leak) and the "
+                    "destination can be corrupted.")
+    return ("Once the value is used — as a condition, an index, a length, or something emitted into a "
+            "message or log — behavior is nondeterministic and the residual stack bytes can be "
+            "disclosed to an observer. The read has no well-defined value, so the outcome is "
+            "unreproducible.")
+
+
 def _render_uninit(classification: str, checker: str, ctx: Dict, code: str,
                    code_start_line: int, line: int, function: str) -> Optional[str]:
-    var = _normalize_var(ctx.get('var') or 'the variable')
+    """Expert-level, code-anchored UNINIT comment that names the exact variable and
+    explains how the indeterminate value is consumed. Never embeds remediation text
+    (the Proposed Fix panel carries it)."""
+    expr = _compact(_expr_at(code, line, code_start_line)) or ''
+    var = _normalize_var(ctx.get('var') or '')
+    if not var:
+        var = _first_local_identifier(expr) or 'this local'
+    loc = f"line {line} in {function}()" if (line and function) else f"{function}()"
+
     if classification == "Bug":
-        return (f"At line {line} in {function}(), `{var}` is read before being written on this "
-                f"path. Automatic (stack) variables are not zero-initialized — they hold whatever "
-                f"bytes were left in the frame — so `{var}` is indeterminate. If that value drives a "
-                f"branch, an index, a length, or is emitted (e.g. into a protocol message), behavior "
-                f"becomes nondeterministic and stale stack bytes can be exposed (information "
-                f"disclosure).")
+        ty = (ctx.get('uninit_type') or '').strip()
+        decl_line = ctx.get('uninit_decl_line') or 0
+        prior_line = ctx.get('uninit_prior_line') or 0
+        if ty and decl_line:
+            typed = f"`{var}` (declared `{ty} {var}` at line {decl_line})"
+        else:
+            typed = f"`{var}`"
+        prior_note = ""
+        if prior_line:
+            op = (ctx.get('uninit_prior') or '').strip()
+            prior_note = (f" Note that a store to `{var}` exists earlier at line {prior_line}"
+                          + (f" (`{op}`)" if op else "")
+                          + ", so the read is only unsafe on the path(s) that skip that store.")
+        expr_note = f" The flagged read is: `{expr}`." if expr else ""
+        return (f"{typed} is read at {loc} before any statement assigns it a definite value. "
+                f"Because the value lives in automatic (stack) storage, the declaration only "
+                f"reserves space in the frame — the bytes already sitting in that slot are never "
+                f"zeroed — so this read yields whatever residual values happen to be there. "
+                f"{_uninit_usage(var, code)}"
+                f"{prior_note}"
+                f"{expr_note}")
     if classification == "False positive":
         if re.search(r'\bmemset\s*\(|\bcalloc\s*\(|=\s*\{0\}|=\s*0\s*;', code):
-            return (f"The value read at line {line} in {function}() is given a definite value before "
-                    f"it is used: it is zero-initialized via `memset()`/`calloc()` or an aggregate "
-                    f"initializer, so no path consumes uninitialized stack memory. Behavior is "
-                    f"deterministic. False positive.")
+            return (f"The value read at {loc} is given a definite value before it is used: it is "
+                    f"explicitly zero-initialized via `memset()`, `calloc()`, or an aggregate `{{0}}` / "
+                    f"`= 0` initializer, so no execution path consumes uninitialized storage. Behavior "
+                    f"is deterministic — false positive.")
         return None
     return None
 
@@ -507,6 +587,86 @@ def _render_deadcode(classification: str, checker: str, ctx: Dict, code: str,
 
 
 # ---------------------------------------------------------------------------
+# Generic AST-backed renderer for checkers that have no dedicated handler yet.
+# It anchors on the flagged statement, names the involved variable (including
+# its declared type when an AST tree is available) and explains the defect
+# class in expert terms. Never changes classification/confidence.
+# ---------------------------------------------------------------------------
+_GENERIC_AST_CHECKERS = {
+    'STRING_OVERFLOW', 'TAINTED_STRING', 'WRAPPER_OVERRUN', 'BUFFER_OVERRUN',
+    'OVERRUN_ACCESS', 'NULL_RETURNS', 'NULL_DEREF', 'DOUBLE_FREE',
+    'FREE_RETURNS', 'UNINIT_CTOR', 'CHECKED_RETURN', 'MISSING_BREAK',
+    'IDENTICAL_BRANCHES', 'UNREACHABLE', 'SIGN_EXTENSION',
+}
+
+_GENERIC_IMPACT = {
+    'STRING_OVERFLOW': "a string-writing/copying operation that can run past the end of "
+                       "its destination buffer",
+    'TAINTED_STRING': "data flowing in from an untrusted boundary is used in a "
+                      "security-sensitive string or memory operation",
+    'WRAPPER_OVERRUN': "a range API reached through a wrapper lets an index/count exceed "
+                       "the wrapped buffer's bounds",
+    'BUFFER_OVERRUN': "an index or copy count can exceed the buffer's capacity and touch "
+                      "adjacent storage",
+    'OVERRUN_ACCESS': "an out-of-bounds access whose index is not proven within the "
+                      "object's bounds",
+    'NULL_RETURNS': "a routine that can return NULL, with the result dereferenced or used "
+                    "before a NULL check",
+    'NULL_DEREF': "a pointer dereferenced without proving it is non-NULL on the reaching "
+                  "path",
+    'DOUBLE_FREE': "the same allocation released more than once, corrupting the heap "
+                   "allocator",
+    'FREE_RETURNS': "a pointer to freed memory returned/used, leaving a dangling reference",
+    'UNINIT_CTOR': "a member not initialized by the constructor before it is read",
+    'CHECKED_RETURN': "an error return value that is ignored, so a failure is silently "
+                      "swallowed",
+    'MISSING_BREAK': "a switch fall-through that lets execution continue into the next "
+                     "case unintentionally",
+    'IDENTICAL_BRANCHES': "a conditional whose two arms do the same thing, indicating a "
+                          "copy/paste or logic error",
+    'UNREACHABLE': "code that cannot be reached on any execution path (dead logic or an "
+                   "inverted guard)",
+    'SIGN_EXTENSION': "a signed value widened and interpreted as unsigned, producing a "
+                      "huge size/index",
+}
+
+
+def _render_generic_ast(classification: str, checker: str, ctx: Dict, code: str,
+                        code_start_line: int, line: int, function: str) -> Optional[str]:
+    """Expert, code-anchored comment for the curated set of unimplemented checkers."""
+    if classification != "Bug":
+        return None
+    if checker not in _GENERIC_AST_CHECKERS:
+        return None
+    try:
+        expr = _compact(_expr_at(code, line, code_start_line)) or ''
+        var = _normalize_var(ctx.get('var') or '') or _first_local_identifier(expr) or ''
+        decl = None
+        if var and find_declaration is not None and ctx.get('tree') is not None:
+            try:
+                decl = find_declaration(ctx['tree'], var)
+            except Exception:
+                decl = None
+        ty = ((decl or {}).get('type_name') or '').strip()
+        dline = (decl or {}).get('declaration_line') or 0
+        if var:
+            var_ref = f"`{var}`"
+            if ty and dline:
+                var_ref += f" (declared `{ty} {var}` at line {dline})"
+        else:
+            var_ref = "the flagged value"
+        loc = f"line {line} in {function}()" if (line and function) else f"{function}()"
+        impact = _GENERIC_IMPACT.get(checker, f"a {checker} defect at this statement")
+        expr_note = f" The flagged statement is: `{expr}`." if expr else ""
+        return (f"At {loc}, {var_ref} is flagged for {impact}. Because the flagged operation "
+                f"is not defended at this site — no effective guard, bound, or error check "
+                f"resolves it on the reaching path — the finding is treated as a real "
+                f"defect.{expr_note}")
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 _CHECKER_HANDLERS = {
@@ -530,7 +690,10 @@ def render_example_comment(classification: str, checker: str, ctx: Dict,
     analyzer's existing comment. Never used to change the classification."""
     handler = _CHECKER_HANDLERS.get(checker)
     if handler is None:
-        return None
+        # No dedicated formatter yet — use the generic AST-backed renderer for the
+        # curated set of unimplemented checkers; otherwise keep the existing comment.
+        return _render_generic_ast(classification, checker, ctx, code,
+                                   code_start_line, line, function)
     try:
         return handler(classification, checker, ctx, code, code_start_line, line, function)
     except Exception:

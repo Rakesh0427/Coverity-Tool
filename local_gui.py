@@ -32,14 +32,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from html_report_parser import parse_index_only, parse_detail_page, parse_coverity_excel, write_pull_excel
 from heuristic_analyzer import analyze_defect
 from code_extractor import extract_enclosing_function, find_function_line_by_name
-from context_builder import build_defect_context
+from context_builder import build_defect_context, warm_workspace_index
 from coverity_soap_client import CoveritySOAPClient, zeep_available, CLASSIFICATION_MAP
 
 from checker_categories import (
     category_for_checker,
-    all_categories,
     group_results_by_category,
-    category_counts,
 )
 
 
@@ -60,6 +58,19 @@ C_HIGH      = "#DC2626"
 C_MED       = "#D97706"
 C_LOW       = "#16A34A"
 C_BORDER    = "#CBD5E1"
+
+# Checkers whose analysis is function-scoped and therefore still reliable when
+# the report line is 'Various' (unknown). For these we analyse the whole
+# function and cap the confidence (the comment is annotated with the 'Various'
+# caveat). Memory-safety checkers are deliberately NOT listed so that without a
+# concrete line they still route to manual review rather than guessing the wrong
+# access.
+_LINE_AGNOSTIC_CHECKERS = frozenset({
+    'CHECKED_RETURN', 'CHECKED_QRS', 'UNUSED_VALUE', 'DEADCODE', 'MISSING_BREAK',
+    'NO_BREAK', 'CONSTANT_EXPRESSION_RESULT', 'IDENTICAL_BRANCHES', 'NEGATIVE_RETURNS',
+    'SIZEOF_MISMATCH', 'ARRAY_VS_SINGLETON', 'STRING_NULL', 'SHIFT_OVERFLOW',
+    'UNREACHABLE', 'MISSING_LOCK', 'INTEGER_OVERFLOW',
+})
 C_HDR_BG    = "#1E3A5F"
 C_HDR_TEXT  = "#F1F5F9"
 
@@ -334,7 +345,7 @@ class SetupPage(Page):
                  bg=C_BG, fg=C_ACCENT).pack(pady=(0, 4))
         tk.Label(outer, text=APP_NAME,
                  font=("Segoe UI", 26, "bold"), bg=C_BG, fg=C_TEXT).pack()
-        tk.Label(outer, text="Automated defect triage for Coverity HTML reports",
+        tk.Label(outer, text="Automated defect triage for Coverity reports",
                  font=("Segoe UI", 11), bg=C_BG, fg=C_SUBTEXT).pack(pady=(2, 24))
 
         card = tk.Frame(outer, bg=C_PANEL, bd=0)
@@ -832,6 +843,20 @@ class AnalysisPage(Page):
             total = len(defects)
             q.put(("progress_start", total))
 
+            # Warm the one-time workspace index up front so the first defect does
+            # not silently stall the whole run for tens of seconds, and so the
+            # per-defect ETA below excludes this one-time indexing cost.
+            if self._src_root and os.path.isdir(self._src_root):
+                q.put(("info", "Indexing source tree once (cached for this run)…\n"))
+                _idx_t0 = time.time()
+                try:
+                    warm_workspace_index(self._src_root, self._language)
+                except Exception as exc:
+                    q.put(("warn", f"  [Index] Workspace index skipped: {exc}\n"))
+                q.put(("ready", total, time.time() - _idx_t0))
+            else:
+                q.put(("ready", total, 0.0))
+
             results = []
             out_csv = self._out_csv
 
@@ -839,7 +864,8 @@ class AnalysisPage(Page):
                 writer = csv.writer(csvf)
                 writer.writerow(["CID", "Checker", "Type", "Severity",
                                   "File", "Line", "Function",
-                                  "Classification", "Comment", "Fix", "Timestamp"])
+                                  "Classification", "Comment", "Fix", "Timestamp",
+                                  "Category"])
 
                 _log_buf = []
                 for i, defect in enumerate(defects):
@@ -873,15 +899,16 @@ class AnalysisPage(Page):
                     line_is_various   = defect.get("line_is_various", False)
                     manual_line_review = (self._input_mode == "excel"
                                           and (line <= 0 or line_is_various))
-                    # For the reviewer we may still locate the enclosing function so source
-                    # context can be shown, but the actual defect line stays untouched.
+                    # Anchor extraction to function name when available — SOAP lines can
+                    # be off from the web UI line due to SOAP v9 API limitations.
                     extract_line = line
-                    if (line <= 0 or line_is_various) and func and real_path and os.path.isfile(real_path):
+                    if func and real_path and os.path.isfile(real_path):
                         found_line = self._find_function_line(real_path, func)
                         if found_line > 0:
                             extract_line = found_line
-                            q.put(("info", f"  [Various] Located '{func}' at line {found_line} (context only)\n"))
-                        else:
+                            if line <= 0 or line_is_various:
+                                q.put(("info", f"  [Various] Located '{func}' at line {found_line}\n"))
+                        elif line <= 0 or line_is_various:
                             q.put(("warn", f"  [Various] Could not locate function '{func}' in source\n"))
 
                     if real_path and os.path.isfile(real_path):
@@ -971,20 +998,29 @@ class AnalysisPage(Page):
                     # actual defect line; otherwise run the normal code-anchored analysis.
                     analyze_error = None
                     if manual_line_review:
-                        # Excel gave no concrete line -> cannot anchor a reliable analysis.
-                        # Do not guess the line: ask the user to provide it.
-                        classification = "Needs review"
-                        comment = (
-                            f"The Excel export lists {checker} in "
-                            f"{func or filepath or '(unknown file)'} but does not include a "
-                            f"concrete defect line (reported as "
-                            f"{'Various' if line_is_various else 'missing/invalid'}). "
-                            f"Please review the source shown above and enter the actual defect "
-                            f"line number so this finding can be re-analysed."
-                        )
-                        fix = "Manual review required — provide the actual line number."
-                        confidence = 0.0
-                    else:
+                        # Excel gave no concrete line. For function-scoped checkers
+                        # (CHECKED_RETURN, UNUSED_VALUE, DEADCODE, ...) we can still
+                        # produce a reasoned verdict from the whole function — the
+                        # confidence is capped and the comment is annotated with the
+                        # 'Various' caveat. Memory-safety checkers are kept manual so
+                        # we never guess the wrong access.
+                        if (src_code and func
+                                and checker.upper() in _LINE_AGNOSTIC_CHECKERS):
+                            manual_line_review = False
+                            line = 0
+                        else:
+                            classification = "Needs review"
+                            comment = (
+                                f"The Excel export lists {checker} in "
+                                f"{func or filepath or '(unknown file)'} but does not include a "
+                                f"concrete defect line (reported as "
+                                f"{'Various' if line_is_various else 'missing/invalid'}). "
+                                f"Please review the source shown above and enter the actual defect "
+                                f"line number so this finding can be re-analysed."
+                            )
+                            fix = "Manual review required — provide the actual line number."
+                            confidence = 0.0
+                    if not manual_line_review:
                         try:
                             classification, comment, fix, confidence = analyze_defect(
                                 context, checker, events, sub_checker=type_val,
@@ -1016,7 +1052,8 @@ class AnalysisPage(Page):
 
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     writer.writerow([cid, checker, type_val, sev, filepath, line,
-                                     func, classification, comment, fix, ts])
+                                     func, classification, comment, fix, ts,
+                                     category_for_checker(checker)])
                     csvf.flush()
 
                     results.append({
@@ -1064,6 +1101,9 @@ class AnalysisPage(Page):
                     "  by checker: " + ", ".join(f"{k}: {v}" for k, v in Counter(
                         r.get("checker", "?") for r in results
                         if r.get("classification") == "Needs review").most_common(10)),
+                    "  by category: " + ", ".join(f"{k}: {v}" for k, v in Counter(
+                        category_for_checker(r.get("checker", "")) for r in results
+                        if r.get("classification") == "Needs review").most_common()),
                 ]
                 fdir = self.app._frames[SetupPage]._output_var.get().strip()
                 if not fdir or not os.path.isdir(fdir):
@@ -1087,6 +1127,23 @@ class AnalysisPage(Page):
             self._pbar_label.configure(text=f"0 / {total}   analysing...")
             self._pbar_stat.configure(text="0%   (0 / " + str(total) + " defects)")
             self._eta_str = "calculating..."
+        elif kind == "ready":
+            _, total, idx_secs = msg
+            self._pbar.stop()
+            self._pbar.configure(mode="determinate", maximum=total or 1, value=0)
+            self._pbar_label.configure(text=f"0 / {total}   analysing...")
+            self._pbar_stat.configure(text="0%   (0 / " + str(total) + " defects)")
+            # Reset the timer so the one-time indexing time is NOT counted in the
+            # per-defect ETA (otherwise the ETA starts wildly overestimated).
+            self._start_time = time.time()
+            self._eta_str = "calculating..."
+            self._pbar_time.configure(text="Elapsed  0:00:00     ETC  calculating...")
+            self._log.configure(state="normal")
+            self._log.insert("end",
+                             f"Workspace indexed in {idx_secs:.1f}s — starting per-defect analysis.\n",
+                             "ok")
+            self._log.see("end")
+            self._log.configure(state="disabled")
         elif kind == "tick":
             _, done, total, log_lines = msg
             pct = int(done / total * 100) if total else 0
@@ -1398,25 +1455,30 @@ class ResultsPage(Page):
 
     def _populate(self, results):
         self._tree.delete(*self._tree.get_children())
-        for r in results:
-            if r.get("accepted", False):
-                cls = "Accepted"
-            else:
-                cls = r.get("classification", "Needs review")
-            push_status = r.get("push_status", "")
-            push_tag    = "pushed" if push_status == "✓" else ("push_fail" if push_status == "✗" else cls)
-            conf = r.get("confidence", 0.0)
-            # Color tag based on confidence level
-            if conf >= 0.8:
-                conf_tag = "conf_high"
-            elif conf >= 0.6:
-                conf_tag = "conf_med"
-            else:
-                conf_tag = "conf_low"
-            self._tree.insert("", "end", tags=(push_tag, conf_tag), values=(
-                r["cid"],
-                cls,
-            ))
+        groups = group_results_by_category(results)
+        for cat, items in groups.items():
+            parent = self._tree.insert("", "end", iid=f"cat-{_iid_safe(cat)}",
+                                       values=("", f"{cat} ({len(items)})"),
+                                       tags=("cat_header",))
+            for r in items:
+                if r.get("accepted", False):
+                    cls = "Accepted"
+                else:
+                    cls = r.get("classification", "Needs review")
+                push_status = r.get("push_status", "")
+                push_tag = "pushed" if push_status == "✓" else ("push_fail" if push_status == "✗" else cls)
+                conf = r.get("confidence", 0.0)
+                # Color tag based on confidence level
+                if conf >= 0.8:
+                    conf_tag = "conf_high"
+                elif conf >= 0.6:
+                    conf_tag = "conf_med"
+                else:
+                    conf_tag = "conf_low"
+                self._tree.insert(parent, "end", tags=(push_tag, conf_tag), values=(
+                    r["cid"],
+                    cls,
+                ))
 
     def _update_summary(self, results):
         for w in self._summary_f.winfo_children():
@@ -1452,6 +1514,14 @@ class ResultsPage(Page):
                 side="left", padx=(8, 0))
 
     def _filter(self, label):
+        self._active_cls = label
+        self._apply_filters()
+
+    def _filter_cat(self, category):
+        self._active_cat = category
+        self._apply_filters()
+
+    def _apply_filters(self, _event=None):
         # Clear previous selection and panels
         self._tree.selection_remove(*self._tree.selection())
         self._sel_idx = None
@@ -1476,13 +1546,17 @@ class ResultsPage(Page):
         self._code_box.configure(state="disabled")
         self._code_fname_lbl.configure(text="")
 
-        if label == "All":
-            self._populate(self._all_results)
-        elif label == "Accepted":
-            self._populate([r for r in self._all_results if r.get("accepted", False)])
-        else:
-            self._populate([r for r in self._all_results
-                            if not r.get("accepted", False) and r.get("classification") == label])
+        results = self._all_results
+        if self._active_cls == "Accepted":
+            results = [r for r in results if r.get("accepted", False)]
+        elif self._active_cls != "All":
+            results = [r for r in results
+                       if not r.get("accepted", False)
+                       and r.get("classification") == self._active_cls]
+        if self._active_cat != "All":
+            results = [r for r in results
+                       if category_for_checker(r.get("checker", "")) == self._active_cat]
+        self._populate(results)
 
     def _sort(self, col):
         data = [(self._tree.set(k, col), k)
@@ -1492,19 +1566,30 @@ class ResultsPage(Page):
             self._tree.move(k, "", idx)
 
     def _select_by_id(self, cid):
-        for child in self._tree.get_children():
-            vals = self._tree.item(child)["values"]
-            if vals and vals[0] == cid:
-                self._tree.selection_set(child)
-                self._tree.see(child)
-                self._on_select()
-                return
+        def _walk(parent=""):
+            for child in self._tree.get_children(parent):
+                vals = self._tree.item(child)["values"]
+                if vals and vals[0] == cid:
+                    return child
+                found = _walk(child)
+                if found:
+                    return found
+            return None
+        item = _walk()
+        if item:
+            self._tree.selection_set(item)
+            self._tree.see(item)
+            self._on_select()
 
     def _on_select(self, _event=None):
         sel = self._tree.selection()
         if not sel:
             return
         child = sel[0]
+        # Category header row — expand/collapse it rather than treat as a defect.
+        if self._tree.parent(child) == "":
+            self._toggle_category(child)
+            return
         shown_cid = self._tree.item(child)["values"][0]
         defect = next((r for r in self._all_results if r["cid"] == shown_cid), None)
         if not defect:
@@ -1521,7 +1606,8 @@ class ResultsPage(Page):
 
         self._detail_id.configure(state="normal")
         self._detail_id.delete(1.0, tk.END)
-        self._detail_id.insert(tk.END, f"ID {defect['cid']}  —  {defect['checker']}")
+        cat = category_for_checker(defect.get("checker", ""))
+        self._detail_id.insert(tk.END, f"ID {defect['cid']}  —  {defect['checker']}  ({cat})")
         self._detail_id.configure(state="disabled")
         line_display = "Various" if defect.get("line_is_various") else defect.get("line", "")
         conf = defect.get('confidence', 0.0)
@@ -1667,10 +1753,24 @@ class ResultsPage(Page):
         sel = self._tree.selection()
         if not sel:
             return
-        shown_cid = self._tree.item(sel[0])["values"][0]
+        item = sel[0]
+        # Category header row — toggle expand/collapse instead of opening a defect.
+        if self._tree.parent(item) == "":
+            self._toggle_category(item)
+            return
+        shown_cid = self._tree.item(item)["values"][0]
         defect = next((r for r in self._all_results if r["cid"] == shown_cid), None)
         if defect:
             self._open_detail_window(defect)
+
+    def _toggle_category(self, item):
+        try:
+            open_state = bool(self._tree.item(item, "open"))
+        except tk.TclError:
+            return
+        self._tree.item(item, open=(not open_state))
+        self._tree.selection_remove(*self._tree.selection())
+        self._sel_idx = None
 
     def _accept(self):
         if not self._sel_idx:
@@ -1784,7 +1884,7 @@ class ResultsPage(Page):
 
         header = ["CID", "Checker", "File", "Line",
                   "FinalClassification", "FinalComment", "Fix",
-                  "Reviewer", "Timestamp", "Status"]
+                  "Reviewer", "Timestamp", "Status", "Category"]
 
         status = "Accepted" if accepted else "Overridden"
         new_row = {
@@ -1798,6 +1898,7 @@ class ResultsPage(Page):
             "Reviewer": reviewer,
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Status": status,
+            "Category": category_for_checker(defect.get("checker", "")),
         }
 
         # Load any existing rows keyed by CID so we keep exactly ONE decision
@@ -2258,6 +2359,7 @@ class PullDialog(tk.Toplevel):
         self._sv_stream  = tk.StringVar()
         self._sv_limit   = tk.StringVar(value="5000")
         self._sv_save    = tk.StringVar()
+        self._sv_use_rest = tk.BooleanVar(value=True)  # fix current lines via Connect REST API
         self._set_save_path("", out_default)
 
         self._build()
@@ -2396,6 +2498,21 @@ class PullDialog(tk.Toplevel):
             cursor="hand2", state="normal")
         self._close_btn.pack(side="left", padx=(10, 0))
 
+        self._use_rest_chk = tk.Checkbutton(
+            pull_f, text="Fix current lines via Connect REST API",
+            variable=self._sv_use_rest, onvalue=True, offvalue=False,
+            bg=C_BG, fg=C_SUBTEXT, selectcolor=C_CARD,
+            activebackground=C_BG, activeforeground=C_TEXT,
+            font=("Segoe UI", 9), relief="flat", bd=0, cursor="hand2")
+        self._use_rest_chk.pack(side="left", padx=(14, 0))
+        self._test_rest_btn = tk.Button(
+            pull_f, text="Test REST", command=self._test_rest,
+            bg=C_CARD, fg=C_ACCENT, relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+            cursor="hand2", activebackground=C_BORDER,
+            state="disabled")
+        self._test_rest_btn.pack(side="left", padx=(6, 0))
+
         self._prog = ttk.Progressbar(body, mode="determinate", maximum=100)
         self._prog.pack(fill="x", padx=20, pady=(6, 2))
 
@@ -2488,13 +2605,18 @@ class PullDialog(tk.Toplevel):
         self._log_insert("warn", "Testing connection…\n")
 
         def _worker():
-            client = CoveritySOAPClient(host, port, user, pw)
+            # Allow optional pre-supplied REST token / API key via env vars
+            rest_tok = os.environ.get("COVERITY_REST_TOKEN")
+            rest_key = os.environ.get("COVERITY_API_KEY")
+            client = CoveritySOAPClient(host, port, user, pw,
+                rest_token=rest_tok, api_key=rest_key)
             ok, msg = client.test_connection()
 
             def _done():
                 self._test_btn.configure(state="normal")
                 if ok:
                     self._client = client
+                    self._test_rest_btn.configure(state="normal")
                     self._load_projects()
                 else:
                     self._conn_lbl.configure(text=f"✗ {msg}", fg=C_BUG)
@@ -2576,6 +2698,31 @@ class PullDialog(tk.Toplevel):
         else:
             self._pull_btn.configure(state="disabled")
 
+    def _test_rest(self):
+        """Probe candidate REST API bases and report what the server exposes."""
+        if not self._client:
+            self._log_insert("error", "Connect to the server first.\n")
+            return
+        self._log_insert("warn", "Probing REST API endpoints (may take a moment)…\n")
+
+        def _worker():
+            try:
+                v1, v2, info = self._client.discover_rest_base()
+                epath, emethod, elog = self._client._probe_issue_endpoint(self._sv_stream.get())
+                found = bool(v1 or v2)
+                ep = (f"  defect endpoint: /api/v2/{epath} via {emethod}\n"
+                      if epath and emethod else "  (no defect endpoint auto-detected)\n")
+                detail = f"{info}\n  {elog}\n"
+                msg = (f"✓ REST API found — v1={v1 or '-'}  v2={v2 or '-'}\n{ep}"
+                       if found else "✗ No REST endpoint responded.\n")
+                self.after(0, lambda: self._log_insert(
+                    "ok" if found else "error", msg + f"    {detail}\n"))
+            except Exception as exc:
+                self.after(0, lambda: self._log_insert(
+                    "error", f"REST probe error: {exc}\n"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
         
 
     # ------------------------------------------------------------------ pulling
@@ -2629,6 +2776,36 @@ class PullDialog(tk.Toplevel):
             self._q.put(("tick", 90, f"Fetched {len(defects)} defects. Writing Excel…\n"))
             self._q.put(("info", f"  {summary}\n"))
 
+            # Optional: overlay the defect's CURRENT line from the Connect REST
+            # API (the web UI's authoritative line, e.g. after the code moved).
+            if self._sv_use_rest.get():
+                try:
+                    from coverity_rest_client import CoverityRESTClient, apply_rest_lines
+                    rc = CoverityRESTClient(
+                        self._sv_host.get().strip(), self._sv_port.get().strip(),
+                        self._sv_user.get().strip(), self._sv_pass.get(),
+                        auth_token=os.environ.get("COVERITY_REST_TOKEN"))
+                    ok, msg = rc.login()
+                    if ok:
+                        if stream != self._client.ALL_STREAMS:
+                            streams_for_rest = [stream]
+                        else:
+                            streams_for_rest = (self._client.get_streams_for_project(project)
+                                                or [stream])
+                        cid_map = {}
+                        for st in streams_for_rest:
+                            cid_map.update(rc.fetch_defect_lines(st, limit=limit))
+                        rest_fixed = apply_rest_lines(defects, cid_map)
+                        self._q.put(("info",
+                                     f"REST current-line correction: {rest_fixed}/{len(defects)} "
+                                     f"lines updated.\n"))
+                    else:
+                        self._q.put(("warn",
+                                     f"REST API unavailable ({msg}) — keeping SOAP line numbers.\n"))
+                    rc.close()
+                except Exception as exc:
+                    self._q.put(("warn", f"REST line correction skipped: {exc}\n"))
+
             # Write a plain-text log alongside the Excel for post-pull diagnosis.
             log_path = out_path.replace(".xlsx", "_pull_log.txt")
             try:
@@ -2638,10 +2815,36 @@ class PullDialog(tk.Toplevel):
                     _lf.write(f"Stream : {stream}\n")
                     _lf.write(f"Defects: {len(defects)}\n")
                     _lf.write(f"{summary}\n\n")
+                    # Dump raw SOAP field values for the first defect only.
+                    first = defects[0] if defects else {}
+                    sd_probe   = first.get("_sd_probe", {})
+                    inst_probe = first.get("_inst_probe", {})
+                    if sd_probe:
+                        _lf.write("\nSOAP streamDefectDataObj fields (first CID):\n")
+                        for k, v in sorted(sd_probe.items()):
+                            _lf.write(f"  sd.{k} = {v!r}\n")
+                    if inst_probe:
+                        _lf.write("\nSOAP defectInstanceDataObj fields (first CID):\n")
+                        for k, v in sorted(inst_probe.items()):
+                            _lf.write(f"  inst.{k} = {v!r}\n")
+                    if sd_probe or inst_probe:
+                        _lf.write("\n")
+
                     for d in defects:
-                        _lf.write(f"  CID={d['cid']} line={d.get('line',0)} "
-                                  f"events={len(d.get('events',[]))} "
-                                  f"file={d.get('file','')}\n")
+                        _lf.write(
+                            f"  CID={d['cid']} FINAL={d.get('line',0)} "
+                            f"merged={d.get('_merged_line','?')} "
+                            f"inst={d.get('_inst_line_val','?')} "
+                            f"main_ev={d.get('_main_event_line','?')} "
+                            f"last_ev={d.get('_last_event_line','?')} "
+                            f"n_inst={d.get('_n_instances','?')} "
+                            f"n_ev={len(d.get('events',[]))}\n"
+                        )
+                        for ev in d.get("events", [])[:5]:
+                            _lf.write(f"      ev step={ev.get('step')} "
+                                      f"main={ev.get('main')} "
+                                      f"line={ev.get('line')} "
+                                      f"tag={ev.get('type') or ev.get('tag')}\n")
             except Exception:
                 pass
 

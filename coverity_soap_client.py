@@ -81,19 +81,116 @@ def _line_from_events(events):
     """Derive the defect's main line from its event trace."""
     if not events:
         return 0
-    # Prefer the event explicitly marked as the defect's main event.
-    for ev in events:
-        if ev.get("main"):
-            line = ev.get("line", 0)
-            if line:
-                return line
-    # Otherwise use the last event in the trace (highest step number).
-    last = max(events, key=lambda e: e.get("step", 0))
-    return last.get("line", 0)
+    # Prefer the defect's main event(s) with a real line, taking the one with the
+    # highest step number (a trace can have several event-sets; the sink is the
+    # latest main event).
+    mains = [e for e in events if e.get("main") and e.get("line")]
+    if mains:
+        return max(mains, key=lambda e: e.get("step", 0)).get("line", 0)
+    # Otherwise prefer an event that actually carries a line, largest step first.
+    with_line = [e for e in events if e.get("line")]
+    if not with_line:
+        return 0
+    return max(with_line, key=lambda e: e.get("step", 0)).get("line", 0)
+
+
+# One-shot diagnostic captures for the pull log: the raw SOAP object attributes of
+# the first merged defect (line==0) and the first defect instance (no acceptable
+# lineNumber). Lets a failing pull reveal the real server field names.
+_PULL_DIAG_MERGED_ATTRS = None
+_PULL_DIAG_INSTANCE_ATTRS = None
+
+
+def _rest_defect_from_issue(issue, is_v1=False):
+    """Map a REST issue/defect JSON object to the pipeline defect dict.
+
+    ``is_v1`` marks the older GET /api/v1/defects shape (no embedded events).
+    """
+    filepath = str(issue.get("mainEventFilePath") or issue.get("filePathname") or "")
+    func     = str(issue.get("functionDisplayName") or "")
+    line = 0
+    try:
+        line = int(issue.get("mainEventLineNumber") or issue.get("lineNumber") or 0)
+    except (TypeError, ValueError):
+        line = 0
+    events = []
+    if not is_v1:
+        for ev in (issue.get("events") or []):
+            if not isinstance(ev, dict):
+                continue
+            events.append({
+                "step": int(ev.get("eventNumber") or ev.get("stepNumber") or 0),
+                "type": str(ev.get("eventTag") or ev.get("eventType") or ""),
+                "description": str(ev.get("eventDescription") or ev.get("description") or ""),
+                "file": str(ev.get("filePathname") or ev.get("filePath") or filepath),
+                "line": int(ev.get("lineNumber") or ev.get("eventLineNumber") or 0),
+                "main": bool(ev.get("main") or ev.get("isMain") or False),
+            })
+    return {
+        "checker": str(issue.get("checkerName") or ""),
+        "type": str(issue.get("displayType")
+                    or issue.get("checkerSubcategoryLongDescription") or ""),
+        "severity": str(issue.get("displayImpact") or ""),
+        "file": filepath,
+        "line": line,
+        "function": func,
+        "events": events,
+        "_line_src": "rest",
+    }
+
+
+# Column names requested from /api/v2/issues/search (tabular response).
+# Requesting exactly these names lets us reuse _rest_defect_from_issue
+# unchanged.
+_SEARCH_COLUMNS = [
+    "cid", "checkerName", "displayType", "displayImpact",
+    "mainEventFilePath", "mainEventLineNumber", "functionDisplayName",
+]
+
+
+def _issues_search_items(data):
+    """Map an /api/v2/issues/search response to (items, totalRows).
+
+    The search endpoint returns ``{"offset":..., "totalRows":N,
+    "columns":[{name:...}, ...], "rows":[[v1, v2, ...], ...]}`` where
+    each row is positional. Zip rows with column names to rebuild dicts.
+    """
+    if not isinstance(data, dict):
+        return [], None
+    cols = []
+    for c in (data.get("columns") or []):
+        if isinstance(c, dict):
+            cols.append(str(c.get("name") or c.get("id") or ""))
+        else:
+            cols.append(str(c))
+    items = []
+    for row in (data.get("rows") or []):
+        if isinstance(row, (list, tuple)):
+            items.append(dict(zip(cols, row)))
+        elif isinstance(row, dict):
+            items.append(row)
+    return items, data.get("totalRows")
+
+
+def _is_signin_response(resp):
+    """Coverity answers unauthenticated REST calls with HTTP 200 and its
+    Sign-in page JSON (cspNonce/availableSamlSsoConfigurations/...). Treat
+    such responses as unusable instead of a successful API answer."""
+    try:
+        body = resp.json()
+    except Exception:
+        text = (resp.text or "")
+        return "Sign in" in text[:400] or "cspNonce" in text[:400]
+    if isinstance(body, dict):
+        return bool(body.get("cspNonce")
+                    or body.get("availableSamlSsoConfigurations")
+                    or body.get("ldapConfigured"))
+    return False
 
 
 class CoveritySOAPClient:
-    def __init__(self, host, port, username, password, use_ssl=True, verify_ssl=False):
+    def __init__(self, host, port, username, password, use_ssl=True,
+                 verify_ssl=False, rest_token=None, api_key=None):
         self.host       = host.strip()
         self.port       = int(port)
         self.username   = username
@@ -102,6 +199,10 @@ class CoveritySOAPClient:
         self.verify_ssl = verify_ssl # controls certificate validation
         self._defect_client = None
         self._config_client = None
+        self._rest_token = rest_token  # pre-provided session/API token for REST auth
+        self._api_key = api_key         # optional API key sent as X-API-Key header
+        self._rest_session = None       # requests.Session for cookie-based auth
+        self._rest_authenticated = False  # whether session auth succeeded
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -291,26 +392,30 @@ class CoveritySOAPClient:
         last_err = None
 
         # pageSpec shapes to try, most standard first.
+        # NOTE: exact element casing matters ("sortAscending", "pageSize",
+        # "startIndex", "sortField"). This server's WSDL requires sortAscending,
+        # so all paged variants include it.
         shapes = [
-            ("standard",         lambda ps, si: {"pageSize": ps,
-                                                 "sortAscending": True,
-                                                 "startIndex": si}),
-            ("with-sortField",   lambda ps, si: {"pageSize": ps,
-                                                 "sortAscending": True,
-                                                 "sortField": "cid",
-                                                 "startIndex": si}),
-            ("no-sortAscending", lambda ps, si: {"pageSize": ps,
-                                                 "startIndex": si}),
-            ("pageSize-only",    lambda ps, si: {"pageSize": ps}),
+            ("standard",  lambda ps, si: {"pageSize": ps, "sortAscending": True, "startIndex": si}),
+            ("with-sortField-cid", lambda ps, si: {"pageSize": ps, "sortAscending": True,
+                                                    "sortField": "cid", "startIndex": si}),
+            ("ascFalse",   lambda ps, si: {"pageSize": ps, "sortAscending": False, "startIndex": si}),
+            ("with-sortField-checkerName", lambda ps, si: {"pageSize": ps, "sortAscending": True,
+                                                    "sortField": "checkerName", "startIndex": si}),
+            ("with-sortField-mergedDefectId", lambda ps, si: {"pageSize": ps, "sortAscending": True,
+                                                    "sortField": "mergedDefectId", "startIndex": si}),
+            ("no-startIndex", lambda ps, si: {"pageSize": ps, "sortAscending": True}),
         ]
         page_sizes = (2000, 1000, 500, 250, 100, 50)
+        first_err = None
 
         for label, shape in shapes:
             for page_size in page_sizes:
-                collected  = []
-                start_index = 0
-                page_err   = None
-                while start_index < max_defects:
+                collected    = []
+                seen         = set()
+                start_index  = 0
+                page_err     = None
+                while len(collected) < max_defects:
                     try:
                         result = client.service.getMergedDefectsForStreams(
                             streamIds=[{"name": stream_name}],
@@ -325,10 +430,25 @@ class CoveritySOAPClient:
                         page_err = f"[{label}, pageSize={page_size}, startIndex={start_index}] {str(e)}"
                         break
 
-                    defects = self._parse_defect_result(result)
+                    defects = self._parse_defect_result(result) or []
                     if not defects:
                         break
-                    collected.extend(defects)
+
+                    # Deduplicate by CID and stop paginating when a page adds no
+                    # new rows. Some servers ignore `startIndex` (and the last
+                    # fallback page-spec omits it), so without this guard every
+                    # "page" returns the same first page and the defect count is
+                    # inflated with duplicates.
+                    added_any = False
+                    for d in defects:
+                        c = d.get("cid")
+                        if c is not None and c not in seen:
+                            seen.add(c)
+                            collected.append(d)
+                            added_any = True
+                    if not added_any:
+                        break  # duplicate page -> we already have every unique row
+
                     if len(collected) >= max_defects:
                         return collected[:max_defects], None
                     if len(defects) < page_size:
@@ -338,27 +458,38 @@ class CoveritySOAPClient:
                 if collected:
                     return collected, None
                 if page_err:
+                    if first_err is None:
+                        first_err = page_err
                     last_err = page_err
                     continue
                 # Server accepted this configuration and the stream has no
-                # defects — report that clearly instead of masking it.
+                # defects (or only duplicates) — report it instead of masking.
                 return [], f"No defects returned for stream '{stream_name}'"
 
-        # Very last resort: some servers accept a call without a pageSpec.
-        try:
-            result  = client.service.getMergedDefectsForStreams(
-                streamIds=[{"name": stream_name}], filterSpec={})
-            defects = self._parse_defect_result(result)
-            if defects:
-                return defects, None
-        except Fault as e:
-            if not last_err:
-                last_err = str(e.message if hasattr(e, "message") else e)
-        except Exception as e:
-            if not last_err:
-                last_err = str(e)
+        # Last resort: some servers only accept a bare call; others REQUIRE the
+        # pageSpec (with sortAscending) even for a single-page fetch, so try the
+        # small pageSpec first and only then the bare call.
+        for last_spec in (
+            {"pageSize": 50, "sortAscending": True, "startIndex": 0},
+            {"pageSize": 50, "sortAscending": True, "sortField": "cid", "startIndex": 0},
+            None,
+        ):
+            try:
+                kwargs = {"streamIds": [{"name": stream_name}], "filterSpec": {}}
+                if last_spec is not None:
+                    kwargs["pageSpec"] = last_spec
+                result = client.service.getMergedDefectsForStreams(**kwargs)
+                defects = self._parse_defect_result(result)
+                if defects:
+                    return defects, None
+            except Fault as e:
+                if not last_err:
+                    last_err = str(e.message if hasattr(e, "message") else e)
+            except Exception as e:
+                if not last_err:
+                    last_err = str(e)
 
-        return [], last_err or f"No defects returned for stream '{stream_name}'"
+        return [], first_err or last_err or f"No defects returned for stream '{stream_name}'"
 
     def get_defects_for_project(self, project_name, max_defects=5000):
         """
@@ -401,11 +532,15 @@ class CoveritySOAPClient:
             return events_map, None
 
         # includeDefectInstances must be True or the server omits event traces.
+        # includeHistory + a larger maxDefectInstances makes the server return the
+        # per-snapshot instances; Coverity orders them oldest -> newest, so the
+        # LAST instance is the defect's CURRENT location (the server UI shows this
+        # line). The first instance is the stale first-detection trace.
         filter_spec = {
             "includeDefectInstances": True,
-            "includeHistory": False,
+            "includeHistory": True,
             "includeTotalDefectInstanceCount": False,
-            "maxDefectInstances": 1,
+            "maxDefectInstances": 20,
         }
 
         last_error = None
@@ -416,9 +551,17 @@ class CoveritySOAPClient:
                 merged_ids = [{"cid": c, "mergeKey": ""} for c in batch]
                 response = None
                 batch_err = None
-                # Try with filterSpec first; older servers may reject it.
-                # This server's getStreamDefects takes no streamId argument.
+                # Prefer encoding streamId — without it the server can return a
+                # DIFFERENT instance of the merged defect, giving the wrong event
+                # trace and a wrong line (e.g. an old revision's line that is now a
+                # comment). Try streamId first, then progressively more minimal
+                # variants for servers whose WSDL omits streamId/filterSpec.
                 for kwargs in [
+                    {"mergedDefectIdDataObjs": merged_ids,
+                     "streamId": {"name": stream_name},
+                     "filterSpec": filter_spec},
+                    {"mergedDefectIdDataObjs": merged_ids,
+                     "streamId": {"name": stream_name}},
                     {"mergedDefectIdDataObjs": merged_ids,
                      "filterSpec": filter_spec},
                     {"mergedDefectIdDataObjs": merged_ids},
@@ -441,20 +584,62 @@ class CoveritySOAPClient:
                     except Exception:
                         continue
                     instances = getattr(sd, "defectInstances", None) or []
-                    # Probe once: if instances empty, record available attributes
-                    # so the diagnostic log shows the real SOAP field names.
-                    if not instances and not last_error:
-                        available = [a for a in dir(sd) if not a.startswith("_")]
-                        last_error = (f"defectInstances empty for CID {cid}; "
-                                      f"available attrs: {available}")
-                    inst = instances[0] if instances else None
+                    events_map[("_n_instances", cid)] = len(instances)
 
-                    # Extract the instance-level line number (more accurate than
-                    # the merged-defect level which is always 0 for multi-location defects).
+                    # One-shot: capture all field values from sd and inst so the
+                    # pull log reveals every line-number field on this server.
+                    if not events_map.get(("_probed",)):
+                        events_map[("_probed",)] = True
+                        events_map[("_sd_probe",)] = {
+                            a: getattr(sd, a, None)
+                            for a in dir(sd) if not a.startswith("_")
+                        }
+                        inst_tmp = instances[-1] if instances else None
+                        events_map[("_inst_probe",)] = (
+                            {a: getattr(inst_tmp, a, None)
+                             for a in dir(inst_tmp) if not a.startswith("_")}
+                            if inst_tmp else {}
+                        )
+
+                    # Instances are ordered oldest -> newest snapshot. Pick the LAST
+                    # one so events/line reflect the defect's CURRENT location.
+                    inst = instances[-1] if instances else None
+
+                    # Try every known field name variant for the primary line number.
+                    inst_line = 0
                     if inst is not None:
-                        inst_line = int(getattr(inst, "lineNumber", 0) or 0)
-                        if inst_line:
-                            events_map[("_inst_line", cid)] = inst_line
+                        for _ln_field in ("lineNumber", "checkerLineNumber",
+                                          "primaryLineNumber", "mainEventLineNumber"):
+                            _v = getattr(inst, _ln_field, None)
+                            if _v:
+                                try:
+                                    inst_line = int(_v)
+                                except (TypeError, ValueError):
+                                    pass
+                                if inst_line:
+                                    break
+                    if inst_line:
+                        events_map[("_inst_line", cid)] = inst_line
+
+                    # Extract function name from instance.function.functionDisplayName
+                    # (more reliable than the merged-defect level field).
+                    inst_func = getattr(inst, "function", None) if inst else None
+                    if inst_func:
+                        fn = (getattr(inst_func, "functionDisplayName", None) or
+                              getattr(inst_func, "functionMangledName", None) or "")
+                        if fn:
+                            events_map[("_inst_func", cid)] = str(fn)
+
+                    # Extract sub-type and severity from instance fields.
+                    if inst is not None:
+                        _t = getattr(inst, "type", None)
+                        if _t:
+                            events_map[("_inst_type", cid)] = str(
+                                getattr(_t, "displayName", None) or "")
+                        _imp = getattr(inst, "impact", None)
+                        if _imp:
+                            events_map[("_inst_sev", cid)] = str(
+                                getattr(_imp, "displayName", None) or "")
 
                     evs = []
                     for ev in _flatten_events(getattr(inst, "events", None) or []):
@@ -473,10 +658,426 @@ class CoveritySOAPClient:
 
         return events_map, last_error
 
+    # ── REST API v2 ────────────────────────────────────────────────────────
+    # Coverity Connect v2020+ exposes a REST API that returns mainEventLineNumber
+    # which exactly matches the web UI. We try REST first; SOAP is the fallback.
+
+    def _rest_authenticate(self):
+        """Authenticate via the REST session endpoint using a requests.Session.
+
+        If a pre-provided ``rest_token`` was passed to the constructor, it is
+        used directly (no session-endpoint login needed).
+
+        Otherwise, POSTs credentials to /api/{v}/session.  The server may set
+        a session cookie (e.g. COVJSESSIONID) and/or return a token in the
+        JSON body.  Cookies are persisted via the session for subsequent
+        requests.
+
+        Returns True if any form of authentication succeeded.
+        """
+        if getattr(self, "_rest_authenticated", False):
+            return True
+        # If a pre-provided token was given, use it directly
+        if self._rest_token:
+            self._rest_session = requests.Session()
+            self._rest_session.verify = self.verify_ssl
+            self._rest_session.headers["tns-cnct-api-authenticate-token"] = self._rest_token
+            # Mirrors curl -u user:token: some servers only honour Basic auth.
+            self._rest_session.auth = (self.username, self._rest_token)
+            if self._api_key:
+                self._rest_session.headers["X-API-Key"] = self._api_key
+            self._rest_authenticated = True
+            return True
+        self._rest_session = requests.Session()
+        self._rest_session.verify = self.verify_ssl
+        for version in ("v2", "v1"):
+            url = f"{self._base_url()}/api/{version}/session"
+            try:
+                resp = self._rest_session.post(
+                    url,
+                    json={"username": self.username, "password": self.password},
+                    timeout=15,
+                    headers=self._rest_headers(),
+                )
+                if resp.status_code in (200, 201, 204):
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
+                    if isinstance(data, dict):
+                        token = (data.get("token") or data.get("sessionId")
+                                 or data.get("authToken"))
+                        if token:
+                            self._rest_token = str(token)
+                            self._rest_session.headers["tns-cnct-api-authenticate-token"] = token
+                            self._rest_authenticated = True
+                            return True
+                    # Session cookies set by the server indicate auth
+                    if self._rest_session.cookies:
+                        xsrf = self._rest_session.cookies.get("XSRF-TOKEN", "")
+                        if xsrf:
+                            self._rest_session.headers["X-XSRF-TOKEN"] = xsrf
+                        self._rest_authenticated = True
+                        return True
+            except Exception:
+                pass
+        # Session auth failed -- clear so we fall back to Basic auth
+        self._rest_session = None
+        return False
+
+    def _rest_headers(self):
+        """Build standard REST headers, including optional API key."""
+        hdrs = {"Accept": "application/json"}
+        if getattr(self, "_api_key", None):
+            hdrs["X-API-Key"] = self._api_key
+        return hdrs
+
+    def _rest_basic_auth(self):
+        """Basic-auth tuple for REST.
+
+        Coverity accepts the API auth token in place of the password for
+        Basic auth, so prefer it whenever a token is available.
+        """
+        secret = self._rest_token or self.password
+        return (self.username, secret)
+
+    def _rest_get(self, path, params=None):
+        """GET request to the Coverity REST API v2. Returns parsed JSON or raises."""
+        url = f"{self._api_base('v2')}/{path.lstrip('/')}"
+        if self._rest_authenticate() and self._rest_session:
+            resp = self._rest_session.get(
+                url, params=params, timeout=60,
+                headers=self._rest_headers())
+        else:
+            resp = requests.get(
+                url, params=params,
+                auth=self._rest_basic_auth(),
+                verify=self.verify_ssl, timeout=60,
+                headers=self._rest_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+    def _rest_post_v2(self, path, json_body=None):
+        """POST to the REST API v2 (the issue-query endpoint is POST-capable)."""
+        url = f"{self._api_base('v2')}/{path.lstrip('/')}"
+        if self._rest_authenticate() and self._rest_session:
+            resp = self._rest_session.post(
+                url, json=json_body, timeout=60,
+                headers=self._rest_headers())
+        else:
+            resp = requests.post(
+                url, json=json_body,
+                auth=self._rest_basic_auth(),
+                verify=self.verify_ssl, timeout=60,
+                headers=self._rest_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+    def _rest_search_issues(self, path, stream_name, limit, offset):
+        """POST an issue-search query to /api/v2/issues/search.
+
+        Body uses CQL ``streams['<name>']`` plus the requested columns.
+        The server returns the tabular columns/rows format parsed by
+        :func:`_issues_search_items`.
+        """
+        body = {
+            "queryType": "cql",
+            "cql": f"streams['{stream_name}']",
+            "columns": list(_SEARCH_COLUMNS),
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+        return self._rest_post_v2(path, body)
+
+    def _rest_get_v1(self, path, params=None):
+        """GET to the legacy REST API v1 (/api/v1/defects)."""
+        url = f"{self._api_base('v1')}/{path.lstrip('/')}"
+        if self._rest_authenticate() and self._rest_session:
+            resp = self._rest_session.get(
+                url, params=params, timeout=60,
+                headers=self._rest_headers())
+        else:
+            resp = requests.get(
+                url, params=params,
+                auth=self._rest_basic_auth(),
+                verify=self.verify_ssl, timeout=60,
+                headers=self._rest_headers())
+        resp.raise_for_status()
+        return resp.json()
+
+    def _api_base(self, version):
+        """REST base for `version` ('v1'/'v2'), using a discovered base when the
+        REST API lives under a different port/web-root than the default."""
+        base = getattr(self, "_rest_base_discovered", None) or {}
+        if base.get(version):
+            return f"{base[version]}/api/{version}"
+        return f"{self._base_url()}/api/{version}"
+
+    def _candidate_rest_bases(self):
+        """Candidate server bases to probe for the REST API (ports x roots)."""
+        scheme = "https" if self.use_ssl else "http"
+        roots = ["", "/connect", "/ngweb", "/coverity", "/rest"]
+        ports = sorted({self.port, 443, 8443, 8080})
+        seen, out = set(), []
+        for p in ports:
+            for r in roots:
+                c = f"{scheme}://{self.host}:{p}{r}"
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+        return out
+
+    def discover_rest_base(self):
+        """Probe candidate REST bases; returns (v1_base, v2_base, info_string).
+
+        A base is 'found' when /api/<v>/streams answers with a 2xx/3xx success
+        (404/401/403 are treated as unusable). The result is cached so the pull
+        uses it automatically after the first probe.
+        """
+        v1 = v2 = ""
+        tried = []
+        for base in self._candidate_rest_bases():
+            for version in ("v1", "v2"):
+                if (version == "v1" and v1) or (version == "v2" and v2):
+                    continue
+                url = f"{base}/api/{version}/streams"
+                try:
+                    resp = requests.get(
+                        url, params={"limit": 1},
+                        auth=self._rest_basic_auth(),
+                        verify=self.verify_ssl, timeout=5,
+                        headers=self._rest_headers())
+                    tried.append(f"{url} -> {resp.status_code}")
+                    if resp.status_code < 400 and not _is_signin_response(resp):
+                        # 404/401/403 and sign-in pages are NOT usable bases
+                        if version == "v1":
+                            v1 = base
+                        else:
+                            v2 = base
+                except Exception as exc:
+                    tried.append(f"{url} -> {str(exc)[:36]}")
+        self._rest_base_discovered = {"v1": v1 or None, "v2": v2 or None}
+        return (v1 or None), (v2 or None), "; ".join(tried)
+
+    def _probe_issue_endpoint(self, stream_name=None):
+        """Locate the v2 defect-list path under the discovered base.
+
+        Returns (path, method, status_log). It first tries to read the server's
+        OpenAPI/swagger spec to learn the real resource names, then probes the
+        candidate list and returns the first that answers with anything other
+        than 404/405 (400/401/403 still prove the resource routes).
+
+        When ``stream_name`` is supplied it is included in the probe params so
+        the server doesn't reply 404 for a missing required stream filter.
+        """
+        base = (getattr(self, "_rest_base_discovered", None) or {}).get("v2")
+        if not base:
+            return None, None, ""
+        log = []
+        discovered_names = []
+        # Authenticate via session endpoint to get cookies/token
+        self._rest_authenticate()
+        sess = getattr(self, "_rest_session", None)
+        hdrs = self._rest_headers()
+
+        def _req(method, url, **kw):
+            """Send a request using session auth, falling back to Basic auth."""
+            if sess:
+                if method == "get":
+                    return sess.get(url, verify=self.verify_ssl, **kw)
+                return sess.post(url, verify=self.verify_ssl, **kw)
+            # Basic auth fallback
+            kw["auth"] = self._rest_basic_auth()
+            if method == "get":
+                return requests.get(url, verify=self.verify_ssl, **kw)
+            return requests.post(url, verify=self.verify_ssl, **kw)
+        for spec in ("/api/v2/swagger.json", "/api/v2/swagger",
+                     "/api/v2/openapi.json", "/api/v2/api-docs"):
+            try:
+                r = _req("get", base + spec, headers=hdrs, timeout=10)
+                log.append(f"{base + spec} -> {r.status_code}")
+                if r.status_code == 200:
+                    try:
+                        doc = r.json()
+                    except Exception:
+                        doc = None
+                    if isinstance(doc, dict):
+                        paths = set((doc.get("paths") or {}).keys())
+                        for p in paths:
+                            norm = p.rstrip("/").split("/")[-1]
+                            if any(t in norm.lower() for t in
+                                   ("defect", "issue", "finding")):
+                                discovered_names.append(norm)
+                        log.append(f"swagger paths with defect/issue found: "
+                                   f"{sorted(discovered_names)[:8]}")
+                    break
+            except Exception as exc:
+                log.append(f"{base + spec} -> {str(exc)[:30]}")
+        candidates = discovered_names or [
+            "issues/search", "issues", "defects", "query/issues",
+            "merged-defects", "defect-families"]
+        probe_params = {"limit": 1}
+        if stream_name:
+            probe_params["streamNames[]"] = stream_name
+        for path in candidates:
+            url = f"{base}/api/v2/{path}"
+            for method in ("get", "post"):
+                try:
+                    if method == "get":
+                        r = _req("get", url, params=probe_params,
+                                 headers=hdrs, timeout=10)
+                    else:
+                        r = _req("post", url, json={
+                            "limit": 1,
+                            "streamNames": [stream_name] if stream_name else []},
+                            headers=hdrs, timeout=10)
+                    log.append(f"{url} [{method}] -> {r.status_code}")
+                    if r.status_code not in (404, 405) and not _is_signin_response(r):
+                        return path, method, "; ".join(log)
+                except Exception as exc:
+                    log.append(f"{url} [{method}] -> {str(exc)[:30]}")
+        return None, None, "; ".join(log)
+
+    def test_rest_available(self):
+        """Returns True if the REST API v2 is reachable on this server."""
+        try:
+            self._rest_get("streams", {"limit": 1})
+            return True
+        except Exception:
+            return False
+
+    def get_defects_rest(self, stream_name, max_defects=5000, progress_cb=None):
+        """
+        Fetch defects via REST API v2 (Coverity Connect v2020+).
+
+        Returns (defects_list, error_or_None).
+        Each defect dict includes:
+          cid, checker, type, severity, file, line (mainEventLineNumber — exact
+          web UI value), function, events (with step/type/description/file/line).
+
+        Raises no exceptions; returns ([], error_string) on failure so the caller
+        can fall back to SOAP automatically.
+        """
+        try:
+            limit = min(500, max_defects)
+            # Locate the actual v2 defect-list path (some versions use a different
+            # resource than /api/v2/issues, which can 404 even when /streams works).
+            path, method, _p = self._probe_issue_endpoint(stream_name)
+            _v2_items = lambda d: (d.get("items") or d.get("defects") or [],
+                                   d.get("totalRows") or d.get("totalDefects"))
+            attempts = [
+                ("v2 POST /api/v2/issues/search",
+                 lambda off, lim: self._rest_search_issues(
+                     "issues/search", stream_name, lim, off),
+                 _issues_search_items, False),
+            ]
+            if path and method == "get":
+                attempts.append((
+                    f"v2 GET /api/v2/{path}",
+                    lambda off, lim, p=path: self._rest_get(p, {
+                        "streamNames[]": stream_name, "includeDetails": "true",
+                        "limit": lim, "offset": off}),
+                    _v2_items, False))
+            elif path and method == "post" and path != "issues/search":
+                attempts.append((
+                    f"v2 POST /api/v2/{path}",
+                    lambda off, lim, p=path: self._rest_post_v2(p, {
+                            "streamNames": [stream_name] if stream_name else [],
+                        "limit": lim, "offset": off}),
+                    _v2_items, False))
+            attempts.extend([
+                ("v2 GET /api/v2/issues",
+                 lambda off, lim: self._rest_get("issues", {
+                     "streamNames[]": stream_name, "includeDetails": "true",
+                     "limit": lim, "offset": off}),
+                 _v2_items, False),
+                ("v2 POST /api/v2/issues",
+                 lambda off, lim: self._rest_post_v2("issues", {
+                            "streamNames": [stream_name] if stream_name else [],
+                     "limit": lim, "offset": off}),
+                 _v2_items, False),
+                ("v1 GET /api/v1/defects",
+                 lambda off, lim: self._rest_get_v1("defects", {
+                     "streamId": stream_name, "limit": lim, "offset": off}),
+                 lambda d: (d.get("defects") or [], d.get("totalDefects")), True),
+            ])
+            errors = []
+            for label, fetch, items_fn, is_v1 in attempts:
+                all_defects = []
+                offset = 0
+                total = None
+                while True:
+                    try:
+                        data = fetch(offset, limit)
+                    except Exception as exc:
+                        errors.append(f"{label}: {exc}")
+                        break
+                    items, raw_total = items_fn(data)
+                    if total is None and raw_total:
+                        try:
+                            total = int(raw_total)
+                        except (TypeError, ValueError):
+                            total = None
+                    if not items:
+                        break
+                    for issue in items:
+                        if not isinstance(issue, dict):
+                            continue
+                        cid = issue.get("cid")
+                        if cid is None:
+                            cid = (issue.get("mergedDefectId") or {}).get("cid")
+                        if cid is None:
+                            continue
+                        d = _rest_defect_from_issue(issue, is_v1)
+                        d["cid"] = int(cid)
+                        all_defects.append(d)
+                    offset += len(items)
+                    if offset >= max_defects or (total and offset >= total) \
+                       or len(items) < limit:
+                        break
+                if all_defects:
+                    if progress_cb:
+                        progress_cb(100, f"REST({label}): {len(all_defects)} defects fetched.")
+                    return all_defects, None
+
+            return [], (" | ".join(errors) if errors
+                        else f"REST API returned 0 defects for stream '{stream_name}'")
+        except Exception as exc:
+            return [], str(exc)
+
+    def get_defects_rest_events(self, cid, stream_name):
+        """
+        Fetch the full event trace for a single CID via REST.
+        Falls back to empty list on any error.
+        Returns list of event dicts.
+        """
+        try:
+            data = self._rest_get(f"issues/{cid}", {"streamName": stream_name})
+            raw_events = data.get("events") or []
+            events = []
+            for ev in raw_events:
+                ev_line = int(ev.get("lineNumber") or ev.get("eventLineNumber") or 0)
+                events.append({
+                    "step":        int(ev.get("eventNumber") or ev.get("stepNumber") or 0),
+                    "type":        str(ev.get("eventTag")         or ev.get("eventType") or ""),
+                    "description": str(ev.get("eventDescription") or ev.get("description") or ""),
+                    "file":        str(ev.get("filePathname")     or ev.get("filePath") or ""),
+                    "line":        ev_line,
+                    "main":        bool(ev.get("main") or ev.get("isMain") or False),
+                })
+            return events
+        except Exception:
+            return []
+
+    # ───────────────────────────────────────────────────────────────────────
+
     def get_defects_with_events(self, stream_name, max_defects=5000,
                                 project_name=None, progress_cb=None):
         """
         Orchestrate a defect fetch + per-defect event-trace fetch.
+
+        Tries REST API v2 first (accurate mainEventLineNumber).
+        Falls back to SOAP + getStreamDefects when REST is unavailable.
 
         stream_name may be the ALL_STREAMS sentinel when project_name is supplied,
         in which case defects are aggregated across all the project's streams and
@@ -487,6 +1088,25 @@ class CoveritySOAPClient:
         Each defect dict gains an "events" key (possibly []).
         """
         try:
+            # ── Try REST API first — gives exact web UI line numbers ────────
+            if stream_name != self.ALL_STREAMS:
+                if progress_cb:
+                    progress_cb(2, "Trying REST API…")
+                # Locate the REST base once (auto-probes ports/web-roots if the
+                # standard /api/v1 & /api/v2 paths 404).
+                if not getattr(self, "_rest_base_discovered", None):
+                    self.discover_rest_base()
+                rest_defects, rest_err = self.get_defects_rest(
+                    stream_name, max_defects, progress_cb)
+                if rest_defects:
+                    if progress_cb:
+                        progress_cb(100, f"REST: {len(rest_defects)} defects fetched.")
+                    return rest_defects, None
+                # REST unavailable or failed — fall through to SOAP.
+                if progress_cb:
+                    progress_cb(-1, f"REST unavailable ({rest_err}), falling back to SOAP…")
+
+            # ── SOAP fallback ───────────────────────────────────────────────
             if stream_name == self.ALL_STREAMS and project_name:
                 defects, err = self.get_defects_for_project(project_name, max_defects)
             else:
@@ -533,20 +1153,44 @@ class CoveritySOAPClient:
             for d in defects:
                 cid = d["cid"]
                 events = events_map.get(cid, [])
+                d["_n_instances"] = events_map.get(("_n_instances", cid), 0)
+                # Enrich with instance-level fields that are more reliable than
+                # the merged-defect level (function name, sub-type, severity).
+                if not d.get("function"):
+                    d["function"] = events_map.get(("_inst_func", cid), d.get("function", ""))
+                else:
+                    d["function"] = events_map.get(("_inst_func", cid), d["function"]) or d["function"]
+                if not d.get("type"):
+                    d["type"] = events_map.get(("_inst_type", cid), "")
+                if not d.get("severity"):
+                    d["severity"] = events_map.get(("_inst_sev", cid), "")
                 # Fill missing file paths from the defect's primary file.
                 for ev in events:
                     if not ev.get("file"):
                         ev["file"] = d.get("file", "")
                 d["events"] = events
 
-                # mergedDefectDataObj.lineNumber is always 0 for multi-location
-                # defects. Prefer: instance line → event-trace line → keep 0.
-                if not d.get("line"):
-                    inst_line = events_map.get(("_inst_line", cid), 0)
-                    if inst_line:
-                        d["line"] = inst_line
-                    elif events:
-                        d["line"] = _line_from_events(events)
+                # Store all raw line sources in the dict so the pull log can
+                # show exactly which value each source contributed.
+                d["_merged_line"]     = d.get("line", 0)
+                d["_inst_line_val"]   = events_map.get(("_inst_line", cid), 0)
+                main_ev = next((e for e in events if e.get("main")), None)
+                d["_main_event_line"] = main_ev["line"] if main_ev else 0
+                d["_last_event_line"] = (max(events, key=lambda e: e.get("step", 0))["line"]
+                                         if events else 0)
+
+                # Instance line (defectInstance.lineNumber) matches the Coverity
+                # web UI and always overrides the less-precise merged level line.
+                inst_line = d["_inst_line_val"]
+                if inst_line:
+                    d["line"] = inst_line
+                elif not d.get("line") and events:
+                    d["line"] = _line_from_events(events)
+
+            # Attach probe data to first defect so the pull log can dump it.
+            if defects:
+                defects[0]["_sd_probe"]   = events_map.get(("_sd_probe",),   {})
+                defects[0]["_inst_probe"] = events_map.get(("_inst_probe",), {})
 
             return defects, None
         except Exception as e:
@@ -581,6 +1225,22 @@ class CoveritySOAPClient:
                 func  = str(getattr(d, "functionDisplayName", "")  or "")
                 line  = int(getattr(d, "lineNumber", 0)            or 0)
                 chk   = str(getattr(d, "checkerName", "")          or "")
+
+                if not line:
+                    # merged lineNumber is 0 on this server; the defect's CURRENT
+                    # line (what the server UI shows) lives on the first instance.
+                    for _di in (getattr(d, "defectInstances", None) or [])[:1]:
+                        try:
+                            _il = int(getattr(_di, "lineNumber", 0) or 0)
+                        except Exception:
+                            _il = 0
+                        if _il:
+                            line = _il
+                        break
+                    global _PULL_DIAG_MERGED_ATTRS
+                    if not line and _PULL_DIAG_MERGED_ATTRS is None:
+                        _PULL_DIAG_MERGED_ATTRS = ",".join(
+                            a for a in dir(d) if not a.startswith("_"))
 
                 # Sub-checker type string, e.g. "Improper use of negative value"
                 type_str = str(getattr(d, "displayType", "") or "")

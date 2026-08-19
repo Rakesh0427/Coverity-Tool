@@ -1698,6 +1698,201 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
         f"establish a usable upper bound, so its protective value is not provable.")
 
 
+def _split_top_level_commas(text: str) -> List[str]:
+    """Split on commas that are not nested inside (), [], {}."""
+    parts, cur, depth = [], [], 0
+    for ch in text:
+        if ch in '([{':
+            depth += 1
+            cur.append(ch)
+        elif ch in ')]}':
+            depth -= 1
+            cur.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append(''.join(cur).strip())
+    return [p for p in parts if p]
+
+
+def _function_param_names(code: str) -> List[str]:
+    """Extract the parameter names from a single-line function signature in code.
+
+    Only matches a real definition (return type + name + parenthesised params),
+    so plain call statements like `use_buf(...)` are ignored. Returns [] when the
+    signature spans lines or cannot be parsed so callers fall back to other
+    evidence rather than guessing a bogus parameter mapping.
+    """
+    for line in code.splitlines():
+        s = line.strip()
+        if not s or s.startswith(('#', '//', '/*', '*')):
+            continue
+        # Return type, function name, then non-empty params, ignoring any
+        # trailing body code that may share the same line.
+        m = re.match(r'([A-Za-z_][\w\s\*]*?)\s+(\w+)\s*\(([^)]*)\)', s)
+        if not m:
+            continue
+        body = m.group(3).strip()
+        if not body or body.lower() == 'void':
+            return []
+        params = []
+        for part in _split_top_level_commas(body):
+            part = re.sub(r'\b(const|volatile|unsigned|signed|static|register|'
+                          r'struct|union|enum|restrict|inline|extern)\b', ' ', part)
+            part = part.replace('*', ' ').strip()
+            names = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', part)
+            if not names:
+                continue
+            params.append(names[-1])
+        return params
+    return []
+
+
+
+def _overrun_pattern_and_caller_evidence(code: str, idx_var: str, idx_expr: str,
+                                         arr_name: str, arr_size: int,
+                                         assign_expr: str, ctx: Dict) -> EvidenceAccumulator:
+    """Extra Bug/FP evidence for an inconclusive OVERRUN from the index's
+    provenance and the call graph (caller sites).
+
+    The local snippet alone often can't tell where a flagged index comes from
+    (e.g. it is a parameter) or whether callers bound it. This uses data the tool
+    already collects — the concrete index / array size, the index provenance
+    (taint), and the callers that reach the defect function — to break the tie
+    toward Bug or False positive instead of defaulting to manual review.
+    """
+    acc = EvidenceAccumulator()
+    if not idx_var or idx_var in ('the offset', 'the index', 'index'):
+        return acc
+
+    # --- 1. Constant index (pattern) ---
+    lit_str = None
+    for expr in (idx_expr, assign_expr or ''):
+        e = re.sub(r'\s+', '', (expr or ''))
+        m = re.fullmatch(r'\(?(\d+)\)?', e)
+        if m:
+            lit_str = m.group(1)
+            break
+    if lit_str is not None:
+        v = int(lit_str)
+        if arr_size > 0:
+            if 0 <= v < arr_size:
+                acc.add(Evidence('constant_index_within_bounds', 'fp', 0.85,
+                                 f"index is the constant {v}, inside the declared range [0, {arr_size - 1}]."))
+            else:
+                acc.add(Evidence('constant_index_out_of_bounds', 'bug', 0.90,
+                                 f"index is the constant {v}, out of range for an array of {arr_size} elements."))
+
+    # --- 2. Index provenance / taint ---
+    src = None
+    try:
+        src = _find_variable_origin(code, idx_var)
+    except Exception:
+        src = None
+    if src and src.source_type in ('network', 'file', 'env', 'args', 'convert', 'external'):
+        acc.add(Evidence('overrun_index_untrusted_origin', 'bug', 0.62,
+                         f"index `{idx_var}` derives from {src.source_type} (caller/input-controlled) and is not locally narrowed."))
+    elif src and src.source_type in ('local', 'literal', 'bounded', 'safe'):
+        acc.add(Evidence('overrun_index_safe_origin', 'fp', 0.60,
+                         f"index `{idx_var}` derives from a {src.source_type} source."))
+
+    # --- 3. Call graph: how callers supply the flagged index ---
+    callers = ctx.get('callers_list', []) or []
+    real_callers = [c for c in (callers if isinstance(callers, list) else []) if c and c.get('snippet')]
+    params = _function_param_names(code)
+    if real_callers and idx_var in params:
+        pos = params.index(idx_var)
+        buf_pos = params.index(arr_name) if (arr_name in params and
+                                             arr_name not in ('the buffer', 'the array', 'array')) else -1
+
+        # Resolve the real buffer size from each caller's local array declaration
+        # (cross-file) when the defect function itself cannot see the declaration.
+        # This closes the "arr_size unknown" gap for parameter-driven buffers.
+        eff_arr_size = arr_size
+        if eff_arr_size <= 0 and buf_pos >= 0:
+            for c in real_callers:
+                cc = str(c.get('code') or '')
+                if not cc:
+                    continue
+                sm = re.search(r'\b(\w+)\s*\(', str(c.get('snippet', '')).strip())
+                if not sm:
+                    continue
+                cargs = _extract_call_args(str(c.get('snippet', '')).strip(), sm.group(1))
+                if buf_pos < len(cargs):
+                    d = _extract_array_declaration(cc, cargs[buf_pos].strip(), 1)
+                    if d and d.get('size', 0) > 0:
+                        eff_arr_size = d['size']
+                        break
+
+        bug_hits, fp_hits = 0, 0
+        fp_examples = []
+        tainted = False
+        guard_hits = 0
+        guard_desc = []
+        for c in real_callers:
+            snippet = str(c.get('snippet', '')).strip()
+            m = re.search(r'\b(\w+)\s*\(', snippet)
+            if not m:
+                continue
+            args = _extract_call_args(snippet, m.group(1))
+            if pos >= len(args):
+                continue
+            arg = args[pos].strip()
+            am = re.fullmatch(r'(\d+)', arg)
+            if am:
+                av = int(am.group(1))
+                if eff_arr_size > 0 and 0 <= av < eff_arr_size:
+                    fp_hits += 1
+                    fp_examples.append(f"constant {av}")
+                elif eff_arr_size > 0:
+                    bug_hits += 1
+            elif re.search(r'\b(recv|recvfrom|fread|fgets|getenv|scanf|sscanf|fscanf|'
+                           r'read|accept|ntohs|ntohl|getchar|gets|atoi|strtol)\b', arg):
+                tainted = True
+                bug_hits += 1
+            elif eff_arr_size > 0 and re.search(r'\b(sizeof\s*\(|\b[\w]+\s*-\s*1\b)', arg):
+                fp_hits += 1
+                fp_examples.append(arg)
+
+            # Cross-file guard: is the (non-constant) index argument bounded
+            # inside the caller's own body before this call site? Addresses the
+            # "including any cross-file guards" case from the users's example.
+            cc = str(c.get('code') or '')
+            if cc and arg and not re.fullmatch(r'(\d+)', arg):
+                nlines = len(cc.splitlines())
+                try:
+                    start_line = int(c.get('start_line', 1) or 1)
+                    line_c = int(c.get('line', 1) or 1)
+                    rel = line_c - start_line + 1
+                    rel = max(1, min(rel, nlines))
+                    flow = _extract_index_flow(cc, arg, rel, 1)
+                    if flow.get('guard_line', 0) > 0 and flow.get('guard_cond'):
+                        guard_hits += 1
+                        guard_desc.append(str(c.get('caller', '')) or c.get('file', ''))
+                except Exception:
+                    pass
+
+        if bug_hits and not fp_hits and not guard_hits:
+            acc.add(Evidence('overrun_caller_passes_oob', 'bug', 0.80,
+                             "callers pass out-of-range or input-derived values for `%s`." % idx_var))
+        elif guard_hits and not bug_hits:
+            acc.add(Evidence('overrun_caller_bound_index', 'fp', 0.72,
+                             "caller(s) bound `%s` before the call (%s)."
+                             % (idx_var, ", ".join(sorted(set(guard_desc))[:3]) or "%d site(s)" % guard_hits)))
+        elif fp_hits and not bug_hits:
+            acc.add(Evidence('overrun_caller_passes_bounded', 'fp', 0.85,
+                             "every caller passes a value inside [0, %d] for `%s` (%s)."
+                             % (max(eff_arr_size - 1, 0), idx_var, ", ".join(fp_examples))))
+        elif bug_hits and not fp_hits:
+            acc.add(Evidence('overrun_caller_passes_oob', 'bug', 0.80,
+                             "at least one caller passes an out-of-range constant for `%s`." % idx_var))
+
+    return acc
+
+
 def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                      file: str = "", line: int = 0, function: str = "", cid: int = 0,
                      called_function_codes: Optional[Dict[str, str]] = None,
@@ -1805,6 +2000,15 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     if not idx_var:
         idx_var = 'the offset'
 
+    # Fall back to the array size Coverity reported in its event trace when the
+    # local snippet cannot resolve the buffer's declaration (e.g. the buffer is a
+    # parameter whose real size lives at the call sites). This lets the
+    # guard/path-prover and the caller analysis reason with the real bound.
+    if arr_size == 0 and ev.get('array_size'):
+        arr_size = int(ev['array_size'])
+        if not arr_size_expr:
+            arr_size_expr = str(arr_size)
+
     # --- path_prover: off-by-one / guard safety proof ---
     prover_result: Dict = {}
     if _PATH_PROVER and guard_op and guard_limit and arr_size > 0:
@@ -1887,6 +2091,24 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                                       [f"Real array access of `{arr_name}[{idx_var}]` found with no effective "
                                        f"bounds guard on `{idx_var}`."])
         # 'unknown', or no identifiable names -> stays Needs review (inconclusive)
+
+    # --------------------------------------------------------------------------
+    # Call-graph / pattern resolution for still-inconclusive OVERRUN.
+    # The local snippet often cannot show where the flagged index comes from
+    # (it may be a parameter) or how callers bound it. Before defaulting to
+    # manual review, harvest index provenance and the caller sites the tool
+    # already collected and let that evidence break the tie toward Bug / FP.
+    # --------------------------------------------------------------------------
+    if decision.classification == "Needs review":
+        extra_acc = _overrun_pattern_and_caller_evidence(
+            code, idx_var, idx_expr, arr_name, arr_size, assign_expr, ctx)
+        extra_decision = DecisionAgent.evaluate(extra_acc, 'OVERRUN')
+        if extra_decision.classification in ("Bug", "False positive") \
+           and extra_decision.confidence >= 0.55:
+            decision = type(decision)(
+                classification=extra_decision.classification,
+                confidence=max(decision.confidence, extra_decision.confidence - 0.05),
+                reasoning=decision.reasoning + extra_decision.reasoning)
 
     # Bug — precise, example-style comment
     # ------------------------------------------------------------------
@@ -2095,6 +2317,12 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # Needs review
     # ------------------------------------------------------------------
     else:
+        idx_is_param = (idx_var not in ('', 'the offset', 'the index', 'index')
+                        and idx_var in _function_param_names(code))
+        callers = ctx.get('callers_list', []) or []
+        if not isinstance(callers, list):
+            callers = []
+
         parts = []
         parts.append(f"The {function}() access at line {access_line_actual} needs manual review — the extracted context is inconclusive.")
 
@@ -2104,13 +2332,24 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         if not arr_size_expr:
             gaps.append("the array size could not be determined")
         if assign_line == 0 and idx_var != 'the index':
-            gaps.append(f"the assignment of {idx_var} could not be traced")
+            if idx_is_param:
+                gaps.append(f"{idx_var} is a function parameter, so its bound must be resolved at the call sites")
+            else:
+                gaps.append(f"the assignment of {idx_var} could not be traced")
 
         if gaps:
             if len(gaps) == 1:
                 parts.append(f"Specifically, {gaps[0]}.")
             else:
                 parts.append(f"Specifically, {'; '.join(gaps[:-1])}; and {gaps[-1]}.")
+
+        if callers:
+            caller_brief = ", ".join(sorted({str(c.get('caller', '')) for c in callers
+                                             if isinstance(c, dict) and c.get('caller')})[:5])
+            if caller_brief:
+                parts.append(f"It is reachable from {caller_brief}, but no reachable call site proves a hard upper bound on `{idx_var}` for `{arr_name}`.")
+        elif function and not re.search(r'\bmain\b|\b_init\b|\b_fini\b|callback|hook|handler', function, re.I):
+            parts.append(f"No caller of {function}() was found in the workspace, so the bound on `{idx_var}` cannot be settled from the call graph.")
 
         parts.append("Please verify the array bounds (including any cross-file guards) before finalizing the disposition.")
         comment = re.sub(r'\s{2,}', ' ', " ".join(parts)).strip()
@@ -2653,6 +2892,151 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
     return "Needs review", comment, "Add explicit validation for all functions that may return error codes:\nif (result < 0) { /* handle error */ }", decision.confidence
 
 
+# ---------------------------------------------------------------------------
+# CHECKED_RETURN — error-handling checker that previously had no dedicated
+# handler and therefore collapsed to "Needs review" on event-less (Excel)
+# input. Decision model: explicit (void)/ignore -> Intentional; result actually
+# used -> False positive; result discarded -> Bug (weighted by how critical the
+# called function's return value is).
+# ---------------------------------------------------------------------------
+
+_CHECKED_RETURN_CRITICAL = re.compile(
+    r'\b(socket|connect|accept|bind|listen|recv|recvfrom|recvmsg|send|sendto|sendmsg|'
+    r'read|write|fread|fwrite|fopen|fclose|freopen|fgets|fputs|getline|getdelim|'
+    r'pthread_mutex_lock|pthread_mutex_trylock|pthread_mutex_unlock|pthread_rwlock_|'
+    r'pthread_create|pthread_join|pthread_cond_wait|pthread_cond_signal|'
+    r'malloc|calloc|realloc|strdup|strndup|mmap|munmap|setenv|putenv|chmod|chown|'
+    r'rename|remove|unlink|mkdir|rmdir|ioctl|fcntl|open|close|stat|fstat|lseek|'
+    r'select|poll|epoll_wait|wait|waitpid|dlopen|sem_wait|sem_post|mlock|munlock)\b',
+    re.I)
+
+_CHECKED_RETURN_BENIGN = re.compile(
+    r'\b(printf|fprintf|vprintf|vfprintf|snprintf|vsnprintf|sprintf|vsprintf|puts|putchar|'
+    r'fputc|fflush|memcpy|memset|memmove|strcpy|strncpy|strcat|strncat|'
+    r'strlen|strcmp|strncmp|strchr|strstr|strspn|strcspn|atoi|atol|strtol|'
+    r'tolower|toupper|isspace|isdigit|log|debug|trace|DBG_|LOG_|assert|'
+    r'va_end|va_copy|exit|abort)\b', re.I)
+
+_CHECKED_RETURN_IGNORED = re.compile(
+    r'\(\s*void\s*\)\s*\w+\s*\(|/\*\s*(?:ignore|intentional|by\s+design|not\s+checked|'
+    r'deliberately\s+ignored)\s*\*/|//\s*(?:ignore|intentional|by\s+design|not\s+checked)',
+    re.I)
+
+# Tokens that regex call-scanning must never treat as CHECKED_RETURN candidates.
+_CHECKED_RETURN_SKIP = frozenset({
+    'if', 'else', 'while', 'for', 'switch', 'case', 'do', 'goto', 'return',
+    'break', 'continue', 'sizeof', 'typedef', 'struct', 'union', 'enum',
+    'static', 'const', 'volatile', 'unsigned', 'signed', 'register', 'extern',
+    'int', 'char', 'void', 'bool', 'long', 'short', 'float', 'double',
+    'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t',
+    'uint32_t', 'uint64_t', 'size_t', 'NULL', 'new', 'delete', 'template',
+    'class', 'namespace', 'catch', 'throw', 'try',
+})
+
+
+def _analyze_checked_return(code: str, sub_checker: str, events: List[Dict],
+                            file: str = "", line: int = 0, function: str = "", cid: int = 0,
+                            called_function_codes: Optional[Dict[str, str]] = None,
+                            code_start_line: int = 1, tree=None) -> Tuple[str, str, str, float]:
+    ctx = _build_analysis_context(code, 'CHECKED_RETURN', events, file, line, function, cid,
+                                  called_function_codes, code_start_line)
+    sink = _get_sink_from_events(events) or ''
+    if not sink:
+        for ev in (events or []):
+            desc = ev.get('description', '') or ''
+            m = (re.search(r"['\"]([A-Za-z_]\w*)\s*\(", desc)
+                 or re.search(r'return\s+value\s+of\s+(\w+)\s*\(', desc, re.I))
+            if m:
+                sink = m.group(1).lower()
+                break
+
+    def _call_fate(fn: str, text: str):
+        """Return 'ignored' | 'used' | 'discard' for a call on a source line."""
+        if _CHECKED_RETURN_IGNORED.search(text):
+            return 'ignored'
+        m = re.search(rf'\b{re.escape(fn)}\s*\(', text)
+        if not m:
+            return None
+        pre = text[:m.start()]
+        if re.search(r'[+\-*/%&|^<>]?=\s*[^=]', pre):
+            return 'used'
+        if re.search(r'\b(if|while|for|return|assert)\s*\(?\s*$', pre) or \
+           re.search(r'(&&|\|\||\?|:)\s*$', pre):
+            return 'used'
+        return 'discard'
+
+    lines = code.splitlines()
+    candidates = []          # (abs_line, fn, text)
+    seen_calls = set()
+    def_name = (function or '').lower()
+    # Robust call scanner that handles nested parentheses (the regex used by
+    # _find_function_calls cannot see `send` inside `if (send(...) < 0)`).
+    for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\(', code):
+        fn = m.group(1)
+        fl = fn.lower()
+        if fl in _CHECKED_RETURN_SKIP or fl == def_name:
+            continue          # control keywords / the function's own signature
+        rel = code.count('\n', 0, m.start()) + 1
+        if 0 < rel <= len(lines):
+            key = (rel, fl)
+            if key in seen_calls:
+                continue
+            seen_calls.add(key)
+            candidates.append((rel + code_start_line - 1, fn, lines[rel - 1]))
+    if not candidates:
+        return ("Needs review",
+                f"The CHECKED_RETURN finding in {function}() at line {line} refers to a call that could not be located in the extracted context.",
+                "Manual review required to locate the unchecked call.", 0.0)
+
+    if sink:
+        focused = [c for c in candidates if c[1].lower() == sink.lower()]
+        candidates = focused or candidates
+    else:
+        # Excel mode (no events): several discarded calls may share the function.
+        # Prefer the non-benign ones, because the org configures CHECKED_RETURN for
+        # functions whose return value matters — a benign printf() would not be the
+        # flagged call when a critical/unknown one is also present.
+        non_benign = [c for c in candidates if not _CHECKED_RETURN_BENIGN.search(c[1])]
+        if non_benign:
+            candidates = non_benign
+
+    candidates.sort(key=lambda c: (abs(c[0] - (line or 0)) if line else c[0], c[1]))
+
+    for abs_line, fn, text in candidates:
+        fate = _call_fate(fn, text)
+        if fate == 'used':
+            return ("False positive",
+                    f"The CHECKED_RETURN finding at line {abs_line} in {function}() is a false positive — the return value of {fn}() is actually captured or tested on this line (`{text.strip()[:90]}`).",
+                    "No fix required.", 0.80)
+        if fate == 'ignored':
+            return ("Intentional",
+                    f"The return value of {fn}() at line {abs_line} is deliberately ignored — the code documents this with an explicit (void) cast or ignore comment (`{text.strip()[:90]}`).",
+                    "No fix required.", 0.85)
+        if fate == 'discard':
+            if _CHECKED_RETURN_CRITICAL.search(fn):
+                cls, conf, reason = "Bug", 0.72, (
+                    f"the return value of {fn}() is discarded, but {fn}() reports errors that "
+                    f"are essential for correctness/safety — a failure is silently swallowed.")
+            elif _CHECKED_RETURN_BENIGN.search(fn):
+                cls, conf, reason = "False positive", 0.65, (
+                    f"the return value of {fn}() is informational/cosmetic; discarding it is normal practice.")
+            else:
+                cls, conf, reason = "Bug", 0.52, (
+                    f"the return value of {fn}() is discarded; the project enables CHECKED_RETURN for "
+                    f"this function, so failures are being silently ignored.")
+            if cls == "Bug":
+                comment = (f"The CHECKED_RETURN finding at line {abs_line} in {function}() is a bug — {reason}")
+                fix = (f"Check the return value of {fn}() and handle the failure (log and/or propagate an error), "
+                       f"or cast it to (void) explicitly if ignoring is intentional.")
+                return cls, comment, fix, conf
+            comment = (f"The CHECKED_RETURN finding at line {abs_line} in {function}() is a false positive — {reason}")
+            return cls, comment, "No fix required.", conf
+
+    return ("Needs review",
+            f"The CHECKED_RETURN finding in {function}() could not be mapped to a concrete unchecked call in the extracted context.",
+            "Manual review required to locate the unchecked call.", 0.0)
+
+
 def _analyze_unused_value(code: str, sub_checker: str, events: List[Dict],
                          file: str = "", line: int = 0, function: str = "", cid: int = 0,
                          called_function_codes: Optional[Dict[str, str]] = None,
@@ -2699,13 +3083,82 @@ def _analyze_unused_value(code: str, sub_checker: str, events: List[Dict],
         return "Intentional", comment, "No fix required if value is intentionally for diagnostics only.", decision.confidence
 
     if decision.classification == "Bug":
-        comment = (f"A value is computed or assigned at line {line} in {function}() but never consumed. "
+        loc = f" at line {line}" if line and line > 0 else ""
+        comment = (f"A value is computed or assigned{loc} in {function}() but never consumed. "
                    f"This suggests either an incomplete implementation (forgot to use the result) or a copy-paste error.")
         fix = "Remove assignment or use the value in subsequent computation. Check for missing return, missing function call, or wrong variable name."
         return "Bug", comment, fix, decision.confidence
 
+    # The evidence agent was torn between signals. Instead of dumping the defect
+    # into Needs review, commit to the direction the (weak) evidence leans.
+    bugs = any(e.polarity == "bug" for e in acc.evidence)
+    fps  = any(e.polarity == "fp" for e in acc.evidence)
+    if bugs and not fps:
+        loc = f" at line {line}" if line and line > 0 else ""
+        comment = (f"A value is computed or assigned{loc} in {function}() but never consumed. "
+                   f"This suggests either an incomplete implementation (forgot to use the result) or a copy-paste error.")
+        return "Bug", comment, "Remove assignment or use the value in subsequent computation.", 0.55
+    if fps and not bugs:
+        return "Intentional", _build_comment_from_evidence(decision, ctx), \
+               "No fix required if value is intentionally for diagnostics only.", 0.55
+
     comment = _build_comment_from_evidence(decision, ctx)
     return "Needs review", comment, "Verify if assignment has necessary side effect. If not, remove assignment or use the value.", decision.confidence
+
+
+_UNINIT_KEYWORDS = {
+    'if', 'else', 'elif', 'while', 'for', 'do', 'switch', 'case', 'break', 'continue',
+    'return', 'goto', 'sizeof', 'struct', 'union', 'enum', 'typedef', 'int', 'char',
+    'void', 'bool', 'const', 'static', 'unsigned', 'signed', 'long', 'short', 'float',
+    'double', 'true', 'false', 'NULL', 'auto', 'register', 'extern', 'volatile',
+}
+
+
+_UNINIT_STOPWORDS = _UNINIT_KEYWORDS | {
+    'value', 'variable', 'in', 'of', 'the', 'for', 'and', 'to', 'is', 'at',
+    'on', 'by', 'it', 'this', 'that',
+}
+
+
+def _extract_uninit_var(code: str, events: List[Dict], line: int,
+                        code_start_line: int) -> str:
+    """Best-effort name of the variable read before it is written.
+
+    Prefers the Coverity event-description text (which usually names the offending
+    variable, e.g. \"uninitialized value 'len'\"), then falls back to the identifiers
+    on the flagged source line.
+    """
+    for ev in (events or []):
+        desc = "{} {} {}".format(
+            ev.get('description') or '', ev.get('var') or '', ev.get('type') or '')
+        # 1) Explicit quoted identifier right after a trigger word: most reliable.
+        for mm in re.finditer(
+                r"(?:uninitialized|uninit|read before|read-before)[^'\"]*?['\"]([A-Za-z_]\w*)['\"]",
+                desc, re.IGNORECASE):
+            if mm.group(1).lower() not in _UNINIT_STOPWORDS:
+                return mm.group(1)
+        # 2) "... uninitialized value <name>" with the quotes optional.
+        mm = re.search(
+            r"uninitialized\s+(?:value|variable)?\s*(?:is\s+)?['\"]?([A-Za-z_]\w*)",
+            desc, re.IGNORECASE)
+        if mm and mm.group(1).lower() not in _UNINIT_STOPWORDS:
+            return mm.group(1)
+        # 3) Any quoted identifier in the event text is a strong hint.
+        mm2 = re.search(r"['`]([A-Za-z_]\w*)['`]", desc)
+        if mm2 and mm2.group(1).lower() not in _UNINIT_STOPWORDS:
+            return mm2.group(1)
+
+    # Fall back to identifiers on the flagged source line.
+    for abs_no, text in enumerate(code.splitlines(), start=code_start_line):
+        if abs_no != line:
+            continue
+        ids = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', text)
+        candidates = [w for w in ids
+                      if w.lower() not in _UNINIT_STOPWORDS and not w.startswith('_')]
+        # The read-before-write operand is typically the right-most plain local.
+        if candidates:
+            return candidates[-1]
+    return ""
 
 
 def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
@@ -2713,6 +3166,43 @@ def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
                          called_function_codes: Optional[Dict[str, str]] = None,
                          code_start_line: int = 1, tree=None) -> Tuple[str, str, str, float]:
     ctx = _build_analysis_context(code, 'UNINIT', events, file, line, function, cid, called_function_codes, code_start_line)
+    var = _extract_uninit_var(code, events, line, code_start_line) or ''
+    ctx['var'] = var
+
+    # AST-driven enrichment: confirm the variable's declaration/type and look for
+    # any partial prior initialisation on earlier lines. Falls back to regex-only
+    # (no type info) when no tree-sitter tree is available.
+    local_tree = tree
+    locally_built = False
+    if local_tree is None and code:
+        try:
+            from code_extractor import _get_parser
+            local_tree = _get_parser('cpp').parse(bytes(code, 'utf-8'))
+            locally_built = True
+        except Exception:
+            local_tree = None
+    ctx['tree'] = local_tree
+    # A locally-built tree is anchored at line 1 of the snippet, while a tree passed
+    # in (whole-file, from context_builder) reports absolute file lines.
+    line_off = (code_start_line - 1) if locally_built else 0
+    target_line = line if not locally_built else (line - code_start_line + 1)
+    if var and local_tree is not None:
+        try:
+            decl = find_declaration(local_tree, var)
+        except Exception:
+            decl = None
+        if decl:
+            ctx['uninit_type'] = (decl.get('type_name') or '').strip()
+            ctx['uninit_decl_line'] = (decl.get('declaration_line') or 0) + line_off
+            ctx['uninit_decl'] = decl.get('raw') or ''
+        try:
+            prior = find_assignment(local_tree, var, target_line)
+        except Exception:
+            prior = None
+        if prior:
+            ctx['uninit_prior_line'] = (prior.get('assignment_line') or 0) + line_off
+            ctx['uninit_prior'] = prior.get('rhs_expression') or ''
+
     acc = EvidenceAccumulator()
 
     if _has_pattern(code, r'\bmemset\s*\(|\bcalloc\s*\(|\b=\s*\{0\}') or \
@@ -2753,7 +3243,10 @@ def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
                    f"This will contain stack garbage or indeterminate data, leading to unpredictable behavior.")
         comment = _apply_example_style("Bug", 'UNINIT', ctx,
                                        code, code_start_line, line, function, comment)
-        fix = "Initialize at declaration or before first use:\nint x = 0;\nOr for structs: struct Foo x = {0};"
+        var = ctx.get('var') or 'the variable'
+        fix = (f"Initialize `{var}` before first use:\n"
+               f"  {var} = 0;   // or the correct initial value for its type\n"
+               f"For a struct, use an aggregate initializer: `struct T {var} = {{0}};`")
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
@@ -3061,6 +3554,7 @@ def _generic_evidence_classify(checker: str, events: List[Dict], context: Dict,
             'function': function or '',
             'cid': cid,
             'ev': ev,
+            'tree': context.get('function_tree'),
         }
         acc = build_evidence(ctx, ev, checker)
         decision = DecisionAgent.evaluate(acc, checker)
@@ -3090,6 +3584,9 @@ def _generic_evidence_classify(checker: str, events: List[Dict], context: Dict,
         else:
             comment = (f"The {loc_s} requires manual review. {reasoning}{err_note}")
             fix = "Manual review required to determine classification and remediation."
+        code_start_line = context.get('code_start_line', 1)
+        comment = _apply_example_style(classification, checker, ctx, code,
+                                       code_start_line, line, function, comment)
         return classification, comment, fix, confidence
     except Exception:
         return ("Needs review",
@@ -3161,6 +3658,8 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
         'CONSTANT_EXPRESSION_RESULT': _analyze_constant_expression,
         'NO_BREAK':           _analyze_missing_break,
         'SHIFT_OVERFLOW':     _analyze_shift_overflow,
+        'CHECKED_RETURN':     _analyze_checked_return,
+        'CHECKED_QRS':        _analyze_checked_return,
     }
 
     def _finish(classification, comment, fix, confidence):

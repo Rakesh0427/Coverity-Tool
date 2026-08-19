@@ -4,7 +4,7 @@ Coverity Triage GUI — Analyse an HTML report folder, review/edit dispositions,
 and export to Excel.
 
 Usage:
-    python coverity_triage.py
+    python coverity_gui_excel.py
 """
 
 import csv
@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import tkinter as tk
@@ -25,9 +26,10 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from context_builder import build_defect_context
+from context_builder import build_defect_context, warm_workspace_index
 from heuristic_analyzer import analyze_defect
 from html_report_parser import parse_coverity_html
+from checker_categories import category_for_checker, CATEGORY_ORDER
 
 try:
     import openpyxl
@@ -39,8 +41,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Column definitions for the main table
 # ---------------------------------------------------------------------------
-COLUMNS = ("CID", "Checker", "File", "Line", "Disposition", "Confidence", "Comment")
-COL_WIDTHS = {"CID": 60, "Checker": 160, "File": 260, "Line": 55,
+COLUMNS = ("CID", "Checker", "Category", "File", "Line", "Disposition", "Confidence", "Comment")
+COL_WIDTHS = {"CID": 60, "Checker": 160, "Category": 140, "File": 260, "Line": 55,
               "Disposition": 130, "Confidence": 70, "Comment": 300}
 
 DISPOSITION_OPTIONS = ["Bug", "False positive", "Intentional", "Needs review"]
@@ -51,6 +53,11 @@ DISP_COLORS = {
     "Intentional":   "#d6e8ff",
     "Needs review":  "#fff9d6",
 }
+
+
+def _iid_safe(text):
+    """Return a Treeview-safe iid string derived from ``text``."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(text)) or "item"
 
 
 # ===========================================================================
@@ -65,6 +72,7 @@ class CoverityExcelApp:
 
         self._defect_rows: list[dict] = []   # processed results
         self._raw_defects: list[dict] = []   # parsed defects before analysis
+        self._cat_items: dict[str, str] = {}  # category name -> tree parent iid
 
         self._build_toolbar()
         self._build_table()
@@ -138,6 +146,7 @@ class CoverityExcelApp:
         # Configure row tag colours
         for disp, colour in DISP_COLORS.items():
             self.tree.tag_configure(disp, background=colour)
+        self.tree.tag_configure("cat_header", font=("Segoe UI", 9, "bold"))
 
         self.tree.bind("<Double-1>", self._on_row_double_click)
 
@@ -193,13 +202,23 @@ class CoverityExcelApp:
         try:
             defects = parse_coverity_html(report_path)
         except Exception as exc:
-            self.root.after(0, lambda error=str(exc): messagebox.showerror("Parse Error", error))
+            self.root.after(0, lambda: messagebox.showerror("Parse Error", str(exc)))
             self.root.after(0, lambda: self.run_btn.configure(state="normal"))
             return
 
         total = len(defects) if not limit else min(len(defects), limit)
         self.root.after(0, lambda: self._set_status(f"Analysing {total} defects…"))
         self.root.after(0, lambda: self.progress.configure(maximum=max(total, 1), value=0))
+
+        # Warm the one-time workspace index up front so the first defect does not
+        # silently stall the run (with no progress).
+        if src_root and os.path.isdir(src_root):
+            self.root.after(0, lambda: self._set_status("Indexing source tree once (cached)…"))
+            try:
+                warm_workspace_index(src_root, language)
+            except Exception:
+                pass
+            self.root.after(0, lambda: self._set_status(f"Analysing {total} defects…"))
 
         results = []
         for i, defect in enumerate(defects):
@@ -225,6 +244,7 @@ class CoverityExcelApp:
             row = {
                 "CID": cid,
                 "Checker": checker,
+                "Category": category_for_checker(checker),
                 "File": file_path,
                 "Line": line,
                 "Disposition": classification,
@@ -237,7 +257,7 @@ class CoverityExcelApp:
             # update UI from main thread
             idx = i
             row_copy = dict(row)
-            self.root.after(0, lambda r=row_copy, n=idx + 1: self._append_row(r, n))
+            self.root.after(0, lambda r=row_copy, i=idx, n=idx + 1: self._append_row(r, i, n))
 
         self._defect_rows = results
         self.root.after(0, self._analysis_done)
@@ -263,27 +283,53 @@ class CoverityExcelApp:
         for item in self.tree.get_children():
             self.tree.delete(item)
         self._defect_rows = []
+        self._cat_items = {}
 
-    def _append_row(self, row: dict, progress_val: int):
+    def _append_row(self, row: dict, row_idx: int, progress_val: int):
         tag = row.get("Disposition", "Needs review")
+        cat = category_for_checker(row.get("Checker", ""))
+        parent = self._cat_items.get(cat)
+        if parent is None or not self.tree.exists(parent):
+            # Insert the category header in its canonical CATEGORY_ORDER slot.
+            index = sum(1 for c in CATEGORY_ORDER if c in self._cat_items
+                        and CATEGORY_ORDER.index(c) < CATEGORY_ORDER.index(cat))
+            parent = self.tree.insert("", index, iid=f"cat-{_iid_safe(cat)}",
+                                      values=("", cat), tags=("cat_header",))
+            self._cat_items[cat] = parent
         self.tree.insert(
-            "", "end",
-            values=(row["CID"], row["Checker"], row["File"],
-                    row["Line"], row["Disposition"], row["Comment"]),
+            parent, "end", iid=f"r{row_idx}",
+            values=(row["CID"], row["Checker"], row["Category"], row["File"],
+                    row["Line"], row["Disposition"], row["Confidence"], row["Comment"]),
             tags=(tag,),
         )
+        # Keep the live running count on the category header.
+        self.tree.item(parent, values=("", f"{cat}  ({len(self.tree.get_children(parent))})"))
         self.progress.configure(value=progress_val)
 
     def _refresh_row(self, item_id: str, row: dict):
         tag = row.get("Disposition", "Needs review")
         self.tree.item(item_id, values=(
-            row["CID"], row["Checker"], row["File"],
-            row["Line"], row["Disposition"], row["Comment"],
+            row["CID"], row["Checker"], category_for_checker(row.get("Checker", "")),
+            row["File"], row["Line"], row["Disposition"], row["Confidence"], row["Comment"],
         ), tags=(tag,))
 
     def _sort_by(self, col: str):
-        data = [(self.tree.set(child, col), child)
-                for child in self.tree.get_children("")]
+        parents = self.tree.get_children("")
+        # Grouped view: sort only the leaf rows inside each category header,
+        # leaving header order (CATEGORY_ORDER) untouched.
+        if any(self.tree.get_children(p) for p in parents):
+            for p in parents:
+                data = [(self.tree.set(child, col), child)
+                        for child in self.tree.get_children(p)]
+                try:
+                    data.sort(key=lambda t: int(t[0]) if t[0].isdigit() else t[0].lower())
+                except Exception:
+                    data.sort(key=lambda t: t[0].lower())
+                for index, (_, child) in enumerate(data):
+                    self.tree.move(child, p, index)
+            return
+
+        data = [(self.tree.set(child, col), child) for child in parents]
         try:
             data.sort(key=lambda t: int(t[0]) if t[0].isdigit() else t[0].lower())
         except Exception:
@@ -298,7 +344,12 @@ class CoverityExcelApp:
         item = self.tree.focus()
         if not item:
             return
-        idx = self.tree.index(item)
+        if self.tree.parent(item) == "":
+            # Category header — toggle expand/collapse.
+            self.tree.item(item, open=not self.tree.item(item, "open"))
+            return
+        # Leaf rows use iid "r<idx>" so we map straight back to self._defect_rows.
+        idx = int(item[1:]) if item.startswith("r") and item[1:].isdigit() else self.tree.index(item)
         if idx >= len(self._defect_rows):
             return
         row = self._defect_rows[idx]
@@ -422,7 +473,7 @@ class CoverityExcelApp:
             ws.title = "Coverity Triage"
 
             # ---- Header row ----
-            headers = ["CID", "Checker", "File", "Line", "Disposition", "Confidence", "Comment",
+            headers = ["CID", "Checker", "Category", "File", "Line", "Disposition", "Confidence", "Comment",
                        "Events Summary"]
             header_fill = PatternFill("solid", fgColor="1F4E79")
             header_font = Font(bold=True, color="FFFFFF")
@@ -437,7 +488,7 @@ class CoverityExcelApp:
             ws.row_dimensions[1].height = 22
 
             # ---- Column widths ----
-            excel_col_widths = {1: 8, 2: 22, 3: 45, 4: 7, 5: 18, 6: 12, 7: 50, 8: 60}
+            excel_col_widths = {1: 8, 2: 22, 3: 18, 4: 45, 5: 7, 6: 18, 7: 12, 8: 50, 9: 60}
             for col_idx, width in excel_col_widths.items():
                 ws.column_dimensions[
                     openpyxl.utils.get_column_letter(col_idx)
@@ -478,7 +529,9 @@ class CoverityExcelApp:
                 else:
                     row["_wrapped_comment"] = _comment
                 values = [
-                    row["CID"], row["Checker"], row["File"], row["Line"],
+                    row["CID"], row["Checker"],
+                    row.get("Category") or category_for_checker(row.get("Checker", "")),
+                    row["File"], row["Line"],
                     row["Disposition"], row["Confidence"], row["_wrapped_comment"], events_summary,
                 ]
                 disp = row.get("Disposition", "Needs review")
@@ -509,6 +562,20 @@ class CoverityExcelApp:
 
             ws_sum.cell(row=r_idx + 2, column=1, value="Total").font = Font(bold=True)
             ws_sum.cell(row=r_idx + 2, column=2, value=sum(counts.values())).font = Font(bold=True)
+
+            # ---- Category summary block (columns D/E) ----
+            ws_sum.column_dimensions["D"].width = 30
+            ws_sum.column_dimensions["E"].width = 12
+            ws_sum.cell(row=1, column=4, value="Category").font = Font(bold=True)
+            ws_sum.cell(row=1, column=5, value="Count").font = Font(bold=True)
+            cat_counts = Counter(category_for_checker(r.get("Checker", ""))
+                                 for r in self._defect_rows)
+            for c_idx, (catn, cnt) in enumerate(cat_counts.most_common(), start=2):
+                ws_sum.cell(row=c_idx, column=4, value=catn)
+                ws_sum.cell(row=c_idx, column=5, value=cnt)
+            ws_sum.cell(row=c_idx + 2, column=4, value="Total").font = Font(bold=True)
+            ws_sum.cell(row=c_idx + 2, column=5, value=sum(cat_counts.values())).font = Font(bold=True)
+
             ws_sum.cell(row=r_idx + 3, column=1,
                         value=f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 

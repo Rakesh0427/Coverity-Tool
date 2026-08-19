@@ -8,7 +8,8 @@ categories (e.g. "Buffer overflow", "Null pointer dereferences").
 Used by:
   * local_gui.py            — ResultsPage tree grouping, category summary chips,
                               toolbar category filter, exported CSV columns
-  * coverity_triage.py      — HTML-report triage interface
+  * coverity_gui_excel.py   — legacy GUI grouping + Category column / summary sheet
+  * coverity_triage.py      — same as above
 
 Mapping follows Coverity's well-known checker taxonomy. Unknown checkers fall
 back to "Uncategorized" so nothing is ever silently hidden.

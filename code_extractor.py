@@ -4,6 +4,7 @@ import tree_sitter
 from tree_sitter import Language, Parser
 import tree_sitter_c
 import tree_sitter_cpp
+import os
 from typing import Optional, Any
 
 # Cache parsers per language to avoid re-creation
@@ -69,6 +70,37 @@ def _read_file(filepath: str) -> Optional[str]:
     except Exception:
         return None
 
+# Cache parsed trees per (filepath, language) keyed by mtime, so a source file is
+# tree-sitter-parsed ONCE even when many defects live in the same file. Repeated
+# parsing was a dominant per-defect cost on large reports.
+_PARSE_CACHE = {}
+
+def _parse_file(filepath: str, language: str) -> tuple[Optional[str], Any]:
+    """Return (source, tree) using a cached parse when the file is unchanged."""
+    key = f"{filepath}::{language.lower()}"
+    try:
+        mtime = os.stat(filepath).st_mtime_ns
+    except Exception:
+        mtime = 0
+    cached = _PARSE_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1], cached[2]
+    source = _read_file(filepath)
+    if not source:
+        return None, None
+    parser = _get_parser(language)
+    tree = parser.parse(bytes(source, 'utf-8'))
+    _PARSE_CACHE[key] = (mtime, source, tree)
+    return source, tree
+
+def invalidate_parse_cache(filepath: Optional[str] = None):
+    """Drop cached parses (e.g. after a source file is edited)."""
+    if filepath:
+        for k in [k for k in _PARSE_CACHE if k.startswith(filepath + '::')]:
+            del _PARSE_CACHE[k]
+    else:
+        _PARSE_CACHE.clear()
+
 def _find_node_at_line(root_node, line: int):
     """Return the smallest node that contains the given line."""
     target = None
@@ -88,12 +120,10 @@ def extract_enclosing_function(filepath: str, line: int, language: str = 'c') ->
     If no function found, return 50 lines around the line.
     Returns (code, start_line_in_file).
     """
-    source = _read_file(filepath)
+    source, tree = _parse_file(filepath, language)
     if not source:
         return ""
 
-    parser = _get_parser(language)
-    tree = parser.parse(bytes(source, 'utf-8'))
     root = tree.root_node
 
     node = _find_node_at_line(root, line)
@@ -141,26 +171,24 @@ def find_function_line_by_name(filepath: str, func_name: str, language: str = 'c
     Parse a source file and return the line number of the function definition
     matching func_name. Returns 0 if not found.
     """
-    source = _read_file(filepath)
+    source, tree = _parse_file(filepath, language)
     if not source or not func_name:
         return 0
 
+    root = tree.root_node
+
+    def _scan(node):
+        if node.type == 'function_definition':
+            name = _get_function_name(node)
+            if name == func_name:
+                return node.start_point[0] + 1  # tree-sitter is 0-indexed
+        for child in node.children:
+            result = _scan(child)
+            if result:
+                return result
+        return 0
+
     try:
-        parser = _get_parser(language)
-        tree = parser.parse(bytes(source, 'utf-8'))
-        root = tree.root_node
-
-        def _scan(node):
-            if node.type == 'function_definition':
-                name = _get_function_name(node)
-                if name == func_name:
-                    return node.start_point[0] + 1  # tree-sitter is 0-indexed
-            for child in node.children:
-                result = _scan(child)
-                if result:
-                    return result
-            return 0
-
         return _scan(root)
     except Exception:
         return 0
