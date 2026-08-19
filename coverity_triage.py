@@ -193,7 +193,7 @@ class CoverityExcelApp:
         try:
             defects = parse_coverity_html(report_path)
         except Exception as exc:
-            self.root.after(0, lambda: messagebox.showerror("Parse Error", str(exc)))
+            self.root.after(0, lambda error=str(exc): messagebox.showerror("Parse Error", error))
             self.root.after(0, lambda: self.run_btn.configure(state="normal"))
             return
 
