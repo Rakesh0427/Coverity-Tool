@@ -1,33 +1,35 @@
-Coverity Findings Analyzer v1.4 — Windows Setup (Standalone)
+Coverity Findings Analyzer v1.4 — Windows Setup (One-Click)
 =============================================================
-No Python needed. No extra work. Just unzip and double-click.
+Fix for "This app can't run on your PC" — see below.
+
+QUICK RUN (No build needed, works now):
+  1. Double-click CoverityTool.bat  (NOT the .exe placeholder)
+     - This runs directly via Python (no compatibility issue, no Tcl error)
+     - Requires Python 3.10+ installed and added to PATH
+     - If Python missing, it will tell you where to download
+
+ALTERNATIVE: Build native EXE for YOUR PC (no Python needed after):
+  1. Double-click BUILD_EXE_ON_WINDOWS.bat
+     - This builds CoverityTool.exe specifically for YOUR Windows (64-bit)
+     - Matches your Windows version, so "can't run on your PC" disappears
+     - Takes 2-4 minutes, creates _internal folder with libs (fixes Tcl)
+  2. Then double-click CoverityTool.exe
 
 WHAT'S INSIDE:
-  CoverityTool.exe          <- Double-click to run (Windows 10/11 64-bit)
-  _internal/                <- Python libs, tree-sitter, z3, lxml, Tcl/Tk 8.6 (fixes Tcl error)
-  libs/                     <- Additional bundled libs
-  docs/
-    Coverity_Tool_User_Guide.docx  <- Detailed guide with highlighted screenshots (18 sections)
-    sample_src/             <- 2 sample C files for quick test without server
-    sample_report/          <- Sample HTML report (2 defects)
-  README.txt                <- This file
+  CoverityTool.bat               <- WORKS NOW, one-click via Python
+  BUILD_EXE_ON_WINDOWS.bat       <- Build real native exe for your PC
+  CoverityTool.exe               <- Placeholder until you build (see above) or download from Releases
+  _internal/ + libs/             <- Tcl/Tk 8.6, tree-sitter, z3 (fixes Tcl error)
+  docs/Coverity_Tool_User_Guide.docx  <- 18 sections, highlighted screenshots
+  docs/sample_src/ + sample_report/   <- Demo files
 
-HOW TO RUN (2 seconds):
-  1. Unzip Coverity-Tool-Windows-Setup-1.4.zip anywhere (e.g., Desktop)
-  2. Double-click CoverityTool.exe
-  3. Follow docs/Coverity_Tool_User_Guide.docx p.7: Setup → pick report → pick source → Start
+TROUBLESHOOTING "This app can't run on your PC":
+  • Cause: The placeholder exe in repo was built on Linux (dummy MZ header), not Windows 64-bit
+  • Fix 1: Use CoverityTool.bat instead (works immediately, no build)
+  • Fix 2: Run BUILD_EXE_ON_WINDOWS.bat to build a native exe for YOUR Windows (recommended)
+  • Fix 3: Download the real Windows exe from GitHub Releases:
+      https://github.com/Rakesh0427/Coverity-Tool/releases
+      Look for Coverity-Tool-Windows-Setup.zip under Latest Release
 
-If you see a Tcl error (very rare now fixed), use run_tool.bat:
-  Double-click run_tool.bat in the same folder.
-
-BUILD NOTE:
-  This folder was generated via PyInstaller one-folder mode (CoverityTool.spec).
-  On Linux sandbox, CoverityTool.exe is a placeholder; real Windows exe is built
-  automatically via GitHub Actions (see .github/workflows/build-windows-exe.yml)
-  and attached to Releases. Download the latest Release ZIP for the real Windows exe.
-  Or on Windows, double-click build_exe.bat in repo root to rebuild locally.
-
-SUPPORT:
-  See guide §16 Troubleshooting & §17 Security. Attach coverity_dispositions.csv when asking.
-  Source never leaves your machine.
-
+Tcl Error fixed: _internal/tcl/tcl8.6 + local_gui.py now sets TCL_LIBRARY via sys._MEIPASS
+Source never leaves your machine.
