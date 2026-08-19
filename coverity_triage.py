@@ -4,7 +4,7 @@ Coverity Triage GUI — Analyse an HTML report folder, review/edit dispositions,
 and export to Excel.
 
 Usage:
-    python coverity_gui_excel.py
+    python coverity_triage.py
 """
 
 import csv
