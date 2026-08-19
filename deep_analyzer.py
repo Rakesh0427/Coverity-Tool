@@ -734,7 +734,7 @@ def synthesize_expert_comment(checker_family: str, classification: str, context:
     if cwe_prefix and cwe_prefix not in base:
         base = cwe_prefix + base
     # CWE/CERT/OWASP footer
-    if cwe:
+    if cwe and f"CWE-{cwe['cwe_id']}" not in base:
         base = base.rstrip() + f"\nReference: CWE-{cwe['cwe_id']} | CERT {cwe['cert']} | {cwe['owasp']} ({cwe['cwe_url']})"
     sg_rule = context.get('semgrep_rule', '')
     if sg_rule:

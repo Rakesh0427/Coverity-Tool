@@ -69,6 +69,9 @@ def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
     info = _cwe_info(checker)
     cwe_tag = f" // CWE-{info['cwe_id']}" if info else ""
     fix = (default_fix or "").strip()
+    # Keep fix concise and code-anchored; avoid adding duplicate CWE if already present
+    if cwe_tag and cwe_tag in fix:
+        return fix.strip()
     if len(fix) > 400:
         lines = [l for l in fix.splitlines() if l.strip()]
         code_lines = [l for l in lines if any(k in l for k in ('if (', 'sizeof', 'strncpy', 'snprintf', 'free(', 'return', 'memcpy'))]
@@ -76,11 +79,25 @@ def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
             fix = code_lines[0].strip() + cwe_tag
         else:
             fix = lines[0][:220] + cwe_tag
-    elif cwe_tag and cwe_tag not in fix:
-        fix = fix.rstrip('.') + f".{cwe_tag}" if fix and not fix.endswith(cwe_tag) else fix + cwe_tag
+        return fix.strip()
+    # Only tag concise fixes that look like code, not generic "No fix required"
+    if fix.lower().startswith("no fix"):
+        return fix.strip()
+    if cwe_tag and len(fix) < 300:
+        # append tag as code comment, not sentence
+        if fix.endswith(";"):
+            fix = fix + cwe_tag
+        elif fix:
+            fix = fix + cwe_tag
     return fix.strip()
 
 def _append_cwe_footer(comment: str, checker: str) -> str:
+    info = _cwe_info(checker)
+    if not info:
+        return comment
+    # Deduplicate: header already contains CWE-{id} {name} ... — don't repeat full Reference line
+    if f"CWE-{info['cwe_id']}" in comment:
+        return comment
     ref = format_cwe_reference(checker)
     if ref and ref not in comment:
         return comment.rstrip() + f"\n\n{ref}"
