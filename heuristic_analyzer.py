@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Senior-engineer-grade heuristic analyzer for Coverity defects.
-Generates paragraph-style disposition comments with deep static analysis.
+Generates expert-level disposition comments with CWE / CERT / OWASP reference.
 
-v6.0 — Improved Classification Accuracy Edition
-  • Removed CWE reference appending from all comments and fixes
-  • Improved decision thresholds for more accurate Bug/FP/Needs review
-  • All checkers now produce meaningful confidence scores
-  • Better handling of edge cases and mixed signals
+v7.0 — Expert CWE Edition (senior review perspective)
+  • CWE/CERT/OWASP/CVSS cited in every disposition (CWE as primary taxonomy)
+  • Expert analysis: root cause → taint/flow → guard dominance → exploit impact
+  • Proposed fixes are concise code suggestions (just suggestion, not verbose)
+  • Retained v6 decision thresholds; confidence remains calibrated
 """
 import re
 import subprocess
@@ -30,6 +30,7 @@ from ast_analyzer import (
     find_call_expression, find_enclosing_guard, get_source
 )
 from comment_style import render_example_comment
+from cwe_mapping import get_cwe, format_cwe_reference
 
 # Optional enhanced modules
 try:
@@ -44,6 +45,46 @@ try:
 except ImportError:
     _FLOW_ANALYSIS = False
 
+
+# ---------------------------------------------------------------------------
+# Expert CWE helpers — senior perspective (CWE/CERT/OWASP as primary taxonomy)
+# ---------------------------------------------------------------------------
+
+def _cwe_info(checker: str) -> dict:
+    try:
+        return get_cwe(checker) or {}
+    except Exception:
+        return {}
+
+def _cwe_header(checker: str) -> str:
+    info = _cwe_info(checker)
+    if not info:
+        return ""
+    return f"CWE-{info['cwe_id']} {info['cwe_name']} (CERT {info['cert']}, {info['owasp']}, CVSS {info['cvss_base']}) — {info['cwe_url']}"
+
+def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
+    """Make Proposed Fix a *just suggestion*: one concise code-oriented line.
+    Senior reviewers want the exact change, not a paragraph.
+    """ 
+    info = _cwe_info(checker)
+    cwe_tag = f" // CWE-{info['cwe_id']}" if info else ""
+    fix = (default_fix or "").strip()
+    if len(fix) > 400:
+        lines = [l for l in fix.splitlines() if l.strip()]
+        code_lines = [l for l in lines if any(k in l for k in ('if (', 'sizeof', 'strncpy', 'snprintf', 'free(', 'return', 'memcpy'))]
+        if code_lines:
+            fix = code_lines[0].strip() + cwe_tag
+        else:
+            fix = lines[0][:220] + cwe_tag
+    elif cwe_tag and cwe_tag not in fix:
+        fix = fix.rstrip('.') + f".{cwe_tag}" if fix and not fix.endswith(cwe_tag) else fix + cwe_tag
+    return fix.strip()
+
+def _append_cwe_footer(comment: str, checker: str) -> str:
+    ref = format_cwe_reference(checker)
+    if ref and ref not in comment:
+        return comment.rstrip() + f"\n\n{ref}"
+    return comment
 
 # ---------------------------------------------------------------------------
 # New helpers for precise comment generation
@@ -743,9 +784,11 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
     ev_index    = ctx.get('ev_index_value')
 
     loc = f"{func}() [{fname} line {line}]" if line else f"{func}() [{fname}]"
+    cwe = _cwe_header(checker)
+    cwe_sentence = f" {cwe}." if cwe else ""
 
     # ------------------------------------------------------------------
-    # BUG — security-advocate writeup
+    # BUG — security-advocate writeup (CWE/CERT/OWASP perspective)
     # ------------------------------------------------------------------
     if decision.classification == "Bug":
         _CHECKER_LABELS = {
@@ -769,7 +812,7 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
             'NO_BREAK':                   'Missing break in switch (NO_BREAK)',
         }
         label = _CHECKER_LABELS.get(checker, f'Defect ({checker})')
-        parts = [f"[CONFIRMED BUG] {label} in {loc}.\n\n"]
+        parts = [f"[CONFIRMED BUG] {label} in {loc}.{cwe_sentence}\n\n"]
 
         # Root cause
         parts.append("Root cause: ")
@@ -904,7 +947,7 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
     if decision.classification in ("False positive", "Intentional"):
         # Natural review-trials style paragraph (img-2 format).
         disp_word = "a false positive" if decision.classification == "False positive" else "intentional"
-        parts = [f"After reviewing {func}(), the {checker} at line {line} is {disp_word}. "]
+        parts = [f"After reviewing {func}(), the {checker} at line {line} is {disp_word}.{cwe_sentence} "]
 
         evidence_items = []
 
@@ -1026,7 +1069,7 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
     # NEEDS REVIEW — natural reviewer paragraph (img-2 style), not a
     # rigid template. Same voice as the False positive branch above.
     # ------------------------------------------------------------------
-    parts = [f"After reviewing {func}(), the {checker} at line {line} needs a manual look. "]
+    parts = [f"After reviewing {func}(), the {checker} at line {line} needs a manual look.{cwe_sentence} "]
 
     _RISK = {
         'OVERRUN':                  'high — out-of-bounds writes are a primary memory-corruption vector',
@@ -1536,17 +1579,9 @@ def _analyze_buffer_size(code: str, sub_checker: str, events: List[Dict],
                 parts.append(" without length validation, making this a real buffer-handling bug.")
         comment = re.sub(r'\s{2,}', ' ', "".join(parts)).strip()
         if sink == 'strncpy':
-            fix = ("Add an explicit null-terminator after the copy, or use a size that is one less "
-                   "than the full buffer capacity:\n"
-                   f"  {sink}({dest}, {src}, sizeof({dest}) - 1);\n"
-                   f"  {dest}[sizeof({dest}) - 1] = '\\0';\n"
-                   "Or, on Windows/embedded compilers that support it:\n"
-                   f"  strncpy_s({dest}, sizeof({dest}), {src}, _TRUNCATE);")
+            fix = f"Suggestion: {sink}({dest}, {src}, sizeof({dest})-1); {dest}[sizeof({dest})-1]='\\0'; // CWE-120/170 ensure NUL"
         elif sink == 'strncat':
-            fix = ("Account for existing content so the result stays bounded:\n"
-                   f"  strncat_s({dest}, sizeof({dest}), {src}, _TRUNCATE);\n"
-                   "// or, using strncat:\n"
-                   f"  strncat({dest}, {src}, sizeof({dest}) - strlen({dest}) - 1);")
+            fix = f"Suggestion: strncat({dest}, {src}, sizeof({dest})-strlen({dest})-1); // CWE-120"
         else:
             fix = generate_contextual_fix('buffer_overflow', 'Bug', ctx)
 
@@ -2272,10 +2307,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             # Fix
             
             # Fix
-            fix = f"""Validate `{idx_var}` before indexing `{arr_name}`:
-  if ({idx_var} < 0 || {idx_var} >= (int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) {{
-      return ERROR;
-  }}"""
+            fix = f"Suggestion: if ({idx_var} <0 || {idx_var} >= (int)(sizeof({arr_name})/sizeof({arr_name}[0]))) return ERROR; // CWE-125/787"
         
         else:
             # ---- Generic fallback: extract the actual source line to name the expression ----
@@ -2399,8 +2431,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
 
         parts.append("Please verify the array bounds (including any cross-file guards) before finalizing the disposition.")
         comment = re.sub(r'\s{2,}', ' ', " ".join(parts)).strip()
-        fix = f"""Add explicit index validation before every array access:
-  if ({idx_var} < 0 || {idx_var} >= ARRAY_SIZE) return ERROR;"""
+        fix = f"Suggestion: if ({idx_var}<0 || {idx_var}>=ARRAY_SIZE) return ERROR; // CWE-125"
         return "Needs review", comment, fix, decision.confidence
 
 def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
@@ -3717,6 +3748,9 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
             confidence = min(float(confidence), 0.70)
         if notes:
             comment = (comment + "\n\n" + " ".join(notes)).strip()
+        # Expert: always append CWE reference footer and make fix a just-suggestion
+        comment = _append_cwe_footer(comment, checker)
+        fix = _expert_fix_suggestion(checker, context, fix)
         return classification, comment, fix, confidence
 
     if not code:

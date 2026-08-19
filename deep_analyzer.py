@@ -711,10 +711,12 @@ EXPERT_TEMPLATES = {
 }
 
 
-def synthesize_expert_comment(checker_family: str, classification: str, context: Dict) -> str:
-    """Generate a natural expert-style comment from structured analysis context."""
+def synthesize_expert_comment(checker_family: str, classification: str, context: Dict, checker: str = "") -> str:
+    """Generate expert comment with CWE/CERT perspective — senior reviewer voice."""
     import hashlib
-
+    # Resolve CWE for taxonomy sentence
+    cwe = get_cwe(checker or context.get('checker',''))
+    cwe_prefix = f"[CWE-{cwe['cwe_id']} {cwe['cwe_name']}] " if cwe else ""
     templates = EXPERT_TEMPLATES.get(checker_family, {}).get(classification, [])
     if not templates:
         base = context.get('default_comment', 'Manual review required.')
@@ -729,22 +731,24 @@ def synthesize_expert_comment(checker_family: str, classification: str, context:
             for key, val in context.items():
                 base = base.replace('{' + key + '}', str(val))
             base = re.sub(r'\{[A-Za-z_]+\}', '', base)
-
-    # semgrep independent confirmation appended when available
+    if cwe_prefix and cwe_prefix not in base:
+        base = cwe_prefix + base
+    # CWE/CERT/OWASP footer
+    if cwe:
+        base = base.rstrip() + f"\nReference: CWE-{cwe['cwe_id']} | CERT {cwe['cert']} | {cwe['owasp']} ({cwe['cwe_url']})"
     sg_rule = context.get('semgrep_rule', '')
     if sg_rule:
-        base += f" (semgrep rule `{sg_rule}` independently confirms this finding.)"
-
+        base += f" (semgrep `{sg_rule}` confirms.)"
     return base
 
 
 # ---------------------------------------------------------------------------
 # Fix Generator with Context Awareness
 # ---------------------------------------------------------------------------
-def generate_contextual_fix(checker_family: str, classification: str, context: Dict) -> str:
-    """Generate a fix that uses actual variable names from the code."""
+def generate_contextual_fix(checker_family: str, classification: str, context: Dict, checker: str = "") -> str:
+    """Generate a *just suggestion* fix — concise, code-anchored, CWE-tagged."""
     if classification in ('False positive', 'Intentional'):
-        return "No fix required."
+        return "No fix required." 
 
     fixes = {
         'buffer_overflow': {
@@ -792,8 +796,25 @@ def generate_contextual_fix(checker_family: str, classification: str, context: D
         for key, val in context.items():
             fix_body = fix_body.replace('{' + key + '}', str(val))
         fix_body = re.sub(r'\{[A-Za-z_]+\}', '', fix_body)
-
-    return fix_body
+    # Make fix concise: keep first code suggestion, append CWE tag
+    cwe = get_cwe(checker or context.get('checker',''))
+    if cwe:
+        tag = f" // CWE-{cwe['cwe_id']}"
+        if tag not in fix_body and len(fix_body) < 600:
+            # append tag to first line if fix contains code
+            if 'if (' in fix_body or 'sizeof' in fix_body:
+                fix_body = fix_body.strip() + tag
+    # Trim verbose fixes to just suggestion (first 2 lines)
+    if len(fix_body) > 500:
+        lines = [l for l in fix_body.splitlines() if l.strip()]
+        # keep up to 3 lines that look like code/suggestion
+        keep = []
+        for l in lines:
+            keep.append(l)
+            if len(keep) >= 3 and any(k in l for k in (';', 'return', '}', '{')):
+                break
+        fix_body = "\n".join(keep[:3])
+    return fix_body.strip()
 
 
 # ---------------------------------------------------------------------------

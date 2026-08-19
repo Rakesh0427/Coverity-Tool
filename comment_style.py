@@ -19,6 +19,10 @@ Every renderer returns None when it cannot extract enough concrete code facts,
 so the caller falls back to its existing comment and never degrades output.
 """
 import re
+try:
+    from cwe_mapping import get_cwe
+except Exception:
+    get_cwe = lambda x: {}
 from typing import Dict, List, Optional, Tuple
 
 # Optional AST helper (tree-sitter based); degrades to regex when unavailable.
@@ -277,8 +281,8 @@ def _render_buffer_or_string(classification: str, checker: str, ctx: Dict,
         return None
 
     if classification == "Bug":
-        # Expert-level narrative: name the root cause, the security impact and the
-        # concrete remediation (instead of a bare "copies data without length check").
+        # Expert-level with CWE (e.g., CWE-120/787 for buffer, CWE-170 for S_NULL)
+        # Keep concise: cite CWE once, then root cause → impact.
         origin = ctx.get('origin') or ''
         tainted = bool(ctx.get('taint_desc')) and 'user-controlled' in ctx.get('taint_desc')
         if tainted:
@@ -291,9 +295,10 @@ def _render_buffer_or_string(classification: str, checker: str, ctx: Dict,
             source_clause = f"the length of `{src}` is not validated"
 
         if dest and count and _is_size_constant(count):
+            cwe = _cwe_sentence(checker)
             return (f"{sink}() at line {line} copies exactly {count} bytes into `{dest}`, "
                     f"filling it completely and leaving no room for the null terminator; "
-                    f"`{dest}` is never null-terminated after the copy. Any later string "
+                    f"`{dest}` is never null-terminated after the copy.{cwe} Any later string "
                     f"operation reads past the end of the buffer (out-of-bounds read).")
         if dest and count and _is_strlen_count(count):
             return (f"{sink}() at line {line} uses `strlen` (`{count}`) as the copy count. "
@@ -658,7 +663,8 @@ def _render_generic_ast(classification: str, checker: str, ctx: Dict, code: str,
         loc = f"line {line} in {function}()" if (line and function) else f"{function}()"
         impact = _GENERIC_IMPACT.get(checker, f"a {checker} defect at this statement")
         expr_note = f" The flagged statement is: `{expr}`." if expr else ""
-        return (f"At {loc}, {var_ref} is flagged for {impact}. Because the flagged operation "
+        cwe = _cwe_sentence(checker)
+        return (f"At {loc}, {var_ref} is flagged for {impact}.{cwe} Because the flagged operation "
                 f"is not defended at this site — no effective guard, bound, or error check "
                 f"resolves it on the reaching path — the finding is treated as a real "
                 f"defect.{expr_note}")
