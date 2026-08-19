@@ -2775,11 +2775,12 @@ def _analyze_resource_leak(code: str, sub_checker: str, events: List[Dict],
 
     decision = DecisionAgent.evaluate(acc, 'RESOURCE_LEAK')
 
+    _res = ctx.get('resource') or ctx.get('var') or 'resource'
+    _rel = ctx.get('release_func') or 'free'
     if decision.classification == "Bug":
-        comment = (f"No release function (fclose/free/close) or RAII wrapper is visible in the extracted context of {function}(). "
-                   f"If a resource is allocated on a path that reaches line {line}, it likely leaks. "
-                   f"{decision.reasoning[0] if decision.reasoning else ''}")
-        fix = "Ensure all allocation paths have matching cleanup, including error branches. Prefer RAII or goto cleanup."
+        comment = (f"In {function}() at line {line}, `{_res}` is acquired but not released on all paths (CWE-401/404, CERT MEM31-C/FIO42-C). "
+                   f"Leak on error path → descriptor/memory exhaustion.")
+        fix = f"{_rel}({_res}); // or goto cleanup; RAII // CWE-401"
         return "Bug", comment, fix, decision.confidence
     elif decision.classification == "False positive":
         comment = _build_comment_from_evidence(decision, ctx)
@@ -2957,16 +2958,17 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
                                        code_start_line, line, function, comment)
         return "False positive", comment, "No fix required.", decision.confidence
 
+    _v = ctx.get('var') or 'result'
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, a potentially negative return value is used directly as a size or index. "
-                   f"If the function returns -1 on error, this will be cast to a large unsigned value, causing massive allocation or memory corruption.")
-        fix = "Add check before use:\nif (size < 0) return ERROR;\nptr = malloc(size);"
+        comment = (f"In {function}() at line {line}, `{_v}` may be negative (e.g., -1 error) and is used as size/index without check (CWE-20, CERT ERR33-C). "
+                   f"Cast to unsigned → ~4GB allocation / OOB.")
+        fix = f"if ({_v} < 0) return ERROR; // CWE-20 CERT ERR33-C\nptr = malloc((size_t){_v});"
         comment = _apply_example_style('Bug', 'NEGATIVE_RETURNS', ctx, code,
                                        code_start_line, line, function, comment)
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, "Add explicit validation for all functions that may return error codes:\nif (result < 0) { /* handle error */ }", decision.confidence
+    return "Needs review", comment, f"if ({_v}<0) return ERROR; // CWE-20", decision.confidence
 
 
 # ---------------------------------------------------------------------------
@@ -3316,14 +3318,13 @@ def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
         return "False positive", comment, "No fix required.", decision.confidence
 
     if decision.classification == "Bug":
-        comment = (f"In {function}(), a variable is read at line {line} before being assigned a definite value. "
-                   f"This will contain stack garbage or indeterminate data, leading to unpredictable behavior.")
+        _t = ctx.get('uninit_type') or 'int'
+        _v2 = ctx.get('var') or 'var'
+        comment = (f"In {function}() at line {line}, `{_v2}` (type `{_t}`) is read before definite assignment (CWE-457, CERT EXP33-C). "
+                   f"Automatic storage not zeroed → indeterminate stack bytes → info leak / nondeterministic branch.")
         comment = _apply_example_style("Bug", 'UNINIT', ctx,
                                        code, code_start_line, line, function, comment)
-        var = ctx.get('var') or 'the variable'
-        fix = (f"Initialize `{var}` before first use:\n"
-               f"  {var} = 0;   // or the correct initial value for its type\n"
-               f"For a struct, use an aggregate initializer: `struct T {var} = {{0}};`")
+        fix = f"{_t} {_v2} = 0; // or = {{0}} for struct // CWE-457 CERT EXP33-C"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
@@ -3368,14 +3369,31 @@ def _analyze_divide_by_zero(code: str, sub_checker: str, events: List[Dict],
         comment = _build_comment_from_evidence(decision, ctx)
         return "False positive", comment, "No fix required.", decision.confidence
 
+    # Extract actual divisor variable for accurate fix
+    _divisor = ""
+    try:
+        _lines = code.splitlines()
+        _rel = line - code_start_line
+        if 0 <= _rel < len(_lines):
+            _dl = _lines[_rel]
+            # find divisor after / or %
+            _m = __import__('re').search(r'/\s*([A-Za-z_][A-Za-z0-9_]*)', _dl)
+            if not _m:
+                _m = __import__('re').search(r'%\s*([A-Za-z_][A-Za-z0-9_]*)', _dl)
+            if _m:
+                _divisor = _m.group(1)
+        if not _divisor:
+            _divisor = ctx.get('var','divisor') or 'divisor'
+    except Exception:
+        _divisor = 'divisor'
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, a division operation has no visible non-zero guard. "
-                   f"If the divisor is zero, this triggers a hardware exception (SIGFPE).")
-        fix = "Add guard before division:\nif (divisor == 0) return ERROR;\nresult = dividend / divisor;"
+        comment = (f"In {function}() at line {line}, division by `{_divisor}` has no visible non-zero guard (CWE-369, CERT INT33-C). "
+                   f"If `{_divisor}` is zero, this triggers SIGFPE — denial of service.")
+        fix = f"if ({_divisor} == 0) return ERROR; // CWE-369 CERT INT33-C\nresult = dividend / {_divisor};"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, "Add explicit non-zero validation before all division operations.", decision.confidence
+    return "Needs review", comment, f"if ({_divisor} == 0) return ERROR; // CWE-369", decision.confidence
 
 
 def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
@@ -3408,14 +3426,22 @@ def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
         comment = _build_comment_from_evidence(decision, ctx)
         return "False positive", comment, "No fix required.", decision.confidence
 
+    _ptr = ctx.get('var') or _extract_var_from_deref(code) or 'ptr'
+    # try to find actual freed var: look for free(var) near line
+    try:
+        _ml = __import__('re').search(r'free\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', code)
+        if _ml:
+            _ptr = _ml.group(1)
+    except Exception:
+        pass
     if decision.classification == "Bug":
-        comment = (f"At line {line} in {function}(), a pointer may be dereferenced after being freed. "
-                   f"If the pointer is not NULLed after free(), subsequent access reads/writes freed memory.")
-        fix = "Set pointer to NULL after free():\nfree(ptr); ptr = NULL;\nAnd validate before reuse: if (!ptr) return;\nConsider using smart pointers or arena allocators."
+        comment = (f"At line {line} in {function}(), `{_ptr}` may be dereferenced after being freed (CWE-416, CERT MEM30-C). "
+                   f"If `{_ptr}` is not NULLed after free(), subsequent access is use-after-free — heap corruption / code execution.")
+        fix = f"free({_ptr}); {_ptr} = NULL;\nif (!{_ptr}) return ERROR; // CWE-416 CERT MEM30-C"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, "Set pointer to NULL after free() and validate before reuse.", decision.confidence
+    return "Needs review", comment, f"free({_ptr}); {_ptr}=NULL; if(!{_ptr}) return; // CWE-416", decision.confidence
 
 
 def _analyze_sizeof_mismatch(code: str, sub_checker: str, events: List[Dict],
@@ -3457,16 +3483,23 @@ def _analyze_sizeof_mismatch(code: str, sub_checker: str, events: List[Dict],
                                        code, code_start_line, line, function, comment)
         return "False positive", comment, "No fix required.", decision.confidence
 
+    _var = ctx.get('var') or 'ptr'
+    try:
+        _ml2 = __import__('re').search(r'sizeof\s*\(\s*([A-Za-z_][A-Za-z0-9_\*\s]+)\s*\)', code)
+        if _ml2:
+            _var = _ml2.group(1).strip().replace('*','').split()[-1]
+    except Exception:
+        pass
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, sizeof() may be applied to the wrong type (e.g., pointer size instead of element size). "
-                   f"This often causes allocation of insufficient memory.")
+        comment = (f"In {function}() at line {line}, sizeof({_var}) is applied to the pointer type not the pointee (CWE-467, CERT ARR01-C). "
+                   f"On 64-bit, pointer is 8 bytes vs object size — under-allocation → heap overflow.")
         comment = _apply_example_style("Bug", 'SIZEOF_MISMATCH', ctx,
                                        code, code_start_line, line, function, comment)
-        fix = "Use sizeof(*ptr) or sizeof(arr[0]) to make code type-safe:\nmalloc(count * sizeof(*ptr));  // not sizeof(ptr)"
+        fix = f"malloc(count * sizeof(*{_var})); // CWE-467 CERT ARR01-C — not sizeof({_var})"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, "Use sizeof(*ptr) or sizeof(arr[0]) for type-safe element sizing.", decision.confidence
+    return "Needs review", comment, f"sizeof(*{_var}) // CWE-467", decision.confidence
 
 
 def _analyze_constant_expression(code: str, sub_checker: str, events: List[Dict],
@@ -3650,8 +3683,10 @@ def _generic_evidence_classify(checker: str, events: List[Dict], context: Dict,
         loc_s = f"{checker} finding{loc}{where}"
 
         if classification == "Bug":
+            # Try to produce code-like fix with actual var if available
+            _gv = ctx.get('var') or ctx.get('dest_var') or 'var'
             comment = (f"The {loc_s} is classified as a Bug. {reasoning}{err_note}")
-            fix = "Fix the identified defect at the flagged location."
+            fix = f"Fix at {loc_s}: validate {_gv} before use // {checker} CWE"
         elif classification == "False positive":
             comment = (f"The {loc_s} is a false positive. {reasoning}{err_note}")
             fix = "No fix required."
