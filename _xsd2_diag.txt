@@ -1,0 +1,48 @@
+### getStreamDefectsResponse:
+<xs:complexType name="getStreamDefectsResponse">
+<xs:sequence>
+<xs:element name="return" type="tns:streamDefectDataObj" minOccurs="0" maxOccurs="unbounded"/>
+</xs:sequence>
+</xs:complexType>
+
+### defectInstanceDataObj:
+<xs:complexType name="defectInstanceDataObj">
+<xs:sequence>
+<xs:element name="events" type="tns:eventDataObj" nillable="true" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="properties" type="tns:propertyDataObj" nillable="true" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="category" type="tns:localizedValueDataObj" minOccurs="0"/>
+<xs:element name="checkerName" type="xs:string" minOccurs="0"/>
+<xs:element name="component" type="xs:string" minOccurs="0"/>
+<xs:element name="cwe" type="xs:int" minOccurs="0"/>
+<xs:element name="domain" type="xs:string" minOccurs="0"/>
+<xs:element name="eventSetCaptions" type="xs:string" nillable="true" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="extra" type="xs:string" minOccurs="0"/>
+<xs:element name="function" type="tns:functionInfoDataObj" minOccurs="0"/>
+<xs:element name="id" type="tns:defectInstanceIdDataObj" minOccurs="0"/>
+<xs:element name="impact" type="tns:localizedValueDataObj" minOccurs="0"/>
+<xs:element name="issueKinds" type="tns:localizedValueDataObj" nillable="true" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="localEffect" type="xs:string" minOccurs="0"/>
+<xs:element name="longDescription" type="xs:string" minOccurs="0"/>
+<xs:element name="misraCategory" type="xs:string" minOccurs="0"/>
+<xs:element name="subcategory" type="xs:string" minOccurs="0"/>
+<xs:element name="type" type="tns:localizedValueDataObj" minOccurs="0"/>
+</xs:sequence>
+</xs:complexType>
+
+### fileIdDataObj:
+<xs:complexType name="fileIdDataObj">
+<xs:sequence>
+<xs:element name="contentsMD5" type="xs:string"/>
+<xs:element name="filePathname" type="xs:string"/>
+</xs:sequence>
+</xs:complexType>
+
+### streamDefectsPageDataObj:
+NOT FOUND
+
+### getMergedDefectsForStreamsResponse:
+<xs:complexType name="getMergedDefectsForStreamsResponse">
+<xs:sequence>
+<xs:element name="return" type="tns:mergedDefectsPageDataObj" minOccurs="0"/>
+</xs:sequence>
+</xs:complexType>

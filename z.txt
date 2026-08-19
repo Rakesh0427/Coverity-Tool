@@ -1,0 +1,11 @@
+﻿python.exe : did not find executable at 'C:\Program 
+Files\Python313\python.exe': The system cannot find the path specified.
+At line:1 char:73
++ ... rity_Tool'; & '.\venv\Scripts\python.exe' -c "import zeep;print('ZEEP ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (did not find ex...path specified. 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+

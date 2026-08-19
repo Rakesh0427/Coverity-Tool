@@ -1,0 +1,148 @@
+============================================================
+COVERITY HEURISTIC TRIAGE TOOL – VS CODE SETUP & RUN
+
+PREREQUISITES
+1. Python 3.10 or later installed and added to PATH.
+Check by opening a terminal (VS Code: Terminal > New Terminal) and typing:
+python --version
+
+1. Visual Studio Code with the Python extension installed.
+
+1. (Optional) GitHub Copilot – not required for running the tool,
+only for modifying it later.
+
+1. C/C++ build tools (only if tree-sitter fails to install from pre-compiled wheels). 
+◦ Windows: Install "Visual Studio Build Tools" with "Desktop development with C++" workload.
+◦ Linux: sudo apt install build-essential cmake
+◦ macOS: xcode-select --install ; brew install cmake
+
+1. If your company network blocks pip / PyPI: 
+◦ Download the required wheels on a machine with internet, transfer them via USB,
+and install with: pip install --no-index --find-links=./offline_packages -r requirements.txt
+
+STEP 1 – GET THE TOOL FILES
+Unzip the coverity_triage folder (provided) into a directory of your choice.
+Open that folder in VS Code: File > Open Folder...
+
+The folder should contain:
+requirements.txt
+html_report_parser.py
+report_parser.py
+code_extractor.py
+context_builder.py
+heuristic_analyzer.py
+coverity_triage.py
+local_gui.py
+templates/ (optional web GUI files)
+README.md
+
+STEP 2 – CREATE A VIRTUAL ENVIRONMENT
+In VS Code, open a terminal (Ctrl+`) and run:
+
+python -m venv venv
+
+Activate the environment:
+Windows: venv\Scripts\activate
+macOS/Linux: source venv/bin/activate
+
+You should see (venv) at the prompt.
+
+STEP 3 – INSTALL DEPENDENCIES
+With the virtual environment active, run:
+
+pip install -r requirements.txt
+
+This installs: lxml, requests, tree-sitter, tree-sitter-c, tree-sitter-cpp, beautifulsoup4.
+
+NOTE: If tree-sitter-cpp fails to build (error about cmake or compiler), you can use
+pre-compiled wheels from:
+https://github.com/abetlen/llama-cpp-python/releases (not needed for this tool)
+or for tree-sitter, try:
+pip install tree-sitter-c tree-sitter-cpp --only-binary :all:
+If that fails, install cmake first (see PREREQUISITES).
+
+STEP 4 – VERIFY THE INSTALLATION
+Run a quick test:
+
+python -c "import tree_sitter_c; print('OK')"
+python -c "import bs4; print('OK')"
+
+If both print "OK", you're ready.
+
+STEP 5 – PREPARE THE COVERITY HTML REPORT
+Ensure you have the Coverity HTML report folder. It usually contains:
+index.html
+defects/ (detail HTML pages for each CID)
+source/ (if the source code was included during report generation)
+
+The tool expects the path to index.html, or the folder containing it.
+If the source code is stored somewhere else, you will specify --src-root later.
+
+STEP 6 – RUN THE ANALYSIS (COMMAND LINE)
+In the VS Code terminal (still in the coverity_triage folder and venv active):
+
+python coverity_triage.py --report "C:/path/to/coverity_report/index.html" --src-root "C:/path/to/source/code"
+
+(Use forward slashes even on Windows, or wrap paths in quotes.)
+
+Flags:
+--report : Path to the HTML report file or the folder containing index.html.
+--src-root : (Optional) Root of your C/C++ source tree. If omitted, the report folder is used.
+--language : c (default) or cpp. Use cpp for C++ code.
+--limit N : Only process the first N defects (useful for testing).
+--dry-run : Run without analysis, just show what would be done.
+--resume : Skip defects already in dispositions.csv (for long runs).
+
+Example for a first test:
+python coverity_triage.py --report "./sample_report" --src-root "./sample_report/source" --limit 5
+
+The tool will print progress and produce:
+dispositions.csv – the suggested classifications
+audit.jsonl – detailed log with timestamps, events, and context hashes
+
+STEP 7 – REVIEW RESULTS IN THE LOCAL GUI
+After the CLI finishes, start the GUI:
+
+python local_gui.py
+
+A window will open:
+• Enter the source root at the top (or leave as . if the source files are in the same folder).
+• Click "Refresh List" to load the dispositions.csv.
+• Double-click a defect to see: 
+◦ Coverity events (from audit.jsonl)
+◦ The surrounding source code (extracted by tree-sitter)
+◦ The rule-based suggestion.
+• Click "Accept Suggestion" to approve, or "Override..." to enter your own classification and comment.
+• All final decisions are saved in final_decisions.csv.
+
+STEP 8 – TROUBLESHOOTING COMMON ISSUES
+Q: "No table found in HTML report"
+-> The HTML format may differ. Open index.html in a text editor, locate the table structure,
+and adjust html_report_parser.py accordingly (or ask for help).
+
+Q: "File not found" for source files
+-> Ensure the paths in the Coverity report match your directory structure.
+Use --src-root to point to the correct root.
+
+Q: tree-sitter fails to parse my C++ code
+-> Use --language cpp flag. For mixed C/C++ projects, run twice.
+
+Q: The heuristic says "Needs review" for everything
+-> That's expected for checkers we haven't coded yet.
+The tool only auto-classifies FORWARD_NULL, RESOURCE_LEAK, DEADCODE, UNUSED_VALUE.
+
+Q: How do I add more rules?
+-> Open heuristic_analyzer.py, add an elif block for a new checker.
+If you need help, use GitHub Copilot (inline chat) with a micro-prompt like:
+"Add a rule for CHECKED_RETURN: if the return value is cast to (void) in the same function,
+return 'Intentional'. Only show the new elif block."
+
+STEP 9 – INTEGRATE INTO YOUR WORKFLOW
+Once verified, you can:
+• Add the CLI command to your nightly build script.
+• Have engineers open the GUI to review suggestions.
+• Track metrics from final_decisions.csv (how many suggestions were accepted).
+• Later, if an internal LLM becomes available, swap heuristic_analyzer.py with an LLM-based module.
+
+============================================================
+END OF INSTRUCTIONS

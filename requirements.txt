@@ -1,0 +1,14 @@
+lxml
+requests
+zeep
+libclang
+z3-solver
+semgrep
+tree-sitter
+tree-sitter-c
+tree-sitter-cpp
+beautifulsoup4
+openpyxl
+pyyaml
+pygments
+networkx

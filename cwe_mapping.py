@@ -1,0 +1,182 @@
+"""CWE / CERT C / OWASP mapping for every Coverity checker in the dispatch table."""
+
+# Each entry: cwe_id, cwe_name, cwe_url, cert (CERT C rule), owasp (Top 10 2021), cvss_base
+CWE_MAP = {
+    'BUFFER_SIZE': {
+        'cwe_id':   120,
+        'cwe_name': 'Buffer Copy without Checking Size of Input',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/120.html',
+        'cert':     'STR31-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '8.1',
+    },
+    'OVERRUN': {
+        'cwe_id':   125,
+        'cwe_name': 'Out-of-bounds Read',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/125.html',
+        'cert':     'ARR30-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.5',
+    },
+    'OVERRUN_STATIC': {
+        'cwe_id':   787,
+        'cwe_name': 'Out-of-bounds Write',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/787.html',
+        'cert':     'ARR30-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '9.8',
+    },
+    'OVERRUN_DYNAMIC': {
+        'cwe_id':   787,
+        'cwe_name': 'Out-of-bounds Write',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/787.html',
+        'cert':     'ARR30-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '9.8',
+    },
+    'FORWARD_NULL': {
+        'cwe_id':   476,
+        'cwe_name': 'NULL Pointer Dereference',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/476.html',
+        'cert':     'EXP34-C',
+        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'cvss_base': '6.5',
+    },
+    'REVERSE_INULL': {
+        'cwe_id':   476,
+        'cwe_name': 'NULL Pointer Dereference',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/476.html',
+        'cert':     'EXP34-C',
+        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'cvss_base': '6.5',
+    },
+    'INTEGER_OVERFLOW': {
+        'cwe_id':   190,
+        'cwe_name': 'Integer Overflow or Wraparound',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/190.html',
+        'cert':     'INT32-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.8',
+    },
+    'RESOURCE_LEAK': {
+        'cwe_id':   401,
+        'cwe_name': 'Missing Release of Memory after Effective Lifetime',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/401.html',
+        'cert':     'MEM31-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '5.5',
+    },
+    'USE_AFTER_FREE': {
+        'cwe_id':   416,
+        'cwe_name': 'Use After Free',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/416.html',
+        'cert':     'MEM30-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '9.8',
+    },
+    'DIVIDE_BY_ZERO': {
+        'cwe_id':   369,
+        'cwe_name': 'Divide By Zero',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/369.html',
+        'cert':     'INT33-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '5.5',
+    },
+    'UNINIT': {
+        'cwe_id':   457,
+        'cwe_name': 'Use of Uninitialized Variable',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/457.html',
+        'cert':     'EXP33-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '6.5',
+    },
+    'DEADCODE': {
+        'cwe_id':   561,
+        'cwe_name': 'Dead Code',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/561.html',
+        'cert':     'MSC12-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '3.1',
+    },
+    'STRING_NULL': {
+        'cwe_id':   170,
+        'cwe_name': 'Improper Null Termination',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/170.html',
+        'cert':     'STR32-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.5',
+    },
+    'SIZEOF_MISMATCH': {
+        'cwe_id':   467,
+        'cwe_name': 'Use of sizeof() on a Pointer Type',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/467.html',
+        'cert':     'ARR01-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.5',
+    },
+    'SHIFT_OVERFLOW': {
+        'cwe_id':   758,
+        'cwe_name': 'Reliance on Undefined, Unspecified, or Implementation-Defined Behavior',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/758.html',
+        'cert':     'INT34-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '5.5',
+    },
+    'NO_BREAK': {
+        'cwe_id':   484,
+        'cwe_name': 'Omitted Break Statement in Switch',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/484.html',
+        'cert':     'MSC17-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '4.3',
+    },
+    'NEGATIVE_RETURNS': {
+        'cwe_id':   20,
+        'cwe_name': 'Improper Input Validation',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/20.html',
+        'cert':     'ERR33-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.5',
+    },
+    'UNUSED_VALUE': {
+        'cwe_id':   563,
+        'cwe_name': 'Assignment to Variable without Use',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/563.html',
+        'cert':     'MSC13-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '3.1',
+    },
+    'ARRAY_VS_SINGLETON': {
+        'cwe_id':   131,
+        'cwe_name': 'Incorrect Calculation of Buffer Size',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/131.html',
+        'cert':     'ARR36-C',
+        'owasp':    'A03:2021 – Injection',
+        'cvss_base': '7.5',
+    },
+    'CONSTANT_EXPRESSION_RESULT': {
+        'cwe_id':   570,
+        'cwe_name': 'Expression is Always False',
+        'cwe_url':  'https://cwe.mitre.org/data/definitions/570.html',
+        'cert':     'MSC12-C',
+        'owasp':    'A05:2021 – Security Misconfiguration',
+        'cvss_base': '3.1',
+    },
+}
+
+
+def get_cwe(checker: str) -> dict:
+    """Return CWE/CERT/OWASP info for a checker, or an empty dict if unknown."""
+    return CWE_MAP.get(checker, {})
+
+
+def format_cwe_reference(checker: str) -> str:
+    """Return a formatted one-line reference string for inclusion in comments and fixes."""
+    info = get_cwe(checker)
+    if not info:
+        return ''
+    return (
+        f"Reference: CWE-{info['cwe_id']} ({info['cwe_name']}) | "
+        f"CERT {info['cert']} | OWASP {info['owasp']} | "
+        f"{info['cwe_url']}"
+    )

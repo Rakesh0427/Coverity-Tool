@@ -1,0 +1,14 @@
+PYCOMPILE local_gui.py OK
+import local_gui OK
+--- full blurb ---
+ID: 137  |  Checker: BUFFER_SIZE  |  Classification: Bug
+File: a.c  :  line 1136
+Function: f  |  Severity: High  |  Confidence: 90%
+Comment: missing null
+Proposed Fix:
+add NUL
+Source:
+line1
+line2
+---
+cookie='hi'
