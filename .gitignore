@@ -19,5 +19,12 @@ rad.json
 #License-files
 *.bclicense
 *.flf
+
+# Python virtual environments, bytecode, and local test diagnostics
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+_ev_diag.txt
 #Test results file
 TestResults.xml
