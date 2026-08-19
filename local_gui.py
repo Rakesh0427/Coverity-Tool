@@ -5,24 +5,43 @@ Workflow: Setup -> Analysis -> Results
 """
 import csv, json, os, sys, threading, queue, re, time
 
-# Pre-load correct tcl86t.dll so _tkinter uses it; also set Tcl's internal library path
-import ctypes as _ct, sysconfig as _sc
-_py_data = _sc.get_path("data")
-_tcl_lib = os.path.join(_py_data, "tcl", "tcl8.6")
-_tk_lib  = os.path.join(_py_data, "tcl", "tk8.6")
-if os.path.isdir(_tcl_lib):
+# --- Tcl/Tk path fix for frozen (PyInstaller) and regular installs ---
+# Fixes "can't find package Tk" / Tcl errors when running as exe or when
+# Python's tcl is in a non-standard location. Works on Windows, Linux, macOS.
+import sys as _sys
+if getattr(_sys, 'frozen', False):
+    # Running as PyInstaller bundle: Tcl/Tk is in _MEIPASS/tcl
+    _meipass = getattr(_sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    for _tcl_candidate in [
+        os.path.join(_meipass, "tcl", "tcl8.6"),
+        os.path.join(_meipass, "_internal", "tcl", "tcl8.6"),
+        os.path.join(_meipass, "tcl8.6"),
+        os.path.join(os.path.dirname(_sys.executable), "tcl", "tcl8.6"),
+    ]:
+        if os.path.isdir(_tcl_candidate):
+            os.environ["TCL_LIBRARY"] = _tcl_candidate
+            break
+    for _tk_candidate in [
+        os.path.join(_meipass, "tcl", "tk8.6"),
+        os.path.join(_meipass, "_internal", "tcl", "tk8.6"),
+        os.path.join(_meipass, "tk8.6"),
+        os.path.join(os.path.dirname(_sys.executable), "tcl", "tk8.6"),
+    ]:
+        if os.path.isdir(_tk_candidate):
+            os.environ["TK_LIBRARY"] = _tk_candidate
+            break
+elif os.name == 'nt':
+    # Regular Windows Python: try sysconfig path, but don't fail if not found
     try:
-        _tcldll = _ct.CDLL(os.path.join(_py_data, "tcl86t.dll"))
-        _tkdll  = _ct.CDLL(os.path.join(_py_data, "tk86t.dll"))
-        # Tcl_FindExecutable initialises Tcl's path resolution from the executable location
-        _tcldll.Tcl_FindExecutable.restype = None
-        _tcldll.Tcl_FindExecutable(_ct.c_char_p(sys.executable.encode()))
-        # Override TCL_LIBRARY in the Win32 environment block
-        _ct.windll.kernel32.SetEnvironmentVariableW("TCL_LIBRARY", _tcl_lib)
-        _ct.windll.kernel32.SetEnvironmentVariableW("TK_LIBRARY",  _tk_lib)
-        _ct.windll.kernel32.SetEnvironmentVariableW("TCLLIBPATH",  _tcl_lib)
-    except OSError:
+        import sysconfig as _sc
+        _py_data = _sc.get_path("data")
+        _tcl_lib = os.path.join(_py_data, "tcl", "tcl8.6")
+        if os.path.isdir(_tcl_lib):
+            os.environ.setdefault("TCL_LIBRARY", _tcl_lib)
+            os.environ.setdefault("TK_LIBRARY", os.path.join(_py_data, "tcl", "tk8.6"))
+    except Exception:
         pass
+# --- end Tcl fix ---
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext

@@ -5,13 +5,30 @@
 
 block_cipher = None
 
+import os, sys, sysconfig
+# --- Bundle Tcl/Tk for frozen exe (fixes Tcl errors) ---
+_tcl_datas = []
+try:
+    _tcl_root = os.path.join(sysconfig.get_path("data"), "tcl")
+    if os.path.isdir(_tcl_root):
+        for _sub in ("tcl8.6", "tk8.6"):
+            _src = os.path.join(_tcl_root, _sub)
+            if os.path.isdir(_src):
+                _tcl_datas.append((_src, os.path.join("tcl", _sub)))
+    # Also handle PyInstaller _MEIPASS case via runtime hook (local_gui.py does os.environ setup)
+except Exception:
+    pass
+
 a = Analysis(
     ['local_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        # Ensure tree-sitter language libs are bundled
-        # (PyInstaller collects them via hiddenimports below, datas not needed for pure wheels)
+    datas=_tcl_datas + [
+        ('docs/Coverity_Tool_User_Guide.docx', 'docs'),
+        ('docs/sample_src', 'docs/sample_src'),
+        ('docs/sample_report', 'docs/sample_report'),
+        ('COVERITY_TOOL_MANUAL.md', '.'),
+        ('README.md', '.'),
     ],
     hiddenimports=[
         'zeep', 'zeep.transports', 'zeep.wsse.username', 'zeep.exceptions',
