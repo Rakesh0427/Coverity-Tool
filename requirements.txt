@@ -13,3 +13,6 @@ openpyxl==3.1.5
 pyyaml==6.0.1
 pygments==2.18.0
 networkx==3.3
+
+# Dev-only: regenerates the Word user guide (build_guide.py). Not needed at runtime.
+python-docx==1.1.2
