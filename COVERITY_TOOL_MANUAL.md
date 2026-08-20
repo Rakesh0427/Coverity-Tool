@@ -8,11 +8,12 @@ A local, privacy-preserving decision assistant for triaging **Coverity** and **C
 
 | Step | Where | Result |
 |---|---|---|
+| 0. Commit defects *(only if they are not in Coverity Connect yet)* | **⬆ Commit Defects to Coverity** on the Setup page, or `cov_commit.py` | `cov-commit-defects` uploads an intermediate directory; stream populated |
 | 1. Get defects | HTML report folder, Excel export, or direct **Pull** from Coverity Connect | defect list with checker, file, line |
 | 2. Analyse | tree-sitter parses the local source file once per file (cached); rule engine runs per checker | `coverity_dispositions.csv` with classification/comment/fix/confidence |
 | 3. Review | Results page — double-click a row | see events, source, suggestion |
 | 4. Decide | **Accept Suggestion** or **Override** | `coverity_final_decisions.csv` |
-| 5. Push back | **Push to Coverity** (header button) | server dispositions updated |
+| 5. Push back | **Push these to Coverity** (Results toolbar, direct) or **Push to Coverity** (header, from CSV) | server dispositions updated |
 
 Output files (in your chosen Output folder):
 
@@ -57,6 +58,9 @@ coverity_triage/
 ├── decision_agent.py         # weighted-evidence decision logic
 ├── html_report_parser.py     # reads Coverity HTML / Excel exports
 ├── coverity_soap_client.py   # Pull/Push via REST + SOAP
+├── coverity_push.py          # Push pipeline: select → build → validate → push
+├── cov_cli.py                # Drives cov-commit-defects (upload an idir)
+├── cov_commit.py             # Headless CLI for committing defects
 ├── code_extractor.py         # tree-sitter function extraction (cached)
 ├── context_builder.py        # callees / callers / cross-file context
 ├── workspace_indexer.py      # workspace symbol + call-site index
@@ -83,6 +87,98 @@ python coverity_triage.py --report "C:\path\to\report\index.html" --src-root "C:
 | `--resume` | Skip CIDs already present in `dispositions.csv` |
 
 On completion you get `coverity_dispositions.csv` and `audit.jsonl` in the current folder.
+
+---
+
+## 3b. Committing defects into Coverity Connect
+
+If your defects are **not in Coverity Connect yet**, there is nothing to pull.
+The tool can upload them for you by running Coverity's `cov-commit-defects`.
+
+### What gets committed: the intermediate directory
+
+`cov-commit-defects` uploads an **intermediate directory** — the `--dir` "idir"
+folder created by `cov-build` / `cov-analyze`:
+
+```
+cov-commit-defects --dir <idir> --host <host> --stream <stream> --user <user>
+```
+
+A committable idir contains **both** of these subfolders:
+
+| Subfolder | Created by | Holds |
+|---|---|---|
+| `emit/` | `cov-build --dir <idir> <build command>` | the captured source / build representation |
+| `output/` | `cov-analyze --dir <idir>` | the analysis results (the defects) |
+
+If either is missing the commit cannot proceed, so the tool checks first and
+tells you exactly which step still needs running:
+
+| Folder you selected | Result |
+|---|---|
+| `emit/` + `output/` | **Ready to commit.** |
+| `emit/` only | Not analysed yet — run `cov-analyze --dir <idir>`. |
+| `output/` only | Incomplete idir — re-run `cov-build` then `cov-analyze`. |
+| Neither | Not an intermediate directory — pick the folder passed to `--dir`. |
+
+The GUI checks the folder the moment you select it; the CLI has `--inspect`.
+
+Two other prerequisites: **Coverity Analysis must be installed** (the tool needs
+the `cov-commit-defects` binary — on `PATH` or via the bin folder field), and
+the **target stream must already exist** in Coverity Connect. Create it in the
+web UI or with `cov-manage-im --mode streams --add --set name:MY_STREAM`.
+
+### From the GUI
+
+Setup page → **⬆ Commit Defects to Coverity**:
+
+1. **Coverity Tool** — leave blank if `cov-commit-defects` is on `PATH`,
+   otherwise browse to the install's `bin` folder.
+2. **Step 1 — Analysis Results** — select the intermediate directory. The
+   dialog immediately reports whether the folder is usable and, if not, why.
+3. **Step 2 — Destination** — host, port, stream, and either username+password
+   or (preferred) an **auth key file**.
+4. Optionally tick **Dry run** to see the exact command, then
+   **⬆ Commit to Coverity**. Output streams live into the log.
+
+Then use **⬇ Pull from Coverity** to bring the defects in, disposition them,
+and push the dispositions back (section 4.4).
+
+### From the command line
+
+```bash
+export COVERITY_PASSPHRASE='...'          # never passed as a flag
+python cov_commit.py \
+    --idir /work/cov-idir \
+    --host coverity.example.com --port 443 \
+    --stream MyStream --user rakesh
+```
+
+| Option | Purpose |
+|---|---|
+| `--inspect` | Check whether a folder is a committable idir. |
+| `--dry-run` | Print the exact command without running it. |
+| `--auth-key-file PATH` | Use a key file instead of a password (preferred). |
+| `--strip-path P` | Strip a path prefix from reported files (repeatable). |
+| `--description` / `--version` | Label the snapshot. |
+| `--bin-dir PATH` | Coverity `bin` folder if it is not on `PATH`. |
+
+Exit codes: `0` success, `1` the commit failed, `2` bad configuration. The
+password is read from `COVERITY_PASSPHRASE` and deliberately has no
+command-line flag, because command lines are visible to other users via the
+process list.
+
+### Common failures
+
+| Message | Meaning / fix |
+|---|---|
+| "not a Coverity intermediate directory" | Select the folder passed to `cov-build --dir` / `cov-analyze --dir`. |
+| "no analysis results (output/)" | Run `cov-analyze --dir <idir>` before committing. |
+| "no captured source (emit/)" | The idir is incomplete — re-run `cov-build` then `cov-analyze`. |
+| Stream does not exist | Create the stream in Coverity Connect first. |
+| Authentication failed | Wrong user/password, or use `--auth-key-file`. |
+| Certificate not trusted | Keep *Trust new certificate* ticked, or install the CA cert. |
+| `cov-commit-defects` not found | Add the Coverity `bin` folder to `PATH` or set `--bin-dir`. |
 
 ---
 
@@ -124,11 +220,69 @@ python local_gui.py
 - Use the **filter** drop-down (All / Bug / False positive / Intentional / Needs review) to work through the most important tail first.
 
 ### 4.4 Push to Coverity
-- The header **⬆ Push to Coverity** button opens a three-step dialog:
-  1. **Connect** — host, port, username, password → **Test Connection** (REST when available, SOAP otherwise).
-  2. **Select Project** and **Stream** (streams load after project selection).
-  3. **Load CSV** — choose `coverity_final_decisions.csv` (or `dispositions.csv`), review the row count, then **Push**.
-- Pushed dispositions are written to the server triage store; any rows rejected by the server are listed so you can fix and retry.
+
+There are two ways to write dispositions back to Coverity Connect. Both end up
+calling the same SOAP `updateTriageForCIDsInTriageStore` operation and both
+write the **Classification** and **Comment** attributes into the project's
+triage store.
+
+#### A. Direct push from the Results page (no CSV) — recommended
+
+The **⬆ Push these to Coverity** button in the Results toolbar pushes the
+defects currently in the table, straight from memory:
+
+1. **Step 1 — Server Connection** — host, port, username, password → **Connect**.
+   Tick *Allow self-signed certificate* only for corporate servers whose
+   certificate chain you trust.
+2. **Step 2 — Project & Triage Store** — pick the project; the matching triage
+   store is filled in automatically (you can still edit it).
+3. **Step 3 — Which Defects to Push** — choose one of:
+   - *Accepted / overridden only* (default, safest) — only defects you explicitly
+     reviewed with **Accept** or **Override**.
+   - *Everything except 'Needs review'* — every defect the tool classified.
+   - *All analysed defects*.
+4. **Validate CIDs against Server** — required before pushing. Rows turn
+   **green** when the CID exists on the server and **red** when it does not.
+   Because CIDs shift between analysis runs, a stale CID is automatically
+   remapped by *file + checker* when that resolves to exactly one server defect;
+   ambiguous matches stay red and are skipped rather than guessed.
+5. **Push to Coverity** — confirm the summary. Tick **Dry run** first to see
+   exactly what would be written without touching the server.
+
+After a real push, rows in the Results table are coloured green (pushed) or
+red (failed).
+
+Notes:
+- An *Accepted* defect pushes its underlying classification (Bug / False
+  positive / …), never the literal word "Accepted" — that is a review state in
+  this tool, not a Coverity classification.
+- Comments get a `[Coverity Tool — user — date]` provenance marker appended so
+  reviewers in Connect can see where the triage came from.
+- Updates are batched: defects sharing a classification *and* comment go in one
+  call, capped at 100 CIDs per request (the server limit).
+
+#### B. Push from a CSV
+
+The header **⬆ Push to Coverity** button opens the CSV-based dialog, useful when
+you want to push decisions made in an earlier session or edited by hand:
+
+1. **Connect** — host, port, username, password → **Test Connection**.
+2. **Select Project** and **Stream** (streams load after project selection).
+3. **Load CSV** — choose `coverity_final_decisions.csv` (or `dispositions.csv`),
+   review the row count, then **Push**.
+
+Pushed dispositions are written to the server triage store; any rows rejected by
+the server are listed so you can fix and retry.
+
+#### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Every row fails | Wrong triage store name. It usually matches the **project** name, not `Default`. |
+| "zeep library not installed" | Run `pip install zeep`. |
+| All CIDs show NOT FOUND | Wrong project selected, or the report came from a different stream/server. |
+| Push button stays greyed out | You must **Validate** first, and at least one CID must match. |
+| SSL / certificate errors | Corporate self-signed cert — tick *Allow self-signed certificate* (only if you trust the chain). |
 
 ---
 
