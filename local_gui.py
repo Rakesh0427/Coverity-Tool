@@ -4221,6 +4221,7 @@ class CommitDefectsDialog(tk.Toplevel):
         self._sv_host = tk.StringVar(value="coverity-er.honaero.com")
         self._sv_port = tk.StringVar(value="443")
         self._sv_ssl = tk.BooleanVar(value=True)
+        self._sv_project = tk.StringVar()
         self._sv_stream = tk.StringVar()
         self._sv_user = tk.StringVar()
         self._sv_pass = tk.StringVar()
@@ -4229,8 +4230,14 @@ class CommitDefectsDialog(tk.Toplevel):
         self._sv_desc = tk.StringVar(value="Coverity Tool commit")
         self._sv_dry = tk.BooleanVar(value=False)
 
+        # Populated by _connect() once the user has signed in. Kept as
+        # state so the Project dropdown's <<ComboboxSelected>> handler can
+        # ask the server for the streams belonging to the chosen project.
+        self._client = None
+
         self._build()
         self._check_tool()
+        self._refresh_ready()
 
     # ------------------------------------------------------------------ build
     def _section(self, parent, title):
@@ -4321,6 +4328,9 @@ class CommitDefectsDialog(tk.Toplevel):
         self._sv_idir.trace_add("write", lambda *_: self._inspect_input())
 
         # ── Step 2 — destination ───────────────────────────────────────
+        # Mirrors the Push dialog: sign in first, then pick project + stream
+        # from live dropdowns so the user cannot mistype a stream name (and
+        # so a stream they lack permission on is transparently absent).
         self._section(body, "Step 2 — Destination")
         s2 = self._card(body)
         self._field(s2, "Host", self._sv_host)
@@ -4329,19 +4339,73 @@ class CommitDefectsDialog(tk.Toplevel):
                        bg=C_PANEL, fg=C_SUBTEXT, selectcolor=C_CARD,
                        activebackground=C_PANEL, font=("Segoe UI", 9)
                        ).pack(anchor="w", padx=10)
-        self._field(s2, "Stream", self._sv_stream,
-                    hint="must already exist in Coverity Connect")
         self._field(s2, "Username", self._sv_user, width=24)
         self._field(s2, "Password", self._sv_pass, width=24, show="*")
         self._field(s2, "or Auth key file", self._sv_keyfile,
                     browse=self._browse_key,
-                    hint="preferred — no password needed")
+                    hint="preferred for the upload — no password needed")
+
+        # ── Connect button + status ────────────────────────────────────
+        conn_f = tk.Frame(s2, bg=C_PANEL)
+        conn_f.pack(fill="x", padx=10, pady=(6, 4))
+        self._conn_btn = tk.Button(
+            conn_f, text="\U0001f50c  Connect",
+            command=self._connect,
+            bg=C_ACCENT, fg="#FFFFFF", relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+            cursor="hand2", activebackground=C_ACCENT2)
+        self._conn_btn.pack(side="left")
+        self._conn_lbl = tk.Label(
+            conn_f,
+            text="Sign in to load your projects and streams.",
+            font=("Segoe UI", 9), bg=C_PANEL, fg=C_SUBTEXT)
+        self._conn_lbl.pack(side="left", padx=10)
+
+        # ── Project dropdown (populated by _connect) ───────────────────
+        pf = tk.Frame(s2, bg=C_PANEL)
+        pf.pack(fill="x", padx=10, pady=(4, 3))
+        tk.Label(pf, text="Project", width=15, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
+                 ).pack(side="left")
+        self._proj_cb = ttk.Combobox(pf, textvariable=self._sv_project,
+                                     state="disabled", width=38,
+                                     font=("Segoe UI", 9))
+        self._proj_cb.pack(side="left", ipady=2)
+        self._proj_cb.bind("<<ComboboxSelected>>", self._on_project_select)
+
+        # ── Stream dropdown (populated when a project is picked) ───────
+        sf = tk.Frame(s2, bg=C_PANEL)
+        sf.pack(fill="x", padx=10, pady=(3, 3))
+        tk.Label(sf, text="Stream", width=15, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
+                 ).pack(side="left")
+        self._stream_cb = ttk.Combobox(sf, textvariable=self._sv_stream,
+                                       state="disabled", width=38,
+                                       font=("Segoe UI", 9))
+        self._stream_cb.pack(side="left", ipady=2)
+        tk.Label(sf, text="must already exist in Coverity Connect",
+                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8"
+                 ).pack(side="left", padx=6)
+
         self._field(s2, "Description", self._sv_desc)
         tk.Checkbutton(s2, text="Trust a new/unseen server certificate",
                        variable=self._sv_trust, bg=C_PANEL, fg=C_SUBTEXT,
                        selectcolor=C_CARD, activebackground=C_PANEL,
                        font=("Segoe UI", 9)).pack(anchor="w", padx=10,
-                                                  pady=(0, 8))
+                                                  pady=(0, 4))
+
+        # ── Live "what's still missing" hint ───────────────────────────
+        # Rechecks validate_config(cfg) on every field change so the user
+        # sees exactly which required fields for cov-commit-defects are
+        # still blank, rather than discovering it at run time.
+        self._ready_lbl = tk.Label(
+            s2, text="", font=("Segoe UI", 9), bg=C_PANEL,
+            fg=C_SUBTEXT, anchor="w", justify="left", wraplength=760)
+        self._ready_lbl.pack(fill="x", padx=10, pady=(2, 8))
+        for _v in (self._sv_bin, self._sv_idir, self._sv_host, self._sv_port,
+                   self._sv_stream, self._sv_user, self._sv_pass,
+                   self._sv_keyfile):
+            _v.trace_add("write", lambda *_: self._refresh_ready())
 
         # ── Log ────────────────────────────────────────────────────────
         self._section(body, "Output")
@@ -4455,6 +4519,148 @@ class CommitDefectsDialog(tk.Toplevel):
             on_new_cert_trust=bool(self._sv_trust.get()),
             description=self._sv_desc.get().strip(),
         )
+
+    # ---------------------------------------------------------- readiness
+    def _refresh_ready(self):
+        """Live status of which required fields are still blank.
+
+        Runs ``cov_cli.validate_config`` on the current form and lists any
+        remaining problems, so the user knows exactly what's missing for
+        ``cov-commit-defects`` without having to press the button first.
+        Also enables/disables the run button accordingly.
+        """
+        try:
+            problems = cov_cli.validate_config(self._config())
+        except Exception as exc:                          # defensive
+            problems = [str(exc)]
+        if problems:
+            self._ready_lbl.configure(
+                text="\u26a0  Still needed:\n     • " +
+                     "\n     • ".join(problems),
+                fg=C_BUG)
+            if hasattr(self, "_run_btn"):
+                self._run_btn.configure(state="disabled")
+        else:
+            self._ready_lbl.configure(
+                text="\u2713  All required fields for cov-commit-defects "
+                     "are set.", fg=C_FP)
+            if hasattr(self, "_run_btn"):
+                self._run_btn.configure(state="normal")
+
+    # ------------------------------------------------------------ connect
+    def _connect(self):
+        """Sign in to Coverity Connect and populate the Project dropdown.
+
+        Uses username + password (SOAP). An auth-key file is fine for the
+        actual ``cov-commit-defects`` upload, but the browsing API needs
+        credentials — we tell the user that instead of failing silently.
+        """
+        host = self._sv_host.get().strip()
+        port = self._sv_port.get().strip()
+        user = self._sv_user.get().strip()
+        pw = self._sv_pass.get()
+        if not (host and port and user and pw):
+            messagebox.showwarning(
+                "Missing Details",
+                "Host, port, username and password are required to load\n"
+                "the project and stream lists from Coverity Connect.\n\n"
+                "(An auth-key file can still be used for the upload itself.)",
+                parent=self)
+            return
+        if not zeep_available():
+            messagebox.showerror(
+                "Missing Dependency",
+                "The 'zeep' library is required for Coverity Connect.\n\n"
+                "Install it with:  pip install zeep", parent=self)
+            return
+
+        self._conn_btn.configure(state="disabled", text="Connecting…")
+        self._conn_lbl.configure(text="Contacting server…", fg=C_SUBTEXT)
+        self._proj_cb.configure(state="disabled", values=[])
+        self._stream_cb.configure(state="disabled", values=[])
+        self._sv_project.set("")
+        self._sv_stream.set("")
+        # verify_ssl mirrors the "trust new cert" toggle — if the user has
+        # opted to trust unseen certs for the upload, we shouldn't refuse
+        # the SOAP call for the very same server.
+        verify = not bool(self._sv_trust.get())
+
+        def _worker():
+            client = CoveritySOAPClient(host, port, user, pw,
+                                        verify_ssl=verify)
+            ok, info = client.test_connection()
+            projects = None
+            if ok:
+                try:
+                    projects = client.get_projects()
+                except Exception:
+                    projects = []
+
+            def _done():
+                self._conn_btn.configure(state="normal",
+                                         text="\U0001f50c  Connect")
+                if not ok:
+                    self._client = None
+                    self._conn_lbl.configure(text=f"\u2717 {info}",
+                                             fg=C_BUG)
+                    self._refresh_ready()
+                    return
+                self._client = client
+                names = [p["name"] if isinstance(p, dict) else str(p)
+                         for p in (projects or [])]
+                count = len(names)
+                self._conn_lbl.configure(
+                    text=f"\u2713 Connected  "
+                         f"({count} project{'s' if count != 1 else ''} "
+                         "visible to this user)",
+                    fg=C_FP)
+                self._proj_cb.configure(
+                    values=names,
+                    state="readonly" if names else "disabled")
+                if names:
+                    self._sv_project.set(names[0])
+                    self._on_project_select()
+                self._refresh_ready()
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_project_select(self, _event=None):
+        """Load the streams belonging to the newly-selected project."""
+        proj = self._sv_project.get().strip()
+        self._stream_cb.configure(state="disabled", values=[])
+        self._sv_stream.set("")
+        if not (proj and self._client):
+            self._refresh_ready()
+            return
+
+        def _worker():
+            try:
+                streams = self._client.get_streams_for_project(proj) or []
+            except Exception:
+                streams = []
+
+            def _done():
+                self._stream_cb.configure(
+                    values=streams,
+                    state="readonly" if streams else "disabled")
+                if streams:
+                    self._sv_stream.set(streams[0])
+                else:
+                    # No streams visible → almost always a permissions
+                    # issue on Coverity Connect for this user, not a bug
+                    # the tool can work around.
+                    self._conn_lbl.configure(
+                        text=f"\u2713 Connected  "
+                             f"(no streams visible in '{proj}' — "
+                             "check your Coverity permissions)",
+                        fg=C_BUG)
+                self._refresh_ready()
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ------------------------------------------------------------------- run
     def _run(self):
