@@ -136,8 +136,20 @@ Setup page → **⬆ Commit Defects to Coverity**:
    otherwise browse to the install's `bin` folder.
 2. **Step 1 — Analysis Results** — select the intermediate directory. The
    dialog immediately reports whether the folder is usable and, if not, why.
-3. **Step 2 — Destination** — host, port, stream, and either username+password
-   or (preferred) an **auth key file**.
+3. **Step 2 — Destination** — enter host, port, username and password, then
+   click **🔌 Connect**. The dialog signs in and populates the **Project**
+   and **Stream** dropdowns from your Coverity Connect account — no typing
+   the stream name. Pick a project, then pick a stream that lives in it.
+   An **auth key file** is still preferred for the actual upload; the
+   Connect button only needs username+password for the browsing calls.
+
+   > Only streams your Coverity account can see appear in the dropdown.
+   > If an expected stream is missing (e.g. `CORE_EPP_EPIC_ATS_CORE`),
+   > that is a Coverity permissions issue for your admin, not a tool bug.
+
+   A live *"Still needed"* / *"All required fields set"* banner below the
+   dropdowns shows exactly which fields `cov-commit-defects` is still
+   missing, so you never hit the button and discover it later.
 4. Optionally tick **Dry run** to see the exact command, then
    **⬆ Commit to Coverity**. Output streams live into the log.
 
