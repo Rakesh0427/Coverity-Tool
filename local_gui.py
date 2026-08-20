@@ -414,15 +414,15 @@ class SetupPage(Page):
 
         card.columnconfigure(0, weight=1)
 
-        # Step 0 — the stream may be empty. Run cov-build/cov-analyze and
-        # commit the resulting defects before there is anything to pull.
+        # Step 0 — the stream may be empty. Upload already-analysed results
+        # (an intermediate directory) before there is anything to pull.
         seed_f = tk.Frame(outer, bg=C_BG)
         seed_f.pack(pady=(16, 0))
         tk.Label(seed_f,
-                 text="No defects in Coverity Connect yet?",
+                 text="Defects not in Coverity Connect yet?",
                  font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT
                  ).pack(side="left", padx=(0, 8))
-        tk.Button(seed_f, text="\U0001f528  Build, Analyse & Commit to Coverity",
+        tk.Button(seed_f, text="\u2b06  Commit Defects to Coverity",
                   command=self._open_commit_dialog,
                   bg=C_CARD, fg=C_ACCENT, relief="flat",
                   font=("Segoe UI", 9, "bold"), padx=12, pady=5,
@@ -465,7 +465,7 @@ class SetupPage(Page):
             self._output_var.set(d)
 
     def _open_commit_dialog(self):
-        """Run cov-build / cov-analyze / cov-commit-defects to seed a stream."""
+        """Upload existing analysis results (an idir) via cov-commit-defects."""
         CommitDefectsDialog(self, self.app)
 
     def _open_pull_dialog(self):
@@ -4187,17 +4187,21 @@ class DirectPushDialog(tk.Toplevel):
 
 
 # ---------------------------------------------------------------------------
-# Commit Defects Dialog — cov-build / cov-analyze / cov-commit-defects
+# Commit Defects Dialog — uploads an intermediate directory (cov-commit-defects)
 # ---------------------------------------------------------------------------
 class CommitDefectsDialog(tk.Toplevel):
-    """Populate an empty Coverity stream from local source.
+    """Upload existing Coverity analysis results to a Connect stream.
 
-    Runs the three Coverity Analysis CLI stages and streams their output into a
-    live log. This is step 0 of the workflow: once defects are committed they
-    can be pulled, analysed and dispositioned as usual.
+    The user runs cov-build / cov-analyze themselves; this dialog only runs
+    ``cov-commit-defects`` on the resulting intermediate directory.
 
-    Command construction, validation and execution all live in
-    :mod:`cov_cli`; this class is only the GUI shell.
+    Note the input must be the **intermediate directory (idir)**, not an HTML
+    report folder — the HTML is generated *from* an idir and holds no data that
+    can be uploaded. The dialog inspects the chosen folder and says so plainly
+    rather than letting Coverity fail with a cryptic message.
+
+    All command building, validation and execution live in :mod:`cov_cli`;
+    this class is only the GUI shell.
     """
 
     def __init__(self, parent, app):
@@ -4206,25 +4210,14 @@ class CommitDefectsDialog(tk.Toplevel):
         self._canceller = None
         self._running = False
 
-        self.title("Build, Analyse & Commit Defects to Coverity Connect")
-        self.geometry("940x820")
-        self.minsize(760, 640)
+        self.title("Commit Defects to Coverity Connect")
+        self.geometry("900x760")
+        self.minsize(720, 620)
         self.configure(bg=C_BG)
         self.grab_set()
 
-        sp = app._frames.get(SetupPage)
-        src = sp._src_root_var.get().strip() if sp else ""
-
         self._sv_bin = tk.StringVar()
-        self._sv_src = tk.StringVar(value=src)
-        self._sv_idir = tk.StringVar(
-            value=os.path.join(src, "cov-idir") if src else "")
-        self._sv_build = tk.StringVar(value="make")
-        self._sv_nocmd = tk.BooleanVar(value=False)
-        self._sv_all = tk.BooleanVar(value=True)
-        self._sv_strip = tk.BooleanVar(value=True)
-        self._sv_extra_an = tk.StringVar()
-
+        self._sv_idir = tk.StringVar()
         self._sv_host = tk.StringVar(value="coverity-er.honaero.com")
         self._sv_port = tk.StringVar(value="443")
         self._sv_ssl = tk.BooleanVar(value=True)
@@ -4234,14 +4227,10 @@ class CommitDefectsDialog(tk.Toplevel):
         self._sv_keyfile = tk.StringVar()
         self._sv_trust = tk.BooleanVar(value=True)
         self._sv_desc = tk.StringVar(value="Coverity Tool commit")
-
-        self._sv_do_build = tk.BooleanVar(value=True)
-        self._sv_do_analyze = tk.BooleanVar(value=True)
-        self._sv_do_commit = tk.BooleanVar(value=True)
         self._sv_dry = tk.BooleanVar(value=False)
 
         self._build()
-        self._check_tools()
+        self._check_tool()
 
     # ------------------------------------------------------------------ build
     def _section(self, parent, title):
@@ -4258,11 +4247,11 @@ class CommitDefectsDialog(tk.Toplevel):
         f.pack(fill="x", padx=20, pady=2)
         return f
 
-    def _field(self, parent, label, var, width=48, show="", browse=None,
+    def _field(self, parent, label, var, width=46, show="", browse=None,
                hint=""):
         f = tk.Frame(parent, bg=C_PANEL)
         f.pack(fill="x", padx=10, pady=3)
-        tk.Label(f, text=label, width=16, anchor="w",
+        tk.Label(f, text=label, width=15, anchor="w",
                  font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
                  ).pack(side="left")
         tk.Entry(f, textvariable=var, width=width, show=show,
@@ -4292,99 +4281,66 @@ class CommitDefectsDialog(tk.Toplevel):
         body.bind("<Configure>",
                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        tk.Label(body, text="\U0001f528  Build, Analyse & Commit Defects",
+        tk.Label(body, text="\u2b06  Commit Defects to Coverity Connect",
                  font=("Segoe UI", 13, "bold"), bg=C_BG, fg=C_ACCENT
                  ).pack(anchor="w", padx=20, pady=(16, 4))
         tk.Label(body,
-                 text="Runs cov-build → cov-analyze → cov-commit-defects so an empty\n"
-                      "stream gets populated. Afterwards, Pull the defects back in and\n"
-                      "disposition them as normal.",
+                 text="Uploads results you have already produced with cov-build /\n"
+                      "cov-analyze into a Coverity Connect stream. Afterwards, Pull\n"
+                      "the defects back in and disposition them.",
                  font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT, justify="left"
                  ).pack(anchor="w", padx=20, pady=(0, 8))
 
-        self._tools_lbl = tk.Label(body, text="", font=("Segoe UI", 9),
-                                   bg=C_BG, fg=C_SUBTEXT, justify="left")
-        self._tools_lbl.pack(anchor="w", padx=20, pady=(0, 6))
+        self._tool_lbl = tk.Label(body, text="", font=("Segoe UI", 9),
+                                  bg=C_BG, fg=C_SUBTEXT, justify="left")
+        self._tool_lbl.pack(anchor="w", padx=20, pady=(0, 6))
 
-        # ── Coverity tools ─────────────────────────────────────────────
-        self._section(body, "Coverity Analysis Tools")
+        # ── Tool location ──────────────────────────────────────────────
+        self._section(body, "Coverity Tool")
         s0 = self._card(body)
         self._field(s0, "Coverity bin", self._sv_bin, browse=self._browse_bin,
-                    hint="leave blank if cov-build is already on PATH")
-        tk.Button(s0, text="Re-check tools", command=self._check_tools,
+                    hint="blank if cov-commit-defects is on PATH")
+        tk.Button(s0, text="Re-check", command=self._check_tool,
                   bg=C_CARD, fg=C_ACCENT, relief="flat",
                   font=("Segoe UI", 8, "bold"), padx=8, pady=3,
                   cursor="hand2", activebackground=C_BORDER
                   ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        # ── Step 1 — capture ───────────────────────────────────────────
-        self._section(body, "Step 1 — Capture the build (cov-build)")
+        # ── Step 1 — what to upload ────────────────────────────────────
+        self._section(body, "Step 1 — Analysis Results to Upload")
         s1 = self._card(body)
-        self._field(s1, "Source folder", self._sv_src, browse=self._browse_src)
         self._field(s1, "Intermediate dir", self._sv_idir,
-                    browse=self._browse_idir, hint="the --dir emit folder")
-        self._field(s1, "Build command", self._sv_build,
-                    hint="e.g. make -j8  /  msbuild app.sln")
-        tk.Checkbutton(s1, text="No build command — scan the source tree "
-                               "instead (--no-command, for non-compiled code)",
-                       variable=self._sv_nocmd, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 8))
+                    browse=self._browse_idir,
+                    hint="the --dir folder from cov-build / cov-analyze")
+        self._input_lbl = tk.Label(
+            s1, text="Select the intermediate directory (idir) to upload.",
+            font=("Segoe UI", 9), bg=C_PANEL, fg=C_SUBTEXT,
+            anchor="w", justify="left", wraplength=760)
+        self._input_lbl.pack(fill="x", padx=10, pady=(0, 8))
+        self._sv_idir.trace_add("write", lambda *_: self._inspect_input())
 
-        # ── Step 2 — analyse ───────────────────────────────────────────
-        self._section(body, "Step 2 — Analyse (cov-analyze)")
+        # ── Step 2 — destination ───────────────────────────────────────
+        self._section(body, "Step 2 — Destination")
         s2 = self._card(body)
-        tk.Checkbutton(s2, text="Enable all checkers (--all)",
-                       variable=self._sv_all, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(8, 0))
-        tk.Checkbutton(s2, text="Strip the source path from reported files "
-                               "(recommended — keeps paths portable)",
-                       variable=self._sv_strip, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=10)
-        self._field(s2, "Extra options", self._sv_extra_an,
-                    hint="optional, e.g. --enable-fnptr")
-
-        # ── Step 3 — commit ────────────────────────────────────────────
-        self._section(body, "Step 3 — Commit to Coverity Connect")
-        s3 = self._card(body)
-        self._field(s3, "Host", self._sv_host)
-        self._field(s3, "Port", self._sv_port, width=10)
-        tk.Checkbutton(s3, text="Use SSL (https)", variable=self._sv_ssl,
+        self._field(s2, "Host", self._sv_host)
+        self._field(s2, "Port", self._sv_port, width=10)
+        tk.Checkbutton(s2, text="Use SSL (https)", variable=self._sv_ssl,
                        bg=C_PANEL, fg=C_SUBTEXT, selectcolor=C_CARD,
                        activebackground=C_PANEL, font=("Segoe UI", 9)
                        ).pack(anchor="w", padx=10)
-        self._field(s3, "Stream", self._sv_stream,
+        self._field(s2, "Stream", self._sv_stream,
                     hint="must already exist in Coverity Connect")
-        self._field(s3, "Username", self._sv_user, width=24)
-        self._field(s3, "Password", self._sv_pass, width=24, show="*")
-        self._field(s3, "or Auth key file", self._sv_keyfile,
+        self._field(s2, "Username", self._sv_user, width=24)
+        self._field(s2, "Password", self._sv_pass, width=24, show="*")
+        self._field(s2, "or Auth key file", self._sv_keyfile,
                     browse=self._browse_key,
                     hint="preferred — no password needed")
-        self._field(s3, "Description", self._sv_desc)
-        tk.Checkbutton(s3, text="Trust a new/unseen server certificate "
-                               "(--on-new-cert trust)",
+        self._field(s2, "Description", self._sv_desc)
+        tk.Checkbutton(s2, text="Trust a new/unseen server certificate",
                        variable=self._sv_trust, bg=C_PANEL, fg=C_SUBTEXT,
                        selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 8))
-
-        # ── Stages to run ──────────────────────────────────────────────
-        self._section(body, "Stages to Run")
-        s4 = self._card(body)
-        sf = tk.Frame(s4, bg=C_PANEL)
-        sf.pack(fill="x", padx=10, pady=8)
-        for text, var in (("cov-build", self._sv_do_build),
-                          ("cov-analyze", self._sv_do_analyze),
-                          ("cov-commit-defects", self._sv_do_commit)):
-            tk.Checkbutton(sf, text=text, variable=var, bg=C_PANEL,
-                           fg=C_TEXT, selectcolor=C_CARD,
-                           activebackground=C_PANEL, font=("Segoe UI", 9)
-                           ).pack(side="left", padx=(0, 16))
-        tk.Checkbutton(sf, text="Dry run (show commands only)",
-                       variable=self._sv_dry, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(side="left")
+                       font=("Segoe UI", 9)).pack(anchor="w", padx=10,
+                                                  pady=(0, 8))
 
         # ── Log ────────────────────────────────────────────────────────
         self._section(body, "Output")
@@ -4407,19 +4363,20 @@ class CommitDefectsDialog(tk.Toplevel):
                   font=("Segoe UI", 10), padx=14, pady=6,
                   cursor="hand2").pack(side="left")
         self._cancel_btn = tk.Button(
-            foot, text="Cancel run", command=self._cancel,
+            foot, text="Cancel", command=self._cancel,
             bg=C_CARD, fg=C_BUG, relief="flat", font=("Segoe UI", 10),
             padx=14, pady=6, cursor="hand2", state="disabled")
         self._cancel_btn.pack(side="left", padx=8)
+        tk.Checkbutton(foot, text="Dry run (show the command only)",
+                       variable=self._sv_dry, bg=C_BG, fg=C_SUBTEXT,
+                       selectcolor=C_CARD, activebackground=C_BG,
+                       font=("Segoe UI", 9)).pack(side="left", padx=10)
         self._run_btn = tk.Button(
-            foot, text="\u25b6  Run", command=self._run,
+            foot, text="\u2b06  Commit to Coverity", command=self._run,
             bg=C_ACCENT, fg="#FFFFFF", relief="flat",
             font=("Segoe UI", 10, "bold"), padx=20, pady=6,
             cursor="hand2", activebackground=C_ACCENT2)
         self._run_btn.pack(side="right")
-        self._stage_lbl = tk.Label(foot, text="", font=("Segoe UI", 9),
-                                   bg=C_BG, fg=C_SUBTEXT)
-        self._stage_lbl.pack(side="right", padx=12)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -4429,18 +4386,12 @@ class CommitDefectsDialog(tk.Toplevel):
                                     parent=self)
         if d:
             self._sv_bin.set(d)
-            self._check_tools()
-
-    def _browse_src(self):
-        d = filedialog.askdirectory(title="Select source folder", parent=self)
-        if d:
-            self._sv_src.set(d)
-            if not self._sv_idir.get().strip():
-                self._sv_idir.set(os.path.join(d, "cov-idir"))
+            self._check_tool()
 
     def _browse_idir(self):
-        d = filedialog.askdirectory(title="Select intermediate directory",
-                                    parent=self)
+        d = filedialog.askdirectory(
+            title="Select the Coverity intermediate directory (idir)",
+            parent=self)
         if d:
             self._sv_idir.set(d)
 
@@ -4450,18 +4401,33 @@ class CommitDefectsDialog(tk.Toplevel):
         if f:
             self._sv_keyfile.set(f)
 
-    # ----------------------------------------------------------------- tools
-    def _check_tools(self):
-        status = cov_cli.tools_available(self._sv_bin.get().strip())
-        missing = [t for t, p in status.items() if not p]
-        if missing:
-            self._tools_lbl.configure(
-                text="\u26a0  Not found: " + ", ".join(missing) +
-                     "\n     Set the Coverity bin folder above, or add it to PATH.",
-                fg=C_BUG)
+    # ------------------------------------------------------------------ tool
+    def _check_tool(self):
+        path = cov_cli.commit_tool_path(self._sv_bin.get().strip())
+        if path:
+            self._tool_lbl.configure(
+                text=f"\u2713  Found {os.path.basename(path)}", fg=C_FP)
         else:
-            self._tools_lbl.configure(
-                text="\u2713  Coverity tools found.", fg=C_FP)
+            self._tool_lbl.configure(
+                text="\u26a0  cov-commit-defects not found.\n"
+                     "     Set the Coverity bin folder above, or add it to PATH.",
+                fg=C_BUG)
+
+    # ----------------------------------------------------------- input check
+    def _inspect_input(self):
+        """Tell the user immediately whether the chosen folder is usable."""
+        info = cov_cli.inspect_input(self._sv_idir.get().strip())
+        if info.committable:
+            self._input_lbl.configure(text="\u2713  " + info.message, fg=C_FP)
+        elif info.kind == cov_cli.INPUT_MISSING and not self._sv_idir.get().strip():
+            self._input_lbl.configure(
+                text="Select the intermediate directory (idir) to upload.",
+                fg=C_SUBTEXT)
+        else:
+            text = "\u26a0  " + info.message
+            if info.hint:
+                text += "\n     " + info.hint
+            self._input_lbl.configure(text=text, fg=C_BUG)
 
     # ------------------------------------------------------------------- log
     def _append(self, text, tag=None):
@@ -4474,16 +4440,9 @@ class CommitDefectsDialog(tk.Toplevel):
 
     # ---------------------------------------------------------------- config
     def _config(self):
-        src = self._sv_src.get().strip()
-        strip = [src] if (self._sv_strip.get() and src) else []
         return cov_cli.CommitConfig(
             idir=self._sv_idir.get().strip(),
-            build_command=self._sv_build.get().strip(),
-            source_dir=src,
             bin_dir=self._sv_bin.get().strip(),
-            all_checkers=bool(self._sv_all.get()),
-            strip_paths=strip,
-            extra_analyze_args=self._sv_extra_an.get().strip(),
             host=self._sv_host.get().strip(),
             port=self._sv_port.get().strip(),
             stream=self._sv_stream.get().strip(),
@@ -4493,100 +4452,65 @@ class CommitDefectsDialog(tk.Toplevel):
             use_ssl=bool(self._sv_ssl.get()),
             on_new_cert_trust=bool(self._sv_trust.get()),
             description=self._sv_desc.get().strip(),
-            no_command=bool(self._sv_nocmd.get()),
-            fs_capture_search=src,
         )
-
-    def _stages(self):
-        stages = []
-        if self._sv_do_build.get():
-            stages.append(cov_cli.STAGE_BUILD)
-        if self._sv_do_analyze.get():
-            stages.append(cov_cli.STAGE_ANALYZE)
-        if self._sv_do_commit.get():
-            stages.append(cov_cli.STAGE_COMMIT)
-        return stages
 
     # ------------------------------------------------------------------- run
     def _run(self):
         if self._running:
             return
-        stages = self._stages()
-        if not stages:
-            messagebox.showwarning("Nothing to Run",
-                                   "Select at least one stage.", parent=self)
-            return
-
         cfg = self._config()
-        problems = cov_cli.validate_config(cfg, stages)
+        problems = cov_cli.validate_config(cfg)
         if problems:
             messagebox.showwarning(
                 "Check the Settings",
                 "Please fix the following:\n\n" +
-                "\n".join(f"  •  {p}" for p in problems), parent=self)
+                "\n\n".join(f"  •  {p}" for p in problems), parent=self)
             return
 
-        if cov_cli.STAGE_COMMIT in stages and not self._sv_dry.get():
-            if not messagebox.askyesno(
-                    "Confirm Commit",
-                    f"Commit the analysed defects to stream "
-                    f"'{cfg.stream}' on {cfg.host}?\n\n"
-                    "A full build and analysis can take a long time.",
-                    parent=self):
-                return
-
-        # Create the intermediate directory up-front so cov-build never fails
-        # on a missing parent path.
-        try:
-            os.makedirs(cfg.idir, exist_ok=True)
-        except Exception as exc:
-            messagebox.showerror("Cannot Create Folder",
-                                 f"Intermediate directory: {exc}", parent=self)
+        dry = bool(self._sv_dry.get())
+        if not dry and not messagebox.askyesno(
+                "Confirm Commit",
+                f"Upload the analysis results in\n{cfg.idir}\n\n"
+                f"to stream '{cfg.stream}' on {cfg.host}?",
+                parent=self):
             return
 
         self._running = True
         self._canceller = cov_cli.Canceller()
-        self._run_btn.configure(state="disabled", text="Running…")
+        self._run_btn.configure(state="disabled", text="Committing…")
         self._cancel_btn.configure(state="normal")
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
 
-        def _stage_cb(stage):
-            label = cov_cli.STAGE_LABELS.get(stage, stage)
-            self.after(0, lambda: self._stage_lbl.configure(text=label))
-            self._append(f"\n=== {label} ===\n", "cmd")
-
         def _worker():
-            result = cov_cli.run_pipeline(
-                cfg, stages=stages, log_cb=self._append,
-                stage_cb=_stage_cb, canceller=self._canceller,
-                dry_run=bool(self._sv_dry.get()))
+            result = cov_cli.run_commit(cfg, log_cb=self._append,
+                                        canceller=self._canceller,
+                                        dry_run=dry)
 
             def _done():
                 self._running = False
-                self._run_btn.configure(state="normal", text="\u25b6  Run")
+                self._run_btn.configure(state="normal",
+                                        text="\u2b06  Commit to Coverity")
                 self._cancel_btn.configure(state="disabled")
-                self._stage_lbl.configure(text="")
                 self._append("\n" + result.summary() + "\n",
                              "ok" if result.ok else "err")
                 if result.cancelled:
-                    messagebox.showinfo("Cancelled", "The run was cancelled.",
-                                        parent=self)
+                    messagebox.showinfo("Cancelled",
+                                        "The commit was cancelled.", parent=self)
+                elif result.ok and not dry:
+                    messagebox.showinfo(
+                        "Commit Complete",
+                        f"Defects are now in stream '{cfg.stream}'.\n\n"
+                        "Next: use '⬇ Pull from Coverity' on the Setup page "
+                        "to bring them in for disposition.", parent=self)
                 elif result.ok:
-                    msg = "Completed:\n\n" + result.summary()
-                    if (cov_cli.STAGE_COMMIT in stages
-                            and not self._sv_dry.get()):
-                        msg += ("\n\nDefects are now in stream "
-                                f"'{cfg.stream}'.\nNext: use "
-                                "'⬇ Pull from Coverity' to bring them in "
-                                "for disposition.")
-                    messagebox.showinfo("Done", msg, parent=self)
+                    messagebox.showinfo("Dry Run", result.summary(), parent=self)
                 else:
                     messagebox.showerror(
-                        "Failed",
-                        "The run did not complete:\n\n" + result.summary() +
-                        "\n\nSee the output log for details.", parent=self)
+                        "Commit Failed",
+                        result.summary() + "\n\nSee the output log for details.",
+                        parent=self)
 
             self.after(0, _done)
 
@@ -4600,8 +4524,8 @@ class CommitDefectsDialog(tk.Toplevel):
     def _on_close(self):
         if self._running:
             if not messagebox.askyesno(
-                    "Run in Progress",
-                    "A Coverity run is still going. Cancel it and close?",
+                    "Commit in Progress",
+                    "A commit is still running. Cancel it and close?",
                     parent=self):
                 return
             self._cancel()

@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
 """
-cov_commit.py — headless build → analyse → commit for Coverity Connect.
+cov_commit.py — headless commit of Coverity analysis results to Connect.
 
-Populates an empty Coverity stream from a local source tree, without the GUI.
-Useful on a build machine or in CI.
+Uploads an existing intermediate directory (idir) to a Coverity Connect stream
+by driving ``cov-commit-defects``. Building and analysing the code is done
+separately by the user; this only performs the commit.
 
 Examples
 --------
-Full run::
+Commit an analysed intermediate directory::
 
-    python cov_commit.py \
-        --idir /work/cov-idir \
-        --source /work/src \
-        --build-command "make -j8" \
+    export COVERITY_PASSPHRASE='...'
+    python cov_commit.py --idir /work/cov-idir \
         --host coverity.example.com --port 443 \
         --stream MyStream --user rakesh
 
-Print the commands without running them::
+Show the command without running it::
 
-    python cov_commit.py ... --dry-run
+    python cov_commit.py --idir /work/cov-idir --host h --stream s \
+        --user u --dry-run
 
-Commit an already-analysed intermediate directory::
+Check whether a folder can be committed::
 
-    python cov_commit.py --idir /work/cov-idir --stages commit \
-        --host coverity.example.com --stream MyStream \
-        --auth-key-file ~/.coverity/auth-key.txt
+    python cov_commit.py --idir /some/folder --inspect
 
-The password is read from the ``COVERITY_PASSPHRASE`` environment variable —
-it is never accepted as a command-line flag, since argv is world-readable on
-most systems. An ``--auth-key-file`` is preferred over a password.
+Note
+----
+``cov-commit-defects`` uploads an **intermediate directory**, not an HTML
+report. An HTML report folder is produced *from* an idir by
+``cov-format-errors --dir <idir> --html-output <folder>`` and contains nothing
+that can be uploaded. Use ``--inspect`` if you are unsure which folder is which.
+
+The password is read from the ``COVERITY_PASSPHRASE`` environment variable and
+has no command-line flag, because argv is visible to other users via the
+process list. An ``--auth-key-file`` is preferred.
 """
 from __future__ import annotations
 
@@ -43,52 +48,36 @@ import cov_cli
 def build_parser():
     p = argparse.ArgumentParser(
         prog="cov_commit.py",
-        description="Build, analyse and commit defects to Coverity Connect.",
+        description="Commit Coverity analysis results (an intermediate "
+                    "directory) to a Coverity Connect stream.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Password: set COVERITY_PASSPHRASE, or use --auth-key-file.",
     )
     p.add_argument("--idir", required=True,
-                   help="intermediate directory (cov-* --dir)")
-    p.add_argument("--source", default="",
-                   help="source folder; used as the build working directory")
+                   help="intermediate directory produced by cov-build/cov-analyze")
     p.add_argument("--bin-dir", default="",
                    help="Coverity Analysis bin folder (if not on PATH)")
 
-    cap = p.add_argument_group("capture (cov-build)")
-    cap.add_argument("--build-command", default="",
-                     help="build command to wrap, e.g. 'make -j8'")
-    cap.add_argument("--no-command", action="store_true",
-                     help="scan the source tree instead of running a build")
+    p.add_argument("--host", default="", help="Coverity Connect host")
+    p.add_argument("--port", default="", help="Coverity Connect port")
+    p.add_argument("--no-ssl", action="store_true", help="use http, not https")
+    p.add_argument("--stream", default="", help="target stream (must exist)")
+    p.add_argument("--user", default="", help="Coverity Connect username")
+    p.add_argument("--auth-key-file", default="",
+                   help="auth key file (preferred over a password)")
+    p.add_argument("--description", default="", help="snapshot description")
+    p.add_argument("--version", default="", help="snapshot version/SHA")
+    p.add_argument("--strip-path", action="append", default=[],
+                   help="strip this prefix from reported paths (repeatable)")
+    p.add_argument("--no-trust-cert", action="store_true",
+                   help="do not auto-trust an unseen server certificate")
+    p.add_argument("--commit-args", default="",
+                   help="extra cov-commit-defects arguments (quoted)")
 
-    an = p.add_argument_group("analysis (cov-analyze)")
-    an.add_argument("--no-all", action="store_true",
-                    help="do not pass --all (all checkers are on by default)")
-    an.add_argument("--aggressiveness", choices=["low", "medium", "high"],
-                    default="", help="--aggressiveness-level")
-    an.add_argument("--strip-path", action="append", default=[],
-                    help="strip this prefix from reported paths (repeatable)")
-    an.add_argument("--analyze-args", default="",
-                    help="extra cov-analyze arguments (quoted)")
-
-    co = p.add_argument_group("commit (cov-commit-defects)")
-    co.add_argument("--host", default="", help="Coverity Connect host")
-    co.add_argument("--port", default="", help="Coverity Connect port")
-    co.add_argument("--no-ssl", action="store_true", help="use http, not https")
-    co.add_argument("--stream", default="", help="target stream (must exist)")
-    co.add_argument("--user", default="", help="Coverity Connect username")
-    co.add_argument("--auth-key-file", default="",
-                    help="auth key file (preferred over a password)")
-    co.add_argument("--description", default="", help="commit description")
-    co.add_argument("--version", default="", help="commit version/SHA")
-    co.add_argument("--no-trust-cert", action="store_true",
-                    help="do not auto-trust an unseen server certificate")
-    co.add_argument("--commit-args", default="",
-                    help="extra cov-commit-defects arguments (quoted)")
-
-    p.add_argument("--stages", default="build,analyze,commit",
-                   help="comma-separated subset of: build,analyze,commit")
     p.add_argument("--dry-run", action="store_true",
-                   help="print the commands without executing them")
+                   help="print the command without executing it")
+    p.add_argument("--inspect", action="store_true",
+                   help="report what --idir is and whether it can be committed")
     p.add_argument("--prompt-password", action="store_true",
                    help="prompt for the password interactively")
     return p
@@ -97,13 +86,7 @@ def build_parser():
 def config_from_args(args, password=""):
     return cov_cli.CommitConfig(
         idir=args.idir,
-        build_command=args.build_command,
-        source_dir=args.source,
         bin_dir=args.bin_dir,
-        all_checkers=not args.no_all,
-        aggressiveness=args.aggressiveness,
-        strip_paths=list(args.strip_path),
-        extra_analyze_args=args.analyze_args,
         host=args.host,
         port=args.port,
         stream=args.stream,
@@ -114,32 +97,23 @@ def config_from_args(args, password=""):
         on_new_cert_trust=not args.no_trust_cert,
         description=args.description,
         version=args.version,
-        extra_commit_args=args.commit_args,
-        no_command=args.no_command,
-        fs_capture_search=args.source,
+        strip_paths=list(args.strip_path),
+        extra_args=args.commit_args,
     )
-
-
-def parse_stages(text):
-    valid = {cov_cli.STAGE_BUILD, cov_cli.STAGE_ANALYZE, cov_cli.STAGE_COMMIT}
-    order = [cov_cli.STAGE_BUILD, cov_cli.STAGE_ANALYZE, cov_cli.STAGE_COMMIT]
-    wanted = {s.strip().lower() for s in (text or "").split(",") if s.strip()}
-    unknown = wanted - valid
-    if unknown:
-        raise ValueError(f"unknown stage(s): {', '.join(sorted(unknown))}")
-    if not wanted:
-        raise ValueError("no stages selected")
-    return [s for s in order if s in wanted]
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
-    try:
-        stages = parse_stages(args.stages)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    if args.inspect:
+        info = cov_cli.inspect_input(args.idir)
+        print(f"Path : {info.path}")
+        print(f"Type : {info.kind}")
+        print(f"Commit-ready: {'yes' if info.committable else 'no'}")
+        print(f"\n{info.message}")
+        if info.hint:
+            print(f"\n{info.hint}")
+        return 0
 
     password = os.environ.get("COVERITY_PASSPHRASE", "")
     if args.prompt_password and not args.auth_key_file:
@@ -147,33 +121,21 @@ def main(argv=None):
 
     cfg = config_from_args(args, password)
 
-    problems = cov_cli.validate_config(cfg, stages)
+    problems = cov_cli.validate_config(cfg)
     if problems:
-        print("Cannot start — please fix:", file=sys.stderr)
+        print("Cannot commit — please fix:", file=sys.stderr)
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
-        return 2
-
-    try:
-        os.makedirs(cfg.idir, exist_ok=True)
-    except OSError as exc:
-        print(f"error: cannot create intermediate directory: {exc}",
-              file=sys.stderr)
         return 2
 
     def log(text):
         sys.stdout.write(text)
         sys.stdout.flush()
 
-    def stage_started(stage):
-        log(f"\n=== {cov_cli.STAGE_LABELS.get(stage, stage)} ===\n")
-
-    result = cov_cli.run_pipeline(cfg, stages=stages, log_cb=log,
-                                  stage_cb=stage_started,
-                                  dry_run=args.dry_run)
+    result = cov_cli.run_commit(cfg, log_cb=log, dry_run=args.dry_run)
     print("\n" + result.summary())
-    if result.ok and cov_cli.STAGE_COMMIT in stages and not args.dry_run:
-        print(f"\nDefects committed to stream '{cfg.stream}'.")
+    if result.ok and not args.dry_run:
+        print(f"Defects committed to stream '{cfg.stream}' on {cfg.host}.")
     return 0 if result.ok else 1
 
 
