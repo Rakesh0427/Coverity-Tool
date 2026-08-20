@@ -95,35 +95,33 @@ On completion you get `coverity_dispositions.csv` and `audit.jsonl` in the curre
 If your defects are **not in Coverity Connect yet**, there is nothing to pull.
 The tool can upload them for you by running Coverity's `cov-commit-defects`.
 
-### What can be committed — read this first
+### What gets committed: the intermediate directory
 
-`cov-commit-defects` uploads an **intermediate directory** (the `--dir` "idir"
-folder created by `cov-build` / `cov-analyze`):
+`cov-commit-defects` uploads an **intermediate directory** — the `--dir` "idir"
+folder created by `cov-build` / `cov-analyze`:
 
 ```
 cov-commit-defects --dir <idir> --host <host> --stream <stream> --user <user>
 ```
 
-**An HTML report folder cannot be committed.** This surprises people, so it is
-worth stating plainly: the HTML report is *generated from* an idir by
-`cov-format-errors --dir <idir> --html-output <folder>`. It is a human-readable
-rendering, not upload data — it contains no captured source or analysis output,
-so there is nothing in it for Coverity to store. The same applies to Excel/CSV
-exports.
+A committable idir contains **both** of these subfolders:
 
-| You have | Can you commit it? | What to do |
+| Subfolder | Created by | Holds |
 |---|---|---|
-| Intermediate directory (`emit/` + `output/`) | **Yes** | Select it and commit. |
-| Intermediate directory with only `emit/` | No | Run `cov-analyze --dir <idir>` first. |
-| HTML report folder | No | Find the idir that produced it and select that instead. |
-| Excel / CSV export | No | Same — the idir is the only committable artefact. |
+| `emit/` | `cov-build --dir <idir> <build command>` | the captured source / build representation |
+| `output/` | `cov-analyze --dir <idir>` | the analysis results (the defects) |
 
-If you are unsure which folder is which, the tool tells you: the dialog checks
-the folder as soon as you pick it, and the CLI has `--inspect`.
+If either is missing the commit cannot proceed, so the tool checks first and
+tells you exactly which step still needs running:
 
-> If the idir no longer exists, the defects cannot be uploaded from the report —
-> the build and analysis have to be re-run to recreate one. Those two steps are
-> deliberately outside this tool; run them yourself, then come back here.
+| Folder you selected | Result |
+|---|---|
+| `emit/` + `output/` | **Ready to commit.** |
+| `emit/` only | Not analysed yet — run `cov-analyze --dir <idir>`. |
+| `output/` only | Incomplete idir — re-run `cov-build` then `cov-analyze`. |
+| Neither | Not an intermediate directory — pick the folder passed to `--dir`. |
+
+The GUI checks the folder the moment you select it; the CLI has `--inspect`.
 
 Two other prerequisites: **Coverity Analysis must be installed** (the tool needs
 the `cov-commit-defects` binary — on `PATH` or via the bin folder field), and
@@ -158,7 +156,7 @@ python cov_commit.py \
 
 | Option | Purpose |
 |---|---|
-| `--inspect` | Report what a folder is and whether it can be committed. |
+| `--inspect` | Check whether a folder is a committable idir. |
 | `--dry-run` | Print the exact command without running it. |
 | `--auth-key-file PATH` | Use a key file instead of a password (preferred). |
 | `--strip-path P` | Strip a path prefix from reported files (repeatable). |
@@ -174,8 +172,9 @@ process list.
 
 | Message | Meaning / fix |
 |---|---|
-| "HTML report folder, which cannot be committed" | Select the idir instead — see the table above. |
+| "not a Coverity intermediate directory" | Select the folder passed to `cov-build --dir` / `cov-analyze --dir`. |
 | "no analysis results (output/)" | Run `cov-analyze --dir <idir>` before committing. |
+| "no captured source (emit/)" | The idir is incomplete — re-run `cov-build` then `cov-analyze`. |
 | Stream does not exist | Create the stream in Coverity Connect first. |
 | Authentication failed | Wrong user/password, or use `--auth-key-file`. |
 | Certificate not trusted | Keep *Trust new certificate* ticked, or install the CA cert. |

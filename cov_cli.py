@@ -14,11 +14,14 @@ in hand.
 What can actually be committed
 ------------------------------
 ``cov-commit-defects`` reads an **intermediate directory** (the ``--dir`` idir
-produced by ``cov-build``/``cov-analyze``). It cannot read an HTML report:
-the HTML folder is *generated from* an idir by
-``cov-format-errors --dir idir --html-output <folder>`` and contains no emit or
-analysis data to upload. :func:`inspect_input` recognises what a user pointed
-at and explains the difference instead of letting Coverity fail cryptically.
+produced by ``cov-build``/``cov-analyze``). A committable idir holds both:
+
+* ``emit/``   — the captured source / build representation
+* ``output/`` — the analysis results
+
+:func:`inspect_input` checks for exactly those two subfolders and reports which
+one is missing, so a bad selection is caught before any credentials are typed
+rather than surfacing as a cryptic Coverity error.
 
 Design notes
 ------------
@@ -43,11 +46,15 @@ from dataclasses import dataclass, field
 COV_COMMIT = "cov-commit-defects"
 
 #: Classifications returned by :func:`inspect_input`.
-INPUT_IDIR = "idir"            # a usable intermediate directory
-INPUT_HTML = "html"            # a cov-format-errors HTML report folder
-INPUT_EMPTY_IDIR = "idir_no_output"  # idir captured but never analysed
-INPUT_MISSING = "missing"      # path does not exist
-INPUT_UNKNOWN = "unknown"      # exists but is not recognisable
+INPUT_IDIR = "idir"                  # emit/ + output/  → committable
+INPUT_NO_OUTPUT = "idir_no_output"   # emit/ only — captured but not analysed
+INPUT_NO_EMIT = "idir_no_emit"       # output/ only — no captured source
+INPUT_MISSING = "missing"            # path does not exist
+INPUT_UNKNOWN = "unknown"            # exists but is not an idir
+
+#: Subfolders that together make an intermediate directory committable.
+IDIR_EMIT = "emit"
+IDIR_OUTPUT = "output"
 
 
 class CovToolsNotFound(Exception):
@@ -109,23 +116,12 @@ class InputInfo:
     hint: str = ""
 
 
-def _looks_like_html_report(path):
-    """True when the folder is a cov-format-errors HTML report."""
-    if os.path.isfile(os.path.join(path, "index.html")):
-        return True
-    try:
-        names = os.listdir(path)
-    except OSError:
-        return False
-    return any(n.lower().endswith((".html", ".htm")) for n in names)
-
-
 def inspect_input(path):
     """Classify ``path`` and explain whether cov-commit-defects can use it.
 
-    Returns an :class:`InputInfo`. The HTML case matters most: users naturally
-    assume the report folder they already have is what gets uploaded, but
-    Coverity needs the intermediate directory that produced it.
+    A committable intermediate directory contains both ``emit/`` (captured
+    source) and ``output/`` (analysis results). Returns an :class:`InputInfo`
+    naming whichever part is missing.
     """
     path = (path or "").strip()
     if not path:
@@ -142,28 +138,27 @@ def inspect_input(path):
                          "cov-commit-defects needs the intermediate directory "
                          "(idir) folder.")
 
-    has_emit = os.path.isdir(os.path.join(path, "emit"))
-    has_output = os.path.isdir(os.path.join(path, "output"))
+    has_emit = os.path.isdir(os.path.join(path, IDIR_EMIT))
+    has_output = os.path.isdir(os.path.join(path, IDIR_OUTPUT))
 
     if has_emit and has_output:
-        return InputInfo(path, INPUT_IDIR, True,
-                         "Valid intermediate directory (analysis results found).",
-                         "")
-    if has_emit and not has_output:
         return InputInfo(
-            path, INPUT_EMPTY_IDIR, False,
+            path, INPUT_IDIR, True,
+            "Valid intermediate directory — emit/ and output/ both present.",
+            "")
+    if has_emit:
+        return InputInfo(
+            path, INPUT_NO_OUTPUT, False,
             "This intermediate directory has captured source (emit/) but no "
             "analysis results (output/).",
             "Run cov-analyze --dir <idir> before committing.")
-
-    if _looks_like_html_report(path):
+    if has_output:
         return InputInfo(
-            path, INPUT_HTML, False,
-            "This is an HTML report folder, which cannot be committed.",
-            "Coverity uploads the intermediate directory (idir), not the HTML "
-            "report — the HTML is generated FROM the idir by cov-format-errors. "
-            "Select the idir folder that was passed to cov-build --dir / "
-            "cov-analyze --dir instead.")
+            path, INPUT_NO_EMIT, False,
+            "This intermediate directory has analysis results (output/) but no "
+            "captured source (emit/).",
+            "The idir is incomplete — re-run cov-build --dir <idir> "
+            "and cov-analyze --dir <idir>.")
 
     return InputInfo(
         path, INPUT_UNKNOWN, False,

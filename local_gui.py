@@ -4195,10 +4195,10 @@ class CommitDefectsDialog(tk.Toplevel):
     The user runs cov-build / cov-analyze themselves; this dialog only runs
     ``cov-commit-defects`` on the resulting intermediate directory.
 
-    Note the input must be the **intermediate directory (idir)**, not an HTML
-    report folder — the HTML is generated *from* an idir and holds no data that
-    can be uploaded. The dialog inspects the chosen folder and says so plainly
-    rather than letting Coverity fail with a cryptic message.
+    The input must be an **intermediate directory (idir)** containing both
+    ``emit/`` (captured source) and ``output/`` (analysis results). The dialog
+    inspects the chosen folder and names whichever part is missing, rather than
+    letting Coverity fail with a cryptic message.
 
     All command building, validation and execution live in :mod:`cov_cli`;
     this class is only the GUI shell.
@@ -4313,7 +4313,8 @@ class CommitDefectsDialog(tk.Toplevel):
                     browse=self._browse_idir,
                     hint="the --dir folder from cov-build / cov-analyze")
         self._input_lbl = tk.Label(
-            s1, text="Select the intermediate directory (idir) to upload.",
+            s1, text="Select the intermediate directory (idir) to upload — "
+                     "it must contain emit/ and output/.",
             font=("Segoe UI", 9), bg=C_PANEL, fg=C_SUBTEXT,
             anchor="w", justify="left", wraplength=760)
         self._input_lbl.pack(fill="x", padx=10, pady=(0, 8))
@@ -4421,7 +4422,8 @@ class CommitDefectsDialog(tk.Toplevel):
             self._input_lbl.configure(text="\u2713  " + info.message, fg=C_FP)
         elif info.kind == cov_cli.INPUT_MISSING and not self._sv_idir.get().strip():
             self._input_lbl.configure(
-                text="Select the intermediate directory (idir) to upload.",
+                text="Select the intermediate directory (idir) to upload — "
+                     "it must contain emit/ and output/.",
                 fg=C_SUBTEXT)
         else:
             text = "\u26a0  " + info.message

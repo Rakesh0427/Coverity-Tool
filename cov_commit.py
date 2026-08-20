@@ -26,10 +26,10 @@ Check whether a folder can be committed::
 
 Note
 ----
-``cov-commit-defects`` uploads an **intermediate directory**, not an HTML
-report. An HTML report folder is produced *from* an idir by
-``cov-format-errors --dir <idir> --html-output <folder>`` and contains nothing
-that can be uploaded. Use ``--inspect`` if you are unsure which folder is which.
+``cov-commit-defects`` uploads an **intermediate directory**: the folder passed
+to ``cov-build --dir`` / ``cov-analyze --dir``, containing ``emit/`` (captured
+source) and ``output/`` (analysis results). Use ``--inspect`` to check whether
+a folder qualifies.
 
 The password is read from the ``COVERITY_PASSPHRASE`` environment variable and
 has no command-line flag, because argv is visible to other users via the

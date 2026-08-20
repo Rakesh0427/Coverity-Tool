@@ -63,40 +63,39 @@ def test_commit_tool_path_returns_none_when_absent(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# input inspection — the HTML-vs-idir distinction
+# input inspection — an idir needs emit/ AND output/
 # --------------------------------------------------------------------------- #
 def test_real_idir_is_committable(idir):
     info = cc.inspect_input(idir)
     assert info.kind == cc.INPUT_IDIR and info.committable
 
 
-def test_html_report_folder_is_rejected_with_an_explanation(tmp_path):
-    html = tmp_path / "report"
-    (html / "Code").mkdir(parents=True)
-    (html / "index.html").write_text("<html></html>")
-
-    info = cc.inspect_input(str(html))
-    assert info.kind == cc.INPUT_HTML
-    assert not info.committable
-    # The user must learn WHY, and what to pick instead.
-    assert "idir" in info.hint.lower()
-    assert "cov-format-errors" in info.hint
-
-
-def test_html_folder_without_index_still_detected(tmp_path):
-    html = tmp_path / "report"
-    html.mkdir()
-    (html / "1_buf.html").write_text("<html></html>")
-    assert cc.inspect_input(str(html)).kind == cc.INPUT_HTML
+def test_idir_needs_both_emit_and_output(tmp_path):
+    """Only emit/ + output/ together make a committable idir."""
+    d = tmp_path / "idir"
+    (d / "emit").mkdir(parents=True)
+    (d / "output").mkdir()
+    info = cc.inspect_input(str(d))
+    assert info.committable
+    assert "emit/" in info.message and "output/" in info.message
 
 
 def test_captured_but_unanalysed_idir_is_rejected(tmp_path):
     d = tmp_path / "idir"
     (d / "emit").mkdir(parents=True)          # no output/
     info = cc.inspect_input(str(d))
-    assert info.kind == cc.INPUT_EMPTY_IDIR
+    assert info.kind == cc.INPUT_NO_OUTPUT
     assert not info.committable
     assert "cov-analyze" in info.hint
+
+
+def test_output_without_emit_is_rejected(tmp_path):
+    d = tmp_path / "idir"
+    (d / "output").mkdir(parents=True)        # no emit/
+    info = cc.inspect_input(str(d))
+    assert info.kind == cc.INPUT_NO_EMIT
+    assert not info.committable
+    assert "cov-build" in info.hint
 
 
 def test_unrelated_folder_is_rejected(tmp_path):
@@ -119,13 +118,14 @@ def test_file_instead_of_folder_is_rejected(tmp_path):
     assert not info.committable and "folder" in info.message.lower()
 
 
-def test_repo_sample_html_report_is_recognised():
-    """The bundled sample report must be detected as HTML, not an idir."""
-    sample = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "docs", "sample_report")
-    if not os.path.isdir(sample):
-        pytest.skip("sample report not present")
-    assert cc.inspect_input(sample).kind == cc.INPUT_HTML
+def test_folder_of_loose_files_is_not_an_idir(tmp_path):
+    """A folder without emit/ and output/ is rejected whatever it holds."""
+    d = tmp_path / "report"
+    (d / "Code").mkdir(parents=True)
+    (d / "index.html").write_text("<html></html>")
+    info = cc.inspect_input(str(d))
+    assert info.kind == cc.INPUT_UNKNOWN and not info.committable
+    assert "emit" in info.hint and "output" in info.hint
 
 
 # --------------------------------------------------------------------------- #
@@ -205,12 +205,18 @@ def test_validate_accepts_a_good_config(fake_bin, idir):
     assert cc.validate_config(cfg_for(idir, bin_dir=fake_bin)) == []
 
 
-def test_validate_rejects_an_html_folder(fake_bin, tmp_path):
-    html = tmp_path / "report"
-    html.mkdir()
-    (html / "index.html").write_text("<html></html>")
-    problems = cc.validate_config(cfg_for(str(html), bin_dir=fake_bin))
-    assert any("HTML report" in p for p in problems)
+def test_validate_rejects_a_non_idir_folder(fake_bin, tmp_path):
+    d = tmp_path / "somewhere"
+    d.mkdir()
+    problems = cc.validate_config(cfg_for(str(d), bin_dir=fake_bin))
+    assert any("not a Coverity intermediate directory" in p for p in problems)
+
+
+def test_validate_rejects_an_unanalysed_idir(fake_bin, tmp_path):
+    d = tmp_path / "idir"
+    (d / "emit").mkdir(parents=True)
+    problems = cc.validate_config(cfg_for(str(d), bin_dir=fake_bin))
+    assert any("cov-analyze" in p for p in problems)
 
 
 def test_validate_collects_every_problem_at_once(fake_bin):
@@ -334,11 +340,10 @@ def test_cli_dry_run_succeeds(fake_bin, idir, capsys, monkeypatch):
     assert "cov-commit-defects" in out and "--stream" in out
 
 
-def test_cli_rejects_html_folder_with_guidance(fake_bin, tmp_path, capsys):
-    html = tmp_path / "report"
-    html.mkdir()
-    (html / "index.html").write_text("<html></html>")
-    rc = cov_commit.main(["--idir", str(html), "--bin-dir", fake_bin,
+def test_cli_rejects_non_idir_with_guidance(fake_bin, tmp_path, capsys):
+    d = tmp_path / "report"
+    d.mkdir()
+    rc = cov_commit.main(["--idir", str(d), "--bin-dir", fake_bin,
                           "--host", "h", "--stream", "s", "--user", "u",
                           "--dry-run"])
     assert rc == 2
