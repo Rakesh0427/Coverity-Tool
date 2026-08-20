@@ -1,7 +1,10 @@
 This is a placeholder for CoverityTool.exe
 ------------------------------------------
-On Linux sandbox we cannot build a Windows .exe directly.
-To get the real exe:
+The real exe is built by the "Build Windows EXE" GitHub Actions workflow
+(.github/workflows/build-windows-exe.yml): run it manually for a build artifact,
+or push a tag like v1.4.1 to attach the ZIP to GitHub Releases.
+
+To build the exe yourself:
   1. On Windows 10/11 with Python 3.10+ installed
   2. Unzip this setup folder
   3. Double-click build_exe.bat (in repo root, not in dist)

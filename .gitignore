@@ -22,9 +22,13 @@ rad.json
 
 # Python virtual environments, bytecode, and local test diagnostics
 .venv/
+.venv_build/
 __pycache__/
 .pytest_cache/
 *.py[cod]
 _ev_diag.txt
+# PyInstaller output (built CI artifacts; the committed dist/Coverity-Tool-Setup skeleton is kept)
+build/
+dist/CoverityTool/
 #Test results file
 TestResults.xml
