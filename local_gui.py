@@ -367,7 +367,24 @@ class SetupPage(Page):
         tk.Label(outer, text=APP_NAME,
                  font=("Segoe UI", 26, "bold"), bg=C_BG, fg=C_TEXT).pack()
         tk.Label(outer, text="Automated defect triage for Coverity reports",
-                 font=("Segoe UI", 11), bg=C_BG, fg=C_SUBTEXT).pack(pady=(2, 24))
+                 font=("Segoe UI", 11), bg=C_BG, fg=C_SUBTEXT).pack(pady=(2, 14))
+
+        # Step 0 — the stream may be empty. Upload already-analysed results
+        # (an intermediate directory) before there is anything to pull.
+        # Sits *above* the main card so the primary "Start Disposition"
+        # button below the card stays in its original vertical position
+        # regardless of whether this seed strip is used.
+        seed_f = tk.Frame(outer, bg=C_BG)
+        seed_f.pack(pady=(0, 10))
+        tk.Label(seed_f,
+                 text="Defects not in Coverity Connect yet?",
+                 font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT
+                 ).pack(side="left", padx=(0, 8))
+        tk.Button(seed_f, text="\u2b06  Commit Defects to Coverity",
+                  command=self._open_commit_dialog,
+                  bg=C_CARD, fg=C_ACCENT, relief="flat",
+                  font=("Segoe UI", 9, "bold"), padx=12, pady=5,
+                  cursor="hand2", activebackground=C_BORDER).pack(side="left")
 
         card = tk.Frame(outer, bg=C_PANEL, bd=0)
         card.pack(ipadx=28, ipady=20)
@@ -414,20 +431,6 @@ class SetupPage(Page):
 
         card.columnconfigure(0, weight=1)
 
-        # Step 0 — the stream may be empty. Upload already-analysed results
-        # (an intermediate directory) before there is anything to pull.
-        seed_f = tk.Frame(outer, bg=C_BG)
-        seed_f.pack(pady=(16, 0))
-        tk.Label(seed_f,
-                 text="Defects not in Coverity Connect yet?",
-                 font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT
-                 ).pack(side="left", padx=(0, 8))
-        tk.Button(seed_f, text="\u2b06  Commit Defects to Coverity",
-                  command=self._open_commit_dialog,
-                  bg=C_CARD, fg=C_ACCENT, relief="flat",
-                  font=("Segoe UI", 9, "bold"), padx=12, pady=5,
-                  cursor="hand2", activebackground=C_BORDER).pack(side="left")
-
         start = tk.Button(outer, text="  ▶  Start Disposition",
                           command=self._start,
                           bg=C_ACCENT, fg="#FFFFFF",
@@ -435,7 +438,7 @@ class SetupPage(Page):
                           relief="flat", cursor="hand2",
                           activebackground=C_ACCENT2, activeforeground="#FFFFFF",
                           padx=28, pady=12)
-        start.pack(pady=(22, 0))
+        start.pack(pady=(18, 0))
 
     def _browse_input(self):
         """Browse for either HTML folder or Excel file."""
