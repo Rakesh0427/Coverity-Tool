@@ -8,6 +8,7 @@ A local, privacy-preserving decision assistant for triaging **Coverity** and **C
 
 | Step | Where | Result |
 |---|---|---|
+| 0. Seed the stream *(only if Coverity Connect has no defects yet)* | **🔨 Build, Analyse & Commit to Coverity** on the Setup page, or `cov_commit.py` | `cov-build` → `cov-analyze` → `cov-commit-defects`; stream populated |
 | 1. Get defects | HTML report folder, Excel export, or direct **Pull** from Coverity Connect | defect list with checker, file, line |
 | 2. Analyse | tree-sitter parses the local source file once per file (cached); rule engine runs per checker | `coverity_dispositions.csv` with classification/comment/fix/confidence |
 | 3. Review | Results page — double-click a row | see events, source, suggestion |
@@ -58,6 +59,8 @@ coverity_triage/
 ├── html_report_parser.py     # reads Coverity HTML / Excel exports
 ├── coverity_soap_client.py   # Pull/Push via REST + SOAP
 ├── coverity_push.py          # Push pipeline: select → build → validate → push
+├── cov_cli.py                # Drives cov-build / cov-analyze / cov-commit-defects
+├── cov_commit.py             # Headless CLI for build → analyse → commit
 ├── code_extractor.py         # tree-sitter function extraction (cached)
 ├── context_builder.py        # callees / callers / cross-file context
 ├── workspace_indexer.py      # workspace symbol + call-site index
@@ -84,6 +87,86 @@ python coverity_triage.py --report "C:\path\to\report\index.html" --src-root "C:
 | `--resume` | Skip CIDs already present in `dispositions.csv` |
 
 On completion you get `coverity_dispositions.csv` and `audit.jsonl` in the current folder.
+
+---
+
+## 3b. Seeding an empty Coverity stream (build → analyse → commit)
+
+If Coverity Connect has **no defects yet**, there is nothing to pull. Defects
+must first be produced locally and committed to a stream. This is the standard
+Coverity CLI pipeline, and the tool can drive it for you:
+
+```
+cov-build   --dir <idir> <your build command>   # capture the build
+cov-analyze --dir <idir> --all                  # find defects
+cov-commit-defects --dir <idir> --host ... --stream ...   # upload
+```
+
+**Prerequisites**
+
+- Coverity Analysis (the `cov-*` command-line tools) installed locally. The GUI
+  finds them on `PATH`, or you can point it at the install's `bin` folder.
+- The **target stream must already exist** in Coverity Connect. Create it in the
+  web UI, or with `cov-manage-im --mode streams --add --set name:MY_STREAM`.
+- A **clean build**. `cov-build` only captures files that actually compile
+  during the run — if everything is already built, it captures nothing.
+
+### From the GUI
+
+Setup page → **🔨 Build, Analyse & Commit to Coverity**:
+
+1. **Coverity Analysis Tools** — leave blank if `cov-build` is on `PATH`,
+   otherwise browse to the `bin` folder. The dialog reports whether it found the tools.
+2. **Step 1 — Capture** — source folder, intermediate directory (`--dir`), and
+   your build command (`make -j8`, `msbuild app.sln`, …). For non-compiled code
+   tick *No build command* to scan the tree instead (`--no-command`).
+3. **Step 2 — Analyse** — all checkers on by default; *Strip source path* keeps
+   reported file paths portable.
+4. **Step 3 — Commit** — host, port, stream, and either a username+password or
+   (preferred) an **auth key file**.
+5. Pick which **stages** to run, optionally tick **Dry run** to see the exact
+   commands first, then **Run**. Output streams live into the log; **Cancel run**
+   stops it.
+
+When it finishes, use **⬇ Pull from Coverity** to bring the defects in, analyse
+and disposition them, then push the dispositions back (section 4.4).
+
+### From the command line (CI / build servers)
+
+```bash
+export COVERITY_PASSPHRASE='...'          # never passed as a flag
+python cov_commit.py \
+    --idir /work/cov-idir \
+    --source /work/src \
+    --build-command "make -j8" \
+    --host coverity.example.com --port 443 \
+    --stream MyStream --user rakesh
+```
+
+Useful options:
+
+| Option | Purpose |
+|---|---|
+| `--dry-run` | Print the exact commands without running them. |
+| `--stages commit` | Run a subset, e.g. commit an already-analysed `idir`. |
+| `--auth-key-file PATH` | Use a key file instead of a password (preferred). |
+| `--no-command` | Scan the source tree instead of wrapping a build. |
+| `--strip-path P` | Strip a path prefix from reported files (repeatable). |
+| `--bin-dir PATH` | Coverity `bin` folder if it is not on `PATH`. |
+
+Exit codes: `0` success, `1` a stage failed, `2` bad configuration. The password
+is read from `COVERITY_PASSPHRASE` and deliberately has no command-line flag,
+because command lines are visible to other users via the process list.
+
+### Common failures
+
+| Message | Meaning / fix |
+|---|---|
+| "captured 0 files" / no files emitted | The build didn't recompile anything. Clean first, then re-run. |
+| Stream does not exist | Create the stream in Coverity Connect before committing. |
+| Authentication failed | Wrong user/password, or use `--auth-key-file`. |
+| Certificate not trusted | Keep *Trust new certificate* ticked, or install the CA cert. |
+| `cov-build` not found | Add the Coverity `bin` folder to `PATH` or set `--bin-dir`. |
 
 ---
 
