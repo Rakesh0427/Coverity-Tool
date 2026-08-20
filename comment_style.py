@@ -23,6 +23,15 @@ try:
     from cwe_mapping import get_cwe
 except Exception:
     get_cwe = lambda x: {}
+
+
+def _cwe_sentence(checker: str) -> str:
+    """Inline 'Reference: CWE-...' fragment for styled comments ('' when unmapped)."""
+    info = get_cwe(checker)
+    if not info:
+        return ''
+    return (f" Reference: CWE-{info['cwe_id']} ({info['cwe_name']}), "
+            f"CERT {info['cert']}, OWASP {info['owasp']}.")
 from typing import Dict, List, Optional, Tuple
 
 # Optional AST helper (tree-sitter based); degrades to regex when unavailable.

@@ -2766,7 +2766,7 @@ class PullDialog(tk.Toplevel):
                 self.after(0, lambda: self._log_insert(
                     "ok" if found else "error", msg + f"    {detail}\n"))
             except Exception as exc:
-                self.after(0, lambda: self._log_insert(
+                self.after(0, lambda exc=exc: self._log_insert(
                     "error", f"REST probe error: {exc}\n"))
 
         threading.Thread(target=_worker, daemon=True).start()
