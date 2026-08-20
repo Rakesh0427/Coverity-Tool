@@ -53,6 +53,7 @@ from heuristic_analyzer import analyze_defect
 from code_extractor import extract_enclosing_function, find_function_line_by_name
 from context_builder import build_defect_context, warm_workspace_index
 from coverity_soap_client import CoveritySOAPClient, zeep_available, CLASSIFICATION_MAP
+import coverity_push as cpush
 
 from checker_categories import (
     category_for_checker,
@@ -1332,6 +1333,15 @@ class ResultsPage(Page):
                   font=("Segoe UI", 9), padx=10, pady=4,
                   cursor="hand2").pack(side="right", padx=12, pady=10)
 
+        # Push the defects currently in this table straight to Coverity
+        # Connect — no CSV export/re-import round trip.
+        tk.Button(tb, text="\u2b06  Push these to Coverity",
+                  command=self._open_direct_push,
+                  bg="#1D4ED8", fg="#FFFFFF", relief="flat",
+                  font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+                  cursor="hand2", activebackground="#1E40AF"
+                  ).pack(side="right", padx=(0, 4), pady=10)
+
         # -- Summary chips --
         self._summary_f = tk.Frame(self, bg=C_BG)
         self._summary_f.pack(fill="x", padx=16, pady=(8, 4))
@@ -1850,6 +1860,22 @@ class ResultsPage(Page):
         self._on_select()
         messagebox.showinfo("Saved", "Decision accepted and recorded.\nStatus updated to 'Accepted'.")
 
+    def _open_direct_push(self):
+        """Open the direct-push dialog for the defects in this results table."""
+        if not self._all_results:
+            messagebox.showinfo(
+                "Nothing to Push",
+                "Run an analysis first — there are no defects in the table.",
+                parent=self)
+            return
+        DirectPushDialog(self, self.app, self._all_results,
+                         on_complete=self._refresh_after_push)
+
+    def _refresh_after_push(self):
+        """Repaint the tree so push_status colouring (green/red) shows up."""
+        self._apply_filters()
+        self._update_summary(self._all_results)
+
     def _show_already_accepted(self):
         if self._sel_idx:
             msg = f"ID {self._sel_idx['cid']} was already accepted"
@@ -1896,6 +1922,9 @@ class ResultsPage(Page):
             self._sel_idx["classification"] = classification
             self._sel_idx["comment"] = comment
             self._sel_idx["accepted"] = False
+            # Overrides are a deliberate reviewer decision, so they count as
+            # "reviewed" for the Accepted/overridden push selection mode.
+            self._sel_idx["overridden"] = True
             self._sel_idx["accepted_by"] = ""
             self._sel_idx["accepted_at"] = ""
             self._save_decision(self._sel_idx, classification, comment, accepted=False)
@@ -3675,6 +3704,464 @@ class PushDialog(tk.Toplevel):
                     msg, parent=self)
                 if pushed_fail == 0:
                     self.destroy()
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Direct Push Dialog — push the analysed results table straight to Connect
+# ---------------------------------------------------------------------------
+class DirectPushDialog(tk.Toplevel):
+    """Push in-memory analysis results to Coverity Connect without a CSV.
+
+    Flow: Connect → pick project + triage store → choose which defects →
+    Validate CIDs against the server → review → Push.
+
+    All non-Tk logic lives in :mod:`coverity_push` so it is unit-tested; this
+    class is the thin GUI shell around it.
+    """
+
+    def __init__(self, parent, app, results, on_complete=None):
+        super().__init__(parent)
+        self.app = app
+        self._results = results
+        self._on_complete = on_complete
+        self._client = None
+        self._rows = []            # list[coverity_push.PushRow]
+        self._validated = False
+
+        self.title("Push Results to Coverity Connect")
+        self.geometry("900x760")
+        self.minsize(720, 620)
+        self.configure(bg=C_BG)
+        self.grab_set()
+
+        rp = app._frames.get(ResultsPage)
+        self._sv_host = tk.StringVar(value=(rp._sv_host.get() if rp else "")
+                                     or "coverity-er.honaero.com")
+        self._sv_port = tk.StringVar(value=(rp._sv_port.get() if rp else "") or "443")
+        self._sv_user = tk.StringVar(value=rp._sv_user.get() if rp else "")
+        self._sv_pass = tk.StringVar(value=rp._sv_pass.get() if rp else "")
+        self._sv_store = tk.StringVar(value=(rp._sv_store.get() if rp else "") or "Default")
+        self._sv_project = tk.StringVar()
+        self._sv_mode = tk.StringVar(
+            value=(rp._sv_push_mode.get() if rp else cpush.MODE_ACCEPTED))
+        self._sv_insecure = tk.BooleanVar(value=False)
+        self._sv_dry_run = tk.BooleanVar(value=False)
+
+        self._build()
+        self._refresh_preview()
+
+    # ------------------------------------------------------------------ build
+    def _section(self, parent, title):
+        f = tk.Frame(parent, bg=C_BG)
+        f.pack(fill="x", padx=20, pady=(10, 2))
+        tk.Label(f, text=title, font=("Segoe UI", 10, "bold"),
+                 bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Frame(f, bg=C_BORDER, height=1).pack(
+            side="left", fill="x", expand=True, padx=(8, 0), pady=5)
+
+    def _card(self, parent):
+        f = tk.Frame(parent, bg=C_PANEL,
+                     highlightbackground=C_BORDER, highlightthickness=1)
+        f.pack(fill="x", padx=20, pady=2)
+        return f
+
+    def _build(self):
+        canvas = tk.Canvas(self, bg=C_BG, highlightthickness=0)
+        scroll = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(canvas, bg=C_BG)
+        win_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        body.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        tk.Label(body, text="\u2b06  Push Results to Coverity Connect",
+                 font=("Segoe UI", 13, "bold"), bg=C_BG, fg=C_ACCENT
+                 ).pack(anchor="w", padx=20, pady=(16, 4))
+        tk.Label(body,
+                 text="Pushes the defects from the current analysis directly to the\n"
+                      "server triage store — no CSV export needed.",
+                 font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT, justify="left"
+                 ).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # ── Step 1 — connection ────────────────────────────────────────
+        self._section(body, "Step 1 — Server Connection")
+        s1 = self._card(body)
+
+        def _row(label, var, width=26, show=""):
+            f = tk.Frame(s1, bg=C_PANEL)
+            f.pack(fill="x", padx=10, pady=3)
+            tk.Label(f, text=label, width=10, anchor="w",
+                     font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
+                     ).pack(side="left")
+            tk.Entry(f, textvariable=var, width=width, show=show,
+                     bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT,
+                     relief="flat", font=("Segoe UI", 9),
+                     highlightbackground=C_BORDER, highlightthickness=1
+                     ).pack(side="left", ipady=4, padx=(0, 6))
+
+        _row("Host", self._sv_host)
+        _row("Port", self._sv_port, 8)
+        _row("Username", self._sv_user, 20)
+        _row("Password", self._sv_pass, 20, show="*")
+
+        opt_f = tk.Frame(s1, bg=C_PANEL)
+        opt_f.pack(fill="x", padx=10, pady=3)
+        tk.Checkbutton(opt_f, text="Allow self-signed certificate (insecure)",
+                       variable=self._sv_insecure, bg=C_PANEL, fg=C_SUBTEXT,
+                       selectcolor=C_CARD, activebackground=C_PANEL,
+                       font=("Segoe UI", 9)).pack(side="left")
+
+        conn_f = tk.Frame(s1, bg=C_PANEL)
+        conn_f.pack(fill="x", padx=10, pady=(3, 8))
+        self._conn_btn = tk.Button(conn_f, text="\U0001f50c  Connect",
+                                   command=self._connect,
+                                   bg=C_ACCENT, fg="#FFFFFF", relief="flat",
+                                   font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                                   cursor="hand2", activebackground=C_ACCENT2)
+        self._conn_btn.pack(side="left")
+        self._conn_lbl = tk.Label(conn_f, text="Not connected.",
+                                  font=("Segoe UI", 9), bg=C_PANEL, fg=C_SUBTEXT)
+        self._conn_lbl.pack(side="left", padx=10)
+
+        # ── Step 2 — project + triage store ────────────────────────────
+        self._section(body, "Step 2 — Project & Triage Store")
+        s2 = self._card(body)
+
+        pf = tk.Frame(s2, bg=C_PANEL)
+        pf.pack(fill="x", padx=10, pady=(8, 3))
+        tk.Label(pf, text="Project", width=10, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
+                 ).pack(side="left")
+        self._proj_cb = ttk.Combobox(pf, textvariable=self._sv_project,
+                                     state="readonly", width=38,
+                                     font=("Segoe UI", 9))
+        self._proj_cb.pack(side="left")
+        self._proj_cb.bind("<<ComboboxSelected>>", self._on_project)
+
+        tf = tk.Frame(s2, bg=C_PANEL)
+        tf.pack(fill="x", padx=10, pady=(3, 8))
+        tk.Label(tf, text="Triage store", width=10, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
+                 ).pack(side="left")
+        self._store_cb = ttk.Combobox(tf, textvariable=self._sv_store,
+                                      width=38, font=("Segoe UI", 9))
+        self._store_cb.pack(side="left")
+        tk.Label(tf, text="usually matches the project name",
+                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8"
+                 ).pack(side="left", padx=6)
+
+        # ── Step 3 — what to push ──────────────────────────────────────
+        self._section(body, "Step 3 — Which Defects to Push")
+        s3 = self._card(body)
+        mf = tk.Frame(s3, bg=C_PANEL)
+        mf.pack(fill="x", padx=10, pady=(8, 4))
+        for mode in (cpush.MODE_ACCEPTED, cpush.MODE_DECIDED, cpush.MODE_ALL):
+            tk.Radiobutton(mf, text=cpush.MODE_LABELS[mode],
+                           variable=self._sv_mode, value=mode,
+                           command=self._refresh_preview,
+                           bg=C_PANEL, fg=C_TEXT, selectcolor=C_CARD,
+                           activebackground=C_PANEL, font=("Segoe UI", 9)
+                           ).pack(anchor="w")
+
+        self._count_lbl = tk.Label(s3, text="", font=("Segoe UI", 9, "bold"),
+                                   bg=C_PANEL, fg=C_ACCENT, anchor="w")
+        self._count_lbl.pack(fill="x", padx=10, pady=(2, 6))
+
+        vf = tk.Frame(s3, bg=C_PANEL)
+        vf.pack(fill="x", padx=10, pady=(0, 8))
+        self._validate_btn = tk.Button(
+            vf, text="\U0001f50d  Validate CIDs against Server",
+            command=self._validate, bg=C_CARD, fg=C_ACCENT, relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
+            cursor="hand2", activebackground=C_BORDER, state="disabled")
+        self._validate_btn.pack(side="left")
+        self._validate_lbl = tk.Label(vf, text="", font=("Segoe UI", 9),
+                                      bg=C_PANEL, fg=C_SUBTEXT)
+        self._validate_lbl.pack(side="left", padx=10)
+
+        # Preview table
+        tbl_f = tk.Frame(s3, bg=C_PANEL)
+        tbl_f.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        cols = ("CID", "ServerCID", "Classification", "Comment", "Checker", "File")
+        widths = {"CID": 60, "ServerCID": 75, "Classification": 110,
+                  "Comment": 220, "Checker": 130, "File": 140}
+        self._tree = ttk.Treeview(tbl_f, columns=cols, show="headings",
+                                  height=9, selectmode="browse")
+        for c in cols:
+            self._tree.heading(c, text=c, anchor="w")
+            self._tree.column(c, width=widths[c], anchor="w",
+                              stretch=(c == "Comment"))
+        vsb = ttk.Scrollbar(tbl_f, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        tbl_f.rowconfigure(0, weight=1)
+        tbl_f.columnconfigure(0, weight=1)
+        for cls, col in CLASS_COLOR.items():
+            self._tree.tag_configure(cls, foreground=col)
+        self._tree.tag_configure("matched", background="#DCFCE7")
+        self._tree.tag_configure("unmatched", background="#FEE2E2")
+        self._tree.tag_configure("pushed", foreground="#16A34A")
+        self._tree.tag_configure("push_fail", foreground="#DC2626")
+
+        tk.Label(s3, text="Green = CID confirmed on the server.  Red = not found "
+                          "(skipped).  Validation is required before pushing.",
+                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8", anchor="w"
+                 ).pack(fill="x", padx=10, pady=(0, 6))
+
+        # ── Footer ─────────────────────────────────────────────────────
+        foot = tk.Frame(body, bg=C_BG)
+        foot.pack(fill="x", padx=20, pady=(10, 20))
+        tk.Button(foot, text="Close", command=self.destroy,
+                  bg=C_CARD, fg=C_TEXT, relief="flat",
+                  font=("Segoe UI", 10), padx=14, pady=6,
+                  cursor="hand2").pack(side="left")
+        tk.Checkbutton(foot, text="Dry run (preview only, writes nothing)",
+                       variable=self._sv_dry_run, bg=C_BG, fg=C_SUBTEXT,
+                       selectcolor=C_CARD, activebackground=C_BG,
+                       font=("Segoe UI", 9)).pack(side="left", padx=14)
+        self._push_btn = tk.Button(
+            foot, text="\u2b06  Push to Coverity", command=self._push,
+            bg=C_ACCENT, fg="#FFFFFF", relief="flat",
+            font=("Segoe UI", 10, "bold"), padx=18, pady=6,
+            cursor="hand2", activebackground=C_ACCENT2, state="disabled")
+        self._push_btn.pack(side="right")
+        self._progress_lbl = tk.Label(foot, text="", font=("Segoe UI", 9),
+                                      bg=C_BG, fg=C_SUBTEXT)
+        self._progress_lbl.pack(side="right", padx=12)
+
+    # ---------------------------------------------------------------- preview
+    def _reviewer(self):
+        try:
+            return os.getlogin()
+        except Exception:
+            return os.environ.get("USERNAME", "") or ""
+
+    def _refresh_preview(self):
+        """Rebuild the push rows from the current selection mode."""
+        selected = cpush.select_defects(self._results, self._sv_mode.get())
+        self._rows = cpush.build_push_rows(selected, reviewer=self._reviewer())
+        self._validated = False
+        self._validate_lbl.configure(text="", fg=C_SUBTEXT)
+
+        self._tree.delete(*self._tree.get_children())
+        for row in self._rows:
+            tag = row.classification if row.classification in CLASS_COLOR else ""
+            self._tree.insert("", "end", iid=str(row.cid), tags=(tag,),
+                              values=(row.cid, "", row.classification,
+                                      row.comment.replace("\n", " ")[:90],
+                                      row.checker, os.path.basename(row.file)))
+        total = len(self._results)
+        self._count_lbl.configure(
+            text=f"{len(self._rows)} of {total} defect(s) selected for push")
+        self._refresh_buttons()
+
+    def _refresh_buttons(self):
+        connected = self._client is not None
+        has_rows = bool(self._rows)
+        self._validate_btn.configure(
+            state="normal" if (connected and has_rows and self._sv_project.get())
+            else "disabled")
+        ready = connected and has_rows and self._validated and any(
+            r.server_cid is not None for r in self._rows)
+        self._push_btn.configure(state="normal" if ready else "disabled")
+
+    # ------------------------------------------------------------- connection
+    def _connect(self):
+        host = self._sv_host.get().strip()
+        port = self._sv_port.get().strip()
+        user = self._sv_user.get().strip()
+        pw = self._sv_pass.get()
+        if not (host and port and user and pw):
+            messagebox.showwarning("Missing Details",
+                                   "Host, port, username and password are required.",
+                                   parent=self)
+            return
+        if not zeep_available():
+            messagebox.showerror(
+                "Missing Dependency",
+                "The 'zeep' library is required for Coverity Connect.\n\n"
+                "Install it with:  pip install zeep", parent=self)
+            return
+
+        self._conn_btn.configure(state="disabled", text="Connecting…")
+        self._conn_lbl.configure(text="Contacting server…", fg=C_SUBTEXT)
+        verify = not self._sv_insecure.get()
+
+        def _worker():
+            client = CoveritySOAPClient(host, port, user, pw, verify_ssl=verify)
+            ok, info = client.test_connection()
+            projects = stores = None
+            if ok:
+                try:
+                    projects = client.get_projects()
+                    stores = client.get_triage_stores()
+                except Exception:
+                    projects, stores = projects or [], stores or []
+
+            def _done():
+                self._conn_btn.configure(state="normal", text="\U0001f50c  Connect")
+                if not ok:
+                    self._client = None
+                    self._conn_lbl.configure(text=f"\u2717 {info}", fg=C_BUG)
+                    self._refresh_buttons()
+                    return
+                self._client = client
+                self._conn_lbl.configure(text=f"\u2713 {info}", fg=C_FP)
+                names = [p["name"] if isinstance(p, dict) else str(p)
+                         for p in (projects or [])]
+                self._proj_cb.configure(values=names)
+                if names:
+                    self._sv_project.set(names[0])
+                    self._on_project()
+                store_names = [s if isinstance(s, str) else str(s)
+                               for s in (stores or [])]
+                if store_names:
+                    self._store_cb.configure(values=store_names)
+                self._refresh_buttons()
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_project(self, _event=None):
+        """Auto-fill the triage store that belongs to the chosen project."""
+        proj = self._sv_project.get().strip()
+        self._validated = False
+        self._refresh_buttons()
+        if not (proj and self._client):
+            return
+
+        def _worker():
+            try:
+                store = self._client.get_triage_store_for_project(proj)
+            except Exception:
+                store = None
+
+            def _done():
+                if store:
+                    self._sv_store.set(store)
+                    vals = list(self._store_cb.cget("values") or [])
+                    if store not in vals:
+                        vals.insert(0, store)
+                        self._store_cb.configure(values=vals)
+                self._refresh_buttons()
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # -------------------------------------------------------------- validation
+    def _validate(self):
+        proj = self._sv_project.get().strip()
+        if not (proj and self._client and self._rows):
+            return
+        self._validate_btn.configure(state="disabled", text="Fetching…")
+        self._validate_lbl.configure(
+            text=f"Loading defects from '{proj}'…", fg=C_SUBTEXT)
+
+        def _worker():
+            try:
+                server_defects, err = self._client.get_defects_for_project(proj)
+            except Exception as exc:
+                server_defects, err = None, str(exc)
+
+            def _done():
+                self._validate_btn.configure(
+                    state="normal", text="\U0001f50d  Validate CIDs against Server")
+                if err or not server_defects:
+                    self._validate_lbl.configure(
+                        text=f"\u26a0 {err or 'No defects returned for project'}",
+                        fg=C_BUG)
+                    self._validated = False
+                    self._refresh_buttons()
+                    return
+                report = cpush.validate_rows(self._rows, server_defects)
+                for row in self._rows:
+                    iid = str(row.cid)
+                    if not self._tree.exists(iid):
+                        continue
+                    vals = list(self._tree.item(iid)["values"])
+                    if row.server_cid is not None:
+                        vals[1] = row.server_cid
+                        self._tree.item(iid, tags=("matched",), values=vals)
+                    else:
+                        vals[1] = "NOT FOUND"
+                        self._tree.item(iid, tags=("unmatched",), values=vals)
+                self._validated = True
+                self._validate_lbl.configure(text=report.summary(), fg=C_FP)
+                self._refresh_buttons()
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # -------------------------------------------------------------------- push
+    def _push(self):
+        if not (self._client and self._rows and self._validated):
+            return
+        store = (self._sv_store.get().strip()
+                 or self._sv_project.get().strip() or "Default")
+        dry = bool(self._sv_dry_run.get())
+        pushable = [r for r in self._rows if r.server_cid is not None]
+        skipped = len(self._rows) - len(pushable)
+
+        confirm = (f"{'DRY RUN — nothing will be written.' if dry else ''}\n\n"
+                   f"Push {len(pushable)} disposition(s) to triage store "
+                   f"'{store}'?\n")
+        if skipped:
+            confirm += f"\n{skipped} defect(s) not found on the server will be skipped."
+        if not dry:
+            confirm += "\n\nThis overwrites the current triage on the server."
+        if not messagebox.askyesno("Confirm Push", confirm.strip(), parent=self):
+            return
+
+        self._push_btn.configure(state="disabled", text="Pushing…")
+        total = len(pushable)
+
+        def _progress(done, _total, row):
+            def _tick():
+                self._progress_lbl.configure(text=f"Pushing {done}/{total}…")
+                iid = str(row.cid)
+                if self._tree.exists(iid):
+                    tag = "pushed" if row.status == "\u2713" else "push_fail"
+                    vals = list(self._tree.item(iid)["values"])
+                    vals[0] = f"{row.status} {row.cid}"
+                    self._tree.item(iid, tags=(tag,), values=vals)
+            self.after(0, _tick)
+
+        def _worker():
+            report = cpush.push_rows(self._client, self._rows, store,
+                                     progress_cb=_progress, dry_run=dry)
+
+            def _done():
+                self._push_btn.configure(state="normal",
+                                         text="\u2b06  Push to Coverity")
+                self._progress_lbl.configure(text="")
+                if not dry:
+                    cpush.apply_status_to_results(self._results, self._rows)
+                    if self._on_complete:
+                        try:
+                            self._on_complete()
+                        except Exception:
+                            pass
+                msg = f"Triage store: '{store}'\n\n{report.summary()}"
+                if report.failed and not dry:
+                    msg += ("\n\nTip: if every row failed, check the triage store "
+                            "name — it usually matches the project name rather "
+                            f"than 'Default'. Try: '{self._sv_project.get()}'")
+                if report.ok:
+                    messagebox.showinfo("Push Complete", msg, parent=self)
+                else:
+                    messagebox.showwarning("Push Finished with Errors", msg,
+                                           parent=self)
+
             self.after(0, _done)
 
         threading.Thread(target=_worker, daemon=True).start()
