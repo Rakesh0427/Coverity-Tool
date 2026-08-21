@@ -35,25 +35,34 @@ def _to_int(value, default=0):
 def apply_rest_lines(defects, cid_map):
     """Overlay the REST-derived CURRENT line onto SOAP-pulled ``defects``.
 
-    ``cid_map`` is {cid: {line, checker, file, function, type, severity}} as
-    returned by :meth:`CoverityRESTClient.fetch_defect_lines`. For each defect
-    whose CID is found and has a non-zero ``line``, that line becomes the
-    defect's line (and ``_line_src`` is set to ``rest``). Returns the number of
-    defects whose line was updated (marking ``_line_prev`` before overwrite).
+    ``cid_map`` is {cid: {line, mainEventLineNumber, checker, ...}} as
+    returned by :meth:`CoverityRESTClient.fetch_defect_lines`.
+
+    REST v1 ``lineNumber`` is often the *first event* in the path (the 706
+    declaration), while Coverity Connect shows ``mainEventLineNumber`` (the 710
+    sink). Never replace a main-event line with an occurrence line.
     """
     fixed = 0
     for d in defects:
         info = (cid_map or {}).get(d.get("cid"))
         if not info:
             continue
-        new_line = info.get("line")
-        if not new_line:
+        rest_main = info.get("mainEventLineNumber") or 0
+        rest_line = rest_main or info.get("line") or 0
+        if not rest_line:
             continue
-        if d.get("line") != new_line:
-            d["_line_prev"] = d.get("line", 0)
-            d["line"] = new_line
-            fixed += 1
-        d["_line_src"] = "rest"
+        # A main-event / REST-main line already on the defect is authoritative.
+        # Only overlay REST v1 occurrence lines when we have nothing better.
+        if d.get("_line_src") in ("main_event", "sink_event", "rest_main") and not rest_main:
+            pass
+        elif rest_line:
+            if d.get("line") != rest_line:
+                d["_line_prev"] = d.get("line", 0)
+                d["line"] = rest_line
+                fixed += 1
+            d["_line_src"] = "rest_main" if rest_main else "rest"
+            if rest_main:
+                d["_rest_main_line"] = rest_main
         for key, src in (("checker", "checker"), ("file", "file"),
                          ("function", "function"), ("type", "type"),
                          ("severity", "severity")):

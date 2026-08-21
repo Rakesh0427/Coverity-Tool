@@ -2470,7 +2470,8 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
     decision = DecisionAgent.evaluate(acc, 'INTEGER_OVERFLOW')
 
     code_lines = code.splitlines()
-    defect_line_code = code_lines[line - 1].strip() if 0 < line <= len(code_lines) else ''
+    rel = line - code_start_line + 1 if line and code_start_line else line
+    defect_line_code = code_lines[rel - 1].strip() if 0 < rel <= len(code_lines) else ''
     call_names = set(re.findall(r'\b(\w+)\s*\(', defect_line_code or code))
     all_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
     ctx['var'] = all_vars[0] if all_vars else 'the operand'

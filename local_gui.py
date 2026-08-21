@@ -990,8 +990,21 @@ class AnalysisPage(Page):
                     if not src_code:
                         q.put(("warn", f"  [Source] File not found: {filepath}\n"))
 
-                    # Parse events (always from detail page)
-                    _, events = parse_detail_page(defect.get("detail_file", ""))
+                    # Prefer events already pulled from Coverity Connect (Excel
+                    # EventsJSON). Fall back to the HTML detail page. Then take
+                    # the *main event* line (Connect UI) rather than the first
+                    # path event (var_decl at 706 vs overrun at 710).
+                    events = list(defect.get("events") or [])
+                    if not events:
+                        _, events = parse_detail_page(defect.get("detail_file", ""))
+                    if events:
+                        try:
+                            from coverity_events import apply_events_to_defect
+                            apply_events_to_defect(defect, events)
+                            events = defect.get("events") or events
+                            line = int(defect.get("line") or line or 0)
+                        except Exception:
+                            pass
                     if not events:
                         events = [{"step": 1, "type": checker,
                                    "description": type_val,
