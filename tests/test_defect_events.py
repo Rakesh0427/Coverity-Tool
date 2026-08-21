@@ -256,6 +256,88 @@ def test_apply_events_marks_string_null_sink_main_not_source():
     assert main_flags["var_decl"] is False
 
 
+def test_line_from_events_prefers_buffer_size_over_warning():
+    """BUFFER_SIZE: buffer_size (268) must beat buffer_size_warning (174) even
+    when the warning has a higher eventNumber (it sits at the declaration)."""
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "buffer_size", "line": 268, "main": False,
+         "description": "Calling 'strncpy' with size argument..."},
+        {"step": 3, "type": "buffer_size_warning", "line": 174, "main": False,
+         "description": "warning"},
+    ]
+    assert line_from_events(events, checker="BUFFER_SIZE") == 268
+
+
+def test_apply_events_marks_buffer_size_main_not_warning():
+    defect = {
+        "cid": 8,
+        "checker": "BUFFER_SIZE",
+        "file": "src/foo.c",
+        "line": 268,
+    }
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "buffer_size", "line": 268, "main": False},
+        {"step": 3, "type": "buffer_size_warning", "line": 174, "main": False},
+    ]
+    apply_events_to_defect(defect, events)
+    assert defect["line"] == 268
+    main_flags = {e["type"]: e.get("main") for e in defect["events"]}
+    assert main_flags["buffer_size"] is True
+    assert main_flags["buffer_size_warning"] is False
+
+
+def test_overrun_child_sink_does_not_shadow_main():
+    """OVERRUN: a second sink-tagged event in a callee (higher eventNumber)
+    must not shadow the primary overrun-local sink at 268."""
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "overrun-local", "line": 268, "main": False},
+        {"step": 3, "type": "overrun-buffer-arg", "line": 500, "main": False},
+    ]
+    assert line_from_events(events, checker="OVERRUN") == 268
+
+
+def test_warning_and_source_are_not_primary_sinks():
+    assert is_sink_event({"type": "buffer_size_warning"}, "BUFFER_SIZE") is False
+    assert is_sink_event({"type": "buffer_size"}, "BUFFER_SIZE") is True
+    # Exact checker tag wins even for the warning checker itself.
+    assert is_sink_event({"type": "buffer_size_warning"}, "BUFFER_SIZE_WARNING") is True
+    assert is_sink_event({"type": "string_null_source"}, "STRING_NULL") is False
+
+
+def test_heuristic_main_is_recomputed_when_checker_known():
+    """A checker-less marking (e.g. from HTML parsing) that picked the wrong
+    event must be corrected once the checker is known."""
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "buffer_size", "line": 268, "main": False},
+        {"step": 3, "type": "buffer_size_warning", "line": 174, "main": False},
+    ]
+    # First marking pass without a checker (simulates parse_detail_page).
+    mark_main_events(events)
+    # Then the checker-aware pass must re-evaluate, not trust the old flag.
+    mark_main_events(events, checker="BUFFER_SIZE")
+    main_flags = {e["type"]: e.get("main") for e in events}
+    assert main_flags["buffer_size"] is True
+    assert main_flags["buffer_size_warning"] is False
+
+
+def test_genuine_main_flag_is_preserved():
+    """Coverity's own main=true must not be overridden by a re-marking pass."""
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "buffer_size_warning", "line": 174, "main": True},
+        {"step": 3, "type": "buffer_size", "line": 268, "main": False},
+    ]
+    mark_main_events(events, checker="BUFFER_SIZE")
+    main_flags = {e["type"]: e.get("main") for e in events}
+    assert main_flags["buffer_size_warning"] is True
+    assert main_flags["buffer_size"] is False
+    assert line_from_events(events, checker="BUFFER_SIZE") == 174
+
+
 def test_mark_main_events_picks_sink():
     events = [
         {"step": 1, "type": "var_decl", "line": 706, "main": False},
