@@ -846,6 +846,47 @@ class AnalysisPage(Page):
             return 0
         return find_function_line_by_name(filepath, func_name, language=self._language)
 
+    def _probe_source_files(self, defects, sample_n=10):
+        """Try to resolve a sample of the sheet's file paths under the source
+        root before running the full per-defect loop.
+
+        Returns (checked, resolved). If none of the sampled files can be found,
+        the run will finish in seconds and every row will end up as "Needs
+        review" with no source code — so callers should warn the user upfront
+        instead of letting the fast, low-quality run complete silently.
+
+        Pass 1 is cheap (direct join + path-suffix match, no tree walk). Pass 2
+        falls back to the full basename index via _find_source_file(); that
+        builds the same per-root cache the per-defect loop reuses, so its cost
+        is not wasted even when the probe finds nothing.
+        """
+        seen = []
+        for d in defects:
+            fp = (d.get("file") or "").strip()
+            if fp and fp not in seen:
+                seen.append(fp)
+            if len(seen) >= sample_n:
+                break
+        if not seen or not self._src_root or not os.path.isdir(self._src_root):
+            return len(seen), 0
+
+        base = self._src_root
+        # Pass 1 — cheap existence checks only (no tree walk).
+        for fp in seen:
+            candidate = os.path.join(base, fp)
+            if os.path.isfile(candidate):
+                return len(seen), 1
+            rel = fp.strip(os.sep) if os.path.isabs(fp) else fp
+            parts = [p for p in rel.split(os.sep) if p]
+            for i in range(len(parts)):
+                if os.path.isfile(os.path.join(base, *parts[i:])):
+                    return len(seen), 1
+        # Pass 2 — full basename index (cached; reused by the defect loop).
+        for fp in seen[:3]:
+            if self._find_source_file(fp):
+                return len(seen), 1
+        return len(seen), 0
+
 
     def _run(self):
         q    = self.app._q
@@ -865,14 +906,28 @@ class AnalysisPage(Page):
 
             # Validate defects were found
             if total == 0:
-                q.put(("error", "No defects found in index.html. Please verify this is a valid Coverity report.\n"))
+                q.put(("error", "No defects found. Please verify the input is a valid Coverity report (HTML index.html or Excel export).\n"))
                 return
 
-            # Check how many defects have valid detail files
-            with_details = sum(1 for d in defects if d.get("detail_file") and os.path.isfile(d.get("detail_file", "")))
-            q.put(("info", f"Found {total} defects. ({with_details} have detail pages)\n"))
-            if with_details < total:
-                q.put(("warn", f"Warning: {total - with_details} defects missing detail pages. Report may be incomplete.\n"))
+            # Check data completeness. The check differs by input mode:
+            #  - HTML reports carry per-defect detail pages (Code/<n>_file.html).
+            #  - Excel exports carry embedded event data (EventsJSON / Events
+            #    Summary columns) instead — Excel rows NEVER have detail pages,
+            #    so warning about "missing detail pages" in Excel mode was a
+            #    false alarm that fired on every Excel run.
+            if self._input_mode == "excel":
+                with_events = sum(1 for d in defects if d.get("events"))
+                q.put(("info", f"Found {total} defects. ({with_events} have embedded event data)\n"))
+                if with_events < total:
+                    q.put(("warn",
+                           f"Note: {total - with_events} rows have no event trace in the sheet "
+                           f"(EventsJSON / Events Summary columns). Line anchoring will rely on "
+                           f"the Line column only.\n"))
+            else:
+                with_details = sum(1 for d in defects if d.get("detail_file") and os.path.isfile(d.get("detail_file", "")))
+                q.put(("info", f"Found {total} defects. ({with_details} have detail pages)\n"))
+                if with_details < total:
+                    q.put(("warn", f"Warning: {total - with_details} defects missing detail pages. Report may be incomplete.\n"))
 
             # Filter defects by language selection
             lang = self._language.lower()
@@ -894,6 +949,26 @@ class AnalysisPage(Page):
             defects = filtered_defects
             total = len(defects)
             q.put(("progress_start", total))
+
+            # Fail fast (loudly) if the sheet's files do not exist under the
+            # source root. Without this, every defect silently takes the
+            # "File not found" fast path and the run finishes in seconds with
+            # nothing but "Needs review" rows — which looks like a broken tool.
+            # Excel mode only: HTML reports embed source code in their detail
+            # pages, so missing local files degrade quality there but never
+            # produce an empty analysis.
+            if self._input_mode == "excel" and self._src_root \
+                    and os.path.isdir(self._src_root) and defects:
+                _checked, _resolved = self._probe_source_files(defects)
+                if _checked and _resolved == 0:
+                    q.put(("warn",
+                           f"\u26a0 WARNING: none of the first {_checked} file paths in the sheet "
+                           f"could be found under the source root:\n"
+                           f"    {self._src_root}\n"
+                           f"  The run will finish very quickly, but almost every row will be "
+                           f"'Needs review' (no source code to analyse).\n"
+                           f"  Verify the Source Code Root points to the same tree Coverity "
+                           f"analysed, or check the paths in the sheet's File column.\n"))
 
             # Warm the one-time workspace index up front so the first defect does
             # not silently stall the whole run for tens of seconds, and so the
@@ -1254,6 +1329,9 @@ class AnalysisPage(Page):
                 self.after_cancel(self._ticker_id)
                 self._ticker_id = None
             elapsed = time.time() - self._start_time if self._start_time else 0
+            # Per-defect loop time (excludes Excel parsing and workspace indexing)
+            loop_elapsed = (time.time() - self._defect_start_time
+                            if self._defect_start_time else None)
             # Include indexing time in final elapsed (already included via _start_time)
             e_str   = str(timedelta(seconds=int(elapsed)))
             self._pbar_label.configure(text="Analysis complete!")
@@ -1263,9 +1341,11 @@ class AnalysisPage(Page):
             self._defect_start_time = None
             self._eta_str    = "Done"
 
+            n = len(self.app._results)
+
             # Count source loading statistics
             local_count = sum(1 for r in self.app._results if r.get("source_code") and len(r.get("source_code", "")) > 50)
-            no_src_count = len(self.app._results) - local_count
+            no_src_count = n - local_count
 
             # Count "Various" line number defects
             various_total = sum(1 for r in self.app._results if r.get("line_is_various"))
@@ -1279,10 +1359,44 @@ class AnalysisPage(Page):
             if various_total > 0:
                 msg_text += f"\n\n  • Line number 'Various': {various_total} findings (manual review required)"
 
-            if elapsed < 5 and len(self.app._results) > 50:
+            # "Needs review" breakdown so the cause is visible without opening
+            # the results table (mirrors needs_review_breakdown.txt).
+            try:
+                from collections import Counter
+                _nr = [r for r in self.app._results
+                       if r.get("classification") == "Needs review"]
+                if _nr:
+                    _reason_labels = {
+                        "no_code": "source file not found",
+                        "excel_line_missing": "no line number in sheet",
+                        "line_various": "line reported as 'Various'",
+                        "exception": "analysis error",
+                        "low_confidence_or_unhandled": "low confidence",
+                        "other": "other",
+                    }
+                    _by = Counter(
+                        _reason_labels.get(r.get("needs_review_reason") or "other", "other")
+                        for r in _nr)
+                    msg_text += f"\n\nNeeds review: {len(_nr)}\n"
+                    msg_text += "\n".join(
+                        f"  • {k}: {v}" for k, v in _by.most_common())
+            except Exception:
+                pass
+
+            # A fast run is only suspicious when source was not loaded. The old
+            # check (total elapsed < 5s) missed 5-30s runs where every defect
+            # took the no-source fast path.
+            avg_s = (loop_elapsed / n) if (loop_elapsed and n) else None
+            if (elapsed < 5 and n > 50) or \
+               (avg_s is not None and avg_s < 0.25 and n >= 10
+                and no_src_count * 2 > n):
                 msg_text += "\n\n⚠ WARNING: Analysis completed very quickly."
-                msg_text += "\nSource files may not be loading correctly."
-                msg_text += "\nPlease verify your Source Code Root path."
+                if no_src_count * 2 > n:
+                    msg_text += (f"\n{no_src_count}/{n} defects had no source code loaded."
+                                 "\nPlease verify your Source Code Root path.")
+                else:
+                    msg_text += ("\nSource files may not be loading correctly."
+                                 "\nPlease verify your Source Code Root path.")
 
             messagebox.showinfo("Done", msg_text)
             self.app._notify(
