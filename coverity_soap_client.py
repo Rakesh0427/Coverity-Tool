@@ -78,21 +78,62 @@ def _unwrap_stream_defects(response):
     return [response]
 
 
-def _line_from_events(events):
-    """Derive the defect's main line from its event trace."""
-    if not events:
-        return 0
-    # Prefer the defect's main event(s) with a real line, taking the one with the
-    # highest step number (a trace can have several event-sets; the sink is the
-    # latest main event).
-    mains = [e for e in events if e.get("main") and e.get("line")]
-    if mains:
-        return max(mains, key=lambda e: e.get("step", 0)).get("line", 0)
-    # Otherwise prefer an event that actually carries a line, largest step first.
-    with_line = [e for e in events if e.get("line")]
-    if not with_line:
-        return 0
-    return max(with_line, key=lambda e: e.get("step", 0)).get("line", 0)
+def _line_from_events(events, checker=""):
+    """Derive the defect's Coverity-Connect UI line from its event trace.
+
+    SOAP ``lineNumber`` / the first event is the *path start* (e.g. var_decl at
+    706). The UI shows the *main event* (e.g. overrun-local at 710).
+    """
+    try:
+        from coverity_events import line_from_events as _resolve
+        return _resolve(events, checker=checker)
+    except Exception:
+        if not events:
+            return 0
+        mains = [e for e in events if e.get("main") and e.get("line")]
+        if mains:
+            return max(mains, key=lambda e: e.get("step", 0)).get("line", 0)
+        with_line = [e for e in events if e.get("line")]
+        if not with_line:
+            return 0
+        return max(with_line, key=lambda e: e.get("step", 0)).get("line", 0)
+
+
+def _soap_event_dict(ev, default_file=""):
+    """Normalise a SOAP eventDataObj (or similar) into the pipeline event dict."""
+    desc = (getattr(ev, "eventDescription", None)
+            or getattr(ev, "covLStrEventDescription", None)
+            or "")
+    tag = (getattr(ev, "eventTag", None)
+           or getattr(ev, "eventType", None)
+           or "")
+    line = 0
+    for attr in ("lineNumber", "eventLineNumber", "strippedLineNumber"):
+        try:
+            line = int(getattr(ev, attr, 0) or 0)
+        except (TypeError, ValueError):
+            line = 0
+        if line:
+            break
+    main_raw = getattr(ev, "main", False)
+    if isinstance(main_raw, str):
+        main = main_raw.strip().lower() in ("true", "1", "yes")
+    else:
+        main = bool(main_raw)
+    try:
+        step = int(getattr(ev, "eventNumber", 0) or 0)
+    except (TypeError, ValueError):
+        step = 0
+    fpath = _event_file(ev) or default_file
+    return {
+        "step": step,
+        "type": str(tag or ""),
+        "tag": str(tag or ""),
+        "description": str(desc or ""),
+        "file": str(fpath or ""),
+        "line": line,
+        "main": main,
+    }
 
 
 # One-shot diagnostic captures for the pull log: the raw SOAP object attributes of
@@ -102,31 +143,64 @@ _PULL_DIAG_MERGED_ATTRS = None
 _PULL_DIAG_INSTANCE_ATTRS = None
 
 
+def _rest_event_dict(ev, default_file=""):
+    """Normalise a REST event JSON object into the pipeline event dict."""
+    try:
+        ev_line = int(ev.get("lineNumber") or ev.get("eventLineNumber") or 0)
+    except (TypeError, ValueError):
+        ev_line = 0
+    main_raw = ev.get("main") if ev.get("main") is not None else ev.get("isMain")
+    if isinstance(main_raw, str):
+        main = main_raw.strip().lower() in ("true", "1", "yes")
+    else:
+        main = bool(main_raw)
+    tag = str(ev.get("eventTag") or ev.get("eventType") or "")
+    try:
+        step = int(ev.get("eventNumber") or ev.get("stepNumber") or 0)
+    except (TypeError, ValueError):
+        step = 0
+    return {
+        "step": step,
+        "type": tag,
+        "tag": tag,
+        "description": str(ev.get("eventDescription") or ev.get("description") or ""),
+        "file": str(ev.get("filePathname") or ev.get("filePath") or default_file or ""),
+        "line": ev_line,
+        "main": main,
+    }
+
+
 def _rest_defect_from_issue(issue, is_v1=False):
     """Map a REST issue/defect JSON object to the pipeline defect dict.
 
     ``is_v1`` marks the older GET /api/v1/defects shape (no embedded events).
+    Prefer ``mainEventLineNumber`` (Connect UI) over ``lineNumber`` (often the
+    first event in the path — the 706-vs-710 mismatch).
     """
-    filepath = str(issue.get("mainEventFilePath") or issue.get("filePathname") or "")
+    filepath = str(issue.get("mainEventFilePath")
+                   or issue.get("mainEventFilePathname")
+                   or issue.get("filePathname") or "")
     func     = str(issue.get("functionDisplayName") or "")
-    line = 0
+    rest_main = 0
+    occ_line = 0
     try:
-        line = int(issue.get("mainEventLineNumber") or issue.get("lineNumber") or 0)
+        rest_main = int(issue.get("mainEventLineNumber") or 0)
     except (TypeError, ValueError):
-        line = 0
+        rest_main = 0
+    try:
+        occ_line = int(issue.get("lineNumber") or 0)
+    except (TypeError, ValueError):
+        occ_line = 0
+    line = rest_main or occ_line
     events = []
     if not is_v1:
         for ev in (issue.get("events") or []):
-            if not isinstance(ev, dict):
-                continue
-            events.append({
-                "step": int(ev.get("eventNumber") or ev.get("stepNumber") or 0),
-                "type": str(ev.get("eventTag") or ev.get("eventType") or ""),
-                "description": str(ev.get("eventDescription") or ev.get("description") or ""),
-                "file": str(ev.get("filePathname") or ev.get("filePath") or filepath),
-                "line": int(ev.get("lineNumber") or ev.get("eventLineNumber") or 0),
-                "main": bool(ev.get("main") or ev.get("isMain") or False),
-            })
+            if isinstance(ev, dict):
+                events.append(_rest_event_dict(ev, filepath))
+    if events:
+        ev_line = _line_from_events(events, str(issue.get("checkerName") or ""))
+        if ev_line:
+            line = ev_line
     return {
         "checker": str(issue.get("checkerName") or ""),
         "type": str(issue.get("displayType")
@@ -136,7 +210,8 @@ def _rest_defect_from_issue(issue, is_v1=False):
         "line": line,
         "function": func,
         "events": events,
-        "_line_src": "rest",
+        "_rest_main_line": rest_main,
+        "_line_src": "rest_main" if rest_main else "rest",
     }
 
 
@@ -648,14 +723,7 @@ class CoveritySOAPClient:
 
                     evs = []
                     for ev in _flatten_events(getattr(inst, "events", None) or []):
-                        evs.append({
-                            "step":        int(getattr(ev, "eventNumber", 0)      or 0),
-                            "type":        str(getattr(ev, "eventTag", "")         or ""),
-                            "description": str(getattr(ev, "eventDescription", "") or ""),
-                            "file":        _event_file(ev),
-                            "line":        int(getattr(ev, "lineNumber", 0)        or 0),
-                            "main":        bool(getattr(ev, "main", False)         or False),
-                        })
+                        evs.append(_soap_event_dict(ev))
                     events_map.setdefault(cid, evs)
 
         except Exception as exc:
@@ -1107,18 +1175,7 @@ class CoveritySOAPClient:
         try:
             data = self._rest_get(f"issues/{cid}", {"streamName": stream_name})
             raw_events = data.get("events") or []
-            events = []
-            for ev in raw_events:
-                ev_line = int(ev.get("lineNumber") or ev.get("eventLineNumber") or 0)
-                events.append({
-                    "step":        int(ev.get("eventNumber") or ev.get("stepNumber") or 0),
-                    "type":        str(ev.get("eventTag")         or ev.get("eventType") or ""),
-                    "description": str(ev.get("eventDescription") or ev.get("description") or ""),
-                    "file":        str(ev.get("filePathname")     or ev.get("filePath") or ""),
-                    "line":        ev_line,
-                    "main":        bool(ev.get("main") or ev.get("isMain") or False),
-                })
-            return events
+            return [_rest_event_dict(ev) for ev in raw_events if isinstance(ev, dict)]
         except Exception:
             return []
 
@@ -1132,6 +1189,10 @@ class CoveritySOAPClient:
         Tries REST API v2 first (accurate mainEventLineNumber).
         Falls back to SOAP + getStreamDefects when REST is unavailable.
 
+        REST listings typically omit the event trace, so SOAP getStreamDefects
+        is always used to fill events. The defect line is then taken from the
+        *main event* (Coverity Connect UI), never the first path event.
+
         stream_name may be the ALL_STREAMS sentinel when project_name is supplied,
         in which case defects are aggregated across all the project's streams and
         event traces are fetched per stream (gap-filling so a defect only gets
@@ -1141,7 +1202,12 @@ class CoveritySOAPClient:
         Each defect dict gains an "events" key (possibly []).
         """
         try:
-            # ── Try REST API first — gives exact web UI line numbers ────────
+            from coverity_events import apply_events_to_defect
+
+            defects = []
+            rest_err = None
+
+            # ── Try REST API first — mainEventLineNumber matches the web UI ──
             if stream_name != self.ALL_STREAMS:
                 if progress_cb:
                     progress_cb(2, "Trying REST API…")
@@ -1152,23 +1218,24 @@ class CoveritySOAPClient:
                 rest_defects, rest_err = self.get_defects_rest(
                     stream_name, max_defects, progress_cb)
                 if rest_defects:
+                    defects = rest_defects
                     if progress_cb:
-                        progress_cb(100, f"REST: {len(rest_defects)} defects fetched.")
-                    return rest_defects, None
-                # REST unavailable or failed — fall through to SOAP.
-                if progress_cb:
-                    progress_cb(-1, f"REST unavailable ({rest_err}), falling back to SOAP…")
+                        progress_cb(20, f"REST: {len(rest_defects)} defects listed; fetching events…")
+                else:
+                    if progress_cb:
+                        progress_cb(-1, f"REST unavailable ({rest_err}), falling back to SOAP…")
 
-            # ── SOAP fallback ───────────────────────────────────────────────
-            if stream_name == self.ALL_STREAMS and project_name:
-                defects, err = self.get_defects_for_project(project_name, max_defects)
-            else:
-                defects, err = self.get_defects_for_stream(stream_name, max_defects)
-
-            if err and not defects:
-                return [], err
+            # ── SOAP list if REST produced nothing ──────────────────────────
             if not defects:
-                return [], "No defects returned from the server"
+                if stream_name == self.ALL_STREAMS and project_name:
+                    defects, err = self.get_defects_for_project(project_name, max_defects)
+                else:
+                    defects, err = self.get_defects_for_stream(stream_name, max_defects)
+
+                if err and not defects:
+                    return [], err
+                if not defects:
+                    return [], "No defects returned from the server"
 
             cids = [d["cid"] for d in defects]
             total = len(cids)
@@ -1180,10 +1247,15 @@ class CoveritySOAPClient:
             else:
                 target_streams = [stream_name]
 
+            # REST v2 issues/search (and REST v1 /defects) typically omit the
+            # event trace. Always fill missing events via SOAP getStreamDefects
+            # so analysis sees Coverity's path (and the main-event line).
             events_map = {}
             events_errors = []
+            have_events = {d["cid"] for d in defects if d.get("events")}
+            missing = [c for c in cids if c not in have_events]
             for st in target_streams:
-                remaining = [c for c in cids if c not in events_map]
+                remaining = [c for c in missing if c not in events_map]
                 if not remaining:
                     break
                 for i in range(0, len(remaining), 50):
@@ -1195,8 +1267,8 @@ class CoveritySOAPClient:
                         events_map.setdefault(cid, evlist)
                     if progress_cb:
                         fetched = sum(1 for k in events_map if not isinstance(k, tuple))
-                        pct = int(fetched * 100 / total) if total else 100
-                        progress_cb(min(pct, 100),
+                        pct = 20 + int(fetched * 80 / total) if total else 100
+                        progress_cb(min(pct, 99),
                                     f"Fetching events… {fetched}/{total}")
 
             if events_errors and progress_cb:
@@ -1205,8 +1277,8 @@ class CoveritySOAPClient:
 
             for d in defects:
                 cid = d["cid"]
-                events = events_map.get(cid, [])
-                d["_n_instances"] = events_map.get(("_n_instances", cid), 0)
+                events = d.get("events") or events_map.get(cid, [])
+                d["_n_instances"] = events_map.get(("_n_instances", cid), d.get("_n_instances", 0))
                 # Enrich with instance-level fields that are more reliable than
                 # the merged-defect level (function name, sub-type, severity).
                 if not d.get("function"):
@@ -1214,37 +1286,36 @@ class CoveritySOAPClient:
                 else:
                     d["function"] = events_map.get(("_inst_func", cid), d["function"]) or d["function"]
                 if not d.get("type"):
-                    d["type"] = events_map.get(("_inst_type", cid), "")
+                    d["type"] = events_map.get(("_inst_type", cid), d.get("type", ""))
                 if not d.get("severity"):
-                    d["severity"] = events_map.get(("_inst_sev", cid), "")
+                    d["severity"] = events_map.get(("_inst_sev", cid), d.get("severity", ""))
                 # Fill missing file paths from the defect's primary file.
                 for ev in events:
                     if not ev.get("file"):
                         ev["file"] = d.get("file", "")
-                d["events"] = events
 
-                # Store all raw line sources in the dict so the pull log can
-                # show exactly which value each source contributed.
-                d["_merged_line"]     = d.get("line", 0)
-                d["_inst_line_val"]   = events_map.get(("_inst_line", cid), 0)
+                # Keep every raw line source so the pull log can show which
+                # value each source contributed.
+                d["_merged_line"] = d.get("_merged_line", d.get("line", 0))
+                d["_inst_line_val"] = events_map.get(("_inst_line", cid),
+                                                     d.get("_inst_line_val", 0))
                 main_ev = next((e for e in events if e.get("main")), None)
-                d["_main_event_line"] = main_ev["line"] if main_ev else 0
-                d["_last_event_line"] = (max(events, key=lambda e: e.get("step", 0))["line"]
-                                         if events else 0)
+                d["_main_event_line"] = (main_ev.get("line") if main_ev else 0) or 0
+                d["_last_event_line"] = (max(events, key=lambda e: e.get("step", 0)).get("line")
+                                         if events else 0) or 0
 
-                # Instance line (defectInstance.lineNumber) matches the Coverity
-                # web UI and always overrides the less-precise merged level line.
-                inst_line = d["_inst_line_val"]
-                if inst_line:
-                    d["line"] = inst_line
-                elif not d.get("line") and events:
-                    d["line"] = _line_from_events(events)
+                # Main event line (Connect UI) ALWAYS wins over instance /
+                # merged lineNumber, which is the first event in the path.
+                apply_events_to_defect(d, events)
 
             # Attach probe data to first defect so the pull log can dump it.
             if defects:
                 defects[0]["_sd_probe"]   = events_map.get(("_sd_probe",),   {})
                 defects[0]["_inst_probe"] = events_map.get(("_inst_probe",), {})
 
+            if progress_cb:
+                with_ev = sum(1 for d in defects if d.get("events"))
+                progress_cb(100, f"Fetched {len(defects)} defects, {with_ev} with events.")
             return defects, None
         except Exception as e:
             return [], str(e)
@@ -1278,6 +1349,12 @@ class CoveritySOAPClient:
                 func  = str(getattr(d, "functionDisplayName", "")  or "")
                 line  = int(getattr(d, "lineNumber", 0)            or 0)
                 chk   = str(getattr(d, "checkerName", "")          or "")
+                try:
+                    rest_main = int(getattr(d, "mainEventLineNumber", 0) or 0)
+                except (TypeError, ValueError):
+                    rest_main = 0
+                if rest_main:
+                    line = rest_main
 
                 if not line:
                     # merged lineNumber is 0 on this server; the defect's CURRENT
