@@ -324,7 +324,7 @@ def parse_detail_page(detail_path: str) -> Tuple[str, List[Dict]]:
                 for ev in reversed(events):
                     if not ev.get("line"):
                         ev["line"] = src_line
-                    break
+                        break
             i += 1
 
         if events:
