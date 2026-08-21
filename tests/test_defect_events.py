@@ -338,6 +338,21 @@ def test_genuine_main_flag_is_preserved():
     assert line_from_events(events, checker="BUFFER_SIZE") == 174
 
 
+def test_overrun_local_hyphenated_tag_confirms_defect_and_extracts_sizes():
+    """deep_analyzer must recognise the hyphenated ``overrun-local`` tag (the
+    form Coverity actually emits) and harvest its array size / index value."""
+    from deep_analyzer import parse_coverity_events
+    ev = parse_coverity_events([
+        {"type": "var_decl", "description": "Variable \"buf\" declared."},
+        {"type": "overrun-local",
+         "description": "Overrunning array \"buf\" of 64 bytes at byte offset 64 "
+                       "using index \"i\" (which evaluates to 64)."},
+    ])
+    assert ev["defect_confirmed"] is True
+    assert ev["array_size"] == 64
+    assert ev["index_value"] == 64
+
+
 def test_mark_main_events_picks_sink():
     events = [
         {"step": 1, "type": "var_decl", "line": 706, "main": False},

@@ -157,7 +157,8 @@ def _find_function_calls(code: str) -> List[CallSite]:
 # ---------------------------------------------------------------------------
 # Coverity event types that directly confirm the defect exists on the flagged path
 _DEFECT_CONFIRMING_TYPES = frozenset({
-    'overrun_static', 'overrun_dynamic', 'overrun',
+    'overrun_static', 'overrun_dynamic', 'overrun', 'overrun_local',
+    'overrun_buffer_arg', 'overrun_buffer_val',
     'integer_overflow', 'integer_underflow',
     'null_deref', 'var_deref_model', 'var_deref_op',
     'use_after_free', 'double_free',
@@ -195,7 +196,10 @@ def parse_coverity_events(events: List[Dict]) -> Dict:
     }
 
     for event in events:
-        ev_type  = event.get('type', '').lower().replace(' ', '_')
+        # Coverity mixes hyphens and underscores in event tags (overrun-local
+        # vs var_decl); canonicalise to underscores so every check below works
+        # regardless of the source (SOAP / REST / HTML / Excel).
+        ev_type  = event.get('type', '').lower().replace(' ', '_').replace('-', '_')
         desc     = event.get('description', '').strip()
         ev['all_descriptions'].append(desc)
 
@@ -233,13 +237,24 @@ def parse_coverity_events(events: List[Dict]) -> Dict:
             if m2:
                 ev['variables'][m2.group(1)] = int(m2.group(2))
 
-        # Overrun evidence: "index may be 87, array size is 50"
-        if ev_type in ('overrun_static', 'overrun_dynamic', 'overrun'):
+        # Overrun evidence: "index may be 87, array size is 50", or the more
+        # common "Overrunning array \"buf\" of N bytes at byte offset M using
+        # index \"i\" (which evaluates to M)".
+        if ev_type in ('overrun_static', 'overrun_dynamic', 'overrun',
+                       'overrun_local', 'overrun_buffer_arg', 'overrun_buffer_val'):
             m_sz  = re.search(r'array\s+(?:size|length)\s+(?:is\s+)?(\d+)', desc, re.I)
             m_idx = re.search(r'index\s+(?:may\s+be\s+|is\s+)(-?\d+)', desc, re.I)
-            if m_sz:
+            if not m_sz:
+                m_sz = re.search(r'array\s+["\']?([\w.->]+)["\']?\s+of\s+(\d+)\s+bytes', desc, re.I)
+                if m_sz:
+                    ev['array_size'] = int(m_sz.group(2))
+            else:
                 ev['array_size'] = int(m_sz.group(1))
-            if m_idx:
+            if not m_idx:
+                m_idx = re.search(r'index\s+["\']?([\w.->+ -]+)["\']?\s+\(which\s+evaluates\s+to\s+(-?\d+)\)', desc, re.I)
+                if m_idx:
+                    ev['index_value'] = int(m_idx.group(2))
+            else:
                 ev['index_value'] = int(m_idx.group(1))
 
         # Buffer size warning: extract dest size and copy size for BUFFER_SIZE checker
