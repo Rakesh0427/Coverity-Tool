@@ -261,7 +261,20 @@ def parse_index_only(report_path: str) -> List[Dict[str, Any]]:
 def parse_detail_page(detail_path: str) -> Tuple[str, List[Dict]]:
     """
     Parse one Code/<n>_file.html and return (source_code, events).
-    Uses the ORIGINAL text‑based strategy that was proven to work.
+
+    Coverity HTML events look like::
+
+        (1) Event var_decl:
+        Variable "buf" declared here.
+          706      char buf[10];
+        (2) Event overrun-local:
+        Overrunning array "buf" ...
+          710      memcpy(buf, src, n);
+
+    or with the description on the same line. Event tags may contain hyphens
+    (``overrun-local``). Each event is associated with the first subsequent
+    source line number so analysis can use the *main* (sink) line rather than
+    the path-start line.
     """
     if not detail_path or not os.path.isfile(detail_path):
         return "", []
@@ -271,29 +284,55 @@ def parse_detail_page(detail_path: str) -> Tuple[str, List[Dict]]:
         source_lines = []
         events = []
 
-        ev_pat = re.compile(r"^\((\d+)\)\s+Event\s+(\w+):$")
+        # Tag may include hyphens/underscores (overrun-local, buffer_size).
+        # Description may sit on the same line after the colon.
+        ev_pat = re.compile(
+            r"^\((\d+)\)\s+Event\s+([A-Za-z][\w.-]*)\s*:(.*)$"
+        )
         # Flexible code-line pattern: line number (1-6 digits), then whitespace, then code
         code_pat = re.compile(r"^(\d{1,6})\s+(.*)$")
 
         i = 0
         while i < len(text_lines):
             raw = text_lines[i].strip()
-            # -- Event line --
             m = ev_pat.match(raw)
             if m:
-                desc = text_lines[i + 1].strip() if i + 1 < len(text_lines) else ""
+                desc = (m.group(3) or "").strip()
+                if not desc and i + 1 < len(text_lines):
+                    nxt = text_lines[i + 1].strip()
+                    if nxt and not ev_pat.match(nxt) and not code_pat.match(nxt):
+                        desc = nxt
+                        i += 1
                 events.append({
                     "step": int(m.group(1)),
                     "type": m.group(2),
-                    "description": desc
+                    "tag": m.group(2),
+                    "description": desc,
+                    "file": "",
+                    "line": 0,
+                    "main": False,
                 })
-                i += 2
+                i += 1
                 continue
-            # -- Code line --
             cm = code_pat.match(raw)
             if cm:
+                src_line = int(cm.group(1))
                 source_lines.append(f"{cm.group(1):>6}  {cm.group(2)}")
+                # Attach this source line to the most recent event that has no
+                # line yet — Coverity prints the highlighted line right after
+                # the event it belongs to.
+                for ev in reversed(events):
+                    if not ev.get("line"):
+                        ev["line"] = src_line
+                    break
             i += 1
+
+        if events:
+            try:
+                from coverity_events import mark_main_events
+                mark_main_events(events)
+            except Exception:
+                events[-1]["main"] = True
 
         return "\n".join(source_lines), events
     except Exception as e:
@@ -357,6 +396,8 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
     col_file      = _fuzzy_col_match(headers, ["file", "source file", "path", "filepath", "file path"])
     col_line      = _fuzzy_col_match(headers, ["line", "line number", "location", "lineno"])
     col_function  = _fuzzy_col_match(headers, ["function", "function name", "procedure", "func"])
+    col_events_json = _fuzzy_col_match(headers, ["eventsjson", "events json", "event json"])
+    col_events_sum  = _fuzzy_col_match(headers, ["events summary", "event summary", "events"])
 
     if col_cid == -1:
         raise ValueError(f"Could not find CID/Defect ID column in Excel. Headers: {headers}")
@@ -402,6 +443,31 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
         type_val = str(row[col_type]) if col_type != -1 and col_type < len(row) and row[col_type] is not None else ""
         severity_val = str(row[col_severity]) if col_severity != -1 and col_severity < len(row) and row[col_severity] is not None else ""
 
+        events = []
+        if col_events_json != -1 and col_events_json < len(row) and row[col_events_json]:
+            try:
+                from coverity_events import events_from_json
+                events = events_from_json(row[col_events_json])
+            except Exception:
+                events = []
+        if not events and col_events_sum != -1 and col_events_sum < len(row) and row[col_events_sum]:
+            try:
+                from coverity_events import events_from_summary
+                events = events_from_summary(row[col_events_sum])
+            except Exception:
+                events = []
+
+        if events:
+            try:
+                from coverity_events import line_from_events, mark_main_events
+                mark_main_events(events, checker_val)
+                ev_line = line_from_events(events, checker_val)
+                if ev_line:
+                    line = ev_line
+                    line_is_various = False
+            except Exception:
+                pass
+
         defects.append({
             "cid": cid,
             "checker": checker_val,
@@ -412,7 +478,7 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
             "line_is_various": line_is_various,
             "function": func_val,
             "detail_file": "",
-            "events": [],
+            "events": events,
             "source_code": "",
         })
 
@@ -436,8 +502,8 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
     ws.title = "Coverity"
 
     headers = ["CID", "Checker", "Subtype", "Severity", "File",
-               "Line", "Function", "Events Summary"]
-    widths  = [8, 22, 25, 12, 45, 7, 30, 60]
+               "Line", "Function", "Events Summary", "EventsJSON"]
+    widths  = [8, 22, 25, 12, 45, 7, 30, 60, 40]
 
     # ---- Header row ----
     hdr_fill  = PatternFill("solid", fgColor="1F4E79")
@@ -488,7 +554,14 @@ def parse_coverity_html(report_path: str) -> List[Dict[str, Any]]:
     for d in defects:
         code, events = parse_detail_page(d["detail_file"])
         d["source_code"] = code
-        d["events"]      = events or [{"step": 1, "type": d["checker"],
-                                        "description": d["type"],
-                                        "file": d["file"], "line": d["line"]}]
+        if events:
+            try:
+                from coverity_events import apply_events_to_defect
+                apply_events_to_defect(d, events)
+            except Exception:
+                d["events"] = events
+        else:
+            d["events"] = [{"step": 1, "type": d["checker"],
+                            "description": d["type"],
+                            "file": d["file"], "line": d["line"]}]
     return defects  

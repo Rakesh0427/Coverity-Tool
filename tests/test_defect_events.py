@@ -1,0 +1,218 @@
+"""Defect line + Coverity event-trace resolution (706 vs 710).
+
+Coverity Connect shows the *main event* line (710). SOAP/REST v1 lineNumber is
+often the first path event (706, e.g. var_decl). Analysis must use 710.
+"""
+import json
+import os
+import tempfile
+
+from coverity_events import (
+    apply_events_to_defect,
+    events_from_json,
+    events_from_summary,
+    events_to_json,
+    line_from_events,
+    mark_main_events,
+)
+from coverity_rest_client import apply_rest_lines
+from coverity_soap_client import _line_from_events, _rest_defect_from_issue
+from html_report_parser import parse_coverity_excel, parse_detail_page, write_pull_excel
+
+
+def _trace():
+    """Classic Coverity path: declaration at 706, overrun sink at 710."""
+    return [
+        {"step": 1, "type": "var_decl", "line": 706, "main": False,
+         "description": 'Variable "buf" declared here.', "file": "src/foo.c"},
+        {"step": 2, "type": "overrun-local", "line": 710, "main": True,
+         "description": 'Overrunning array "buf" of 10 bytes.', "file": "src/foo.c"},
+    ]
+
+
+def test_line_from_events_prefers_main_event_not_first_event():
+    assert line_from_events(_trace(), checker="OVERRUN") == 710
+    assert _line_from_events(_trace(), checker="OVERRUN") == 710
+
+
+def test_line_from_events_uses_sink_tag_when_main_flag_missing():
+    events = [
+        {"step": 1, "type": "var_decl", "line": 706, "main": False},
+        {"step": 2, "type": "overrun-local", "line": 710, "main": False},
+    ]
+    assert line_from_events(events, checker="OVERRUN") == 710
+
+
+def test_line_from_events_last_event_when_no_main_or_sink():
+    events = [
+        {"step": 1, "type": "cond_true", "line": 706},
+        {"step": 2, "type": "identity_transfer", "line": 710},
+    ]
+    assert line_from_events(events) == 710
+
+
+def test_apply_events_overrides_instance_occurrence_line():
+    defect = {
+        "cid": 42,
+        "checker": "OVERRUN",
+        "file": "src/foo.c",
+        "line": 706,              # SOAP instance/merged first-event line
+        "_merged_line": 706,
+        "_inst_line_val": 706,
+    }
+    apply_events_to_defect(defect, _trace())
+    assert defect["line"] == 710
+    assert defect["_line_src"] == "main_event"
+    assert len(defect["events"]) == 2
+    assert defect["events"][1]["type"] == "overrun-local"
+
+
+def test_rest_v1_line_number_does_not_clobber_main_event():
+    defects = [{
+        "cid": 42, "line": 710, "_line_src": "main_event",
+        "checker": "OVERRUN", "file": "src/foo.c",
+    }]
+    # REST v1 /defects only has occurrence lineNumber = 706
+    cid_map = {42: {"line": 706, "mainEventLineNumber": 0}}
+    apply_rest_lines(defects, cid_map)
+    assert defects[0]["line"] == 710
+
+
+def test_rest_main_event_line_number_is_used():
+    defects = [{"cid": 42, "line": 706, "_line_src": "instance"}]
+    cid_map = {42: {"line": 710, "mainEventLineNumber": 710}}
+    apply_rest_lines(defects, cid_map)
+    assert defects[0]["line"] == 710
+    assert defects[0]["_line_src"] == "rest_main"
+
+
+def test_rest_defect_from_issue_prefers_main_event_line_number():
+    issue = {
+        "cid": 42,
+        "checkerName": "OVERRUN",
+        "mainEventFilePath": "src/foo.c",
+        "mainEventLineNumber": 710,
+        "lineNumber": 706,
+        "functionDisplayName": "vulnerable_copy",
+        "displayType": "Out-of-bounds access",
+        "displayImpact": "High",
+        "events": [
+            {"eventNumber": 1, "eventTag": "var_decl", "lineNumber": 706,
+             "main": False, "eventDescription": "declared here"},
+            {"eventNumber": 2, "eventTag": "overrun-local", "lineNumber": 710,
+             "main": True, "eventDescription": "overrun here"},
+        ],
+    }
+    d = _rest_defect_from_issue(issue, is_v1=False)
+    assert d["line"] == 710
+    assert d["_rest_main_line"] == 710
+    assert len(d["events"]) == 2
+    assert d["events"][1]["main"] is True
+
+
+def test_rest_v1_issue_without_main_event_keeps_occurrence_until_events():
+    issue = {
+        "checkerName": "OVERRUN",
+        "filePathname": "src/foo.c",
+        "lineNumber": 706,
+    }
+    d = _rest_defect_from_issue(issue, is_v1=True)
+    assert d["line"] == 706
+    assert d["events"] == []
+
+
+def test_excel_roundtrip_preserves_events_and_main_line(tmp_path):
+    defects = [{
+        "cid": 42,
+        "checker": "OVERRUN",
+        "type": "Out-of-bounds access",
+        "severity": "High",
+        "file": "src/foo.c",
+        "line": 710,
+        "function": "vulnerable_copy",
+        "events": _trace(),
+    }]
+    out = tmp_path / "pull.xlsx"
+    write_pull_excel(defects, str(out))
+    parsed = parse_coverity_excel(str(out))
+    assert len(parsed) == 1
+    d = parsed[0]
+    assert d["cid"] == 42
+    assert d["line"] == 710
+    assert len(d["events"]) == 2
+    assert d["events"][0]["line"] == 706
+    assert d["events"][1]["line"] == 710
+    assert d["events"][1]["main"] is True
+
+
+def test_events_json_roundtrip():
+    blob = events_to_json(_trace())
+    back = events_from_json(blob)
+    assert line_from_events(back) == 710
+    assert json.loads(blob)[1]["line"] == 710
+
+
+def test_events_from_summary_legacy_column():
+    text = (
+        'var_decl@src/foo.c:706 — Variable "buf" declared here.; '
+        'overrun-local@src/foo.c:710 — Overrunning array "buf"'
+    )
+    events = events_from_summary(text)
+    assert line_from_events(events, "OVERRUN") == 710
+
+
+def test_html_detail_parser_attaches_event_lines_and_marks_main():
+    html = """<html><body><pre>
+(1) Event var_decl:
+Variable "buf" declared here.
+  706      char buf[10];
+(2) Event overrun-local:
+Overrunning array "buf" of 10 bytes by passing it to memcpy.
+  710      memcpy(buf, src, n);
+</pre></body></html>"""
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write(html)
+        path = fh.name
+    try:
+        code, events = parse_detail_page(path)
+        assert len(events) == 2
+        assert events[0]["type"] == "var_decl"
+        assert events[0]["line"] == 706
+        assert events[1]["type"] == "overrun-local"
+        assert events[1]["line"] == 710
+        assert events[1]["main"] is True
+        assert "memcpy" in events[1]["description"]
+        assert "710" in code
+    finally:
+        os.unlink(path)
+
+
+def test_html_same_line_description_and_hyphenated_tag():
+    html = """<html><body><pre>
+(1) Event overrun-buffer-arg: Calling 'strncpy' with a maximum size argument of 64 bytes on destination array 'buf' of size 64 bytes.
+  11  strncpy(buf, input, sizeof(buf));
+</pre></body></html>"""
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False,
+                                     encoding="utf-8") as fh:
+        fh.write(html)
+        path = fh.name
+    try:
+        _code, events = parse_detail_page(path)
+        assert len(events) == 1
+        assert events[0]["type"] == "overrun-buffer-arg"
+        assert events[0]["line"] == 11
+        assert "strncpy" in events[0]["description"]
+        assert events[0]["main"] is True
+    finally:
+        os.unlink(path)
+
+
+def test_mark_main_events_picks_sink():
+    events = [
+        {"step": 1, "type": "var_decl", "line": 706, "main": False},
+        {"step": 2, "type": "overrun-local", "line": 710, "main": False},
+    ]
+    mark_main_events(events, checker="OVERRUN")
+    assert events[1]["main"] is True
+    assert events[0]["main"] is False
