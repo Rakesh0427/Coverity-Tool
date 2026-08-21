@@ -202,12 +202,28 @@ def build_defect_context(defect: Dict, src_root: str, language: str = 'c') -> Di
             'global_vars': [], 'called_function_codes': {}, 'callee_signatures': {},
         }
 
-    first_event = defect['events'][0] if defect.get('events') else {}
-    # Prefer the defect-level file/function over first_event: first_event may
-    # point into a called function (interprocedural trace), not the defect site.
-    filepath  = defect.get('file') or first_event.get('file', '')
+    events = defect.get('events') or []
+    # Prefer the defect-level file/function/line over the first path event:
+    # first_event may point into a called function (interprocedural trace) or
+    # at the taint source (e.g. var_decl / string_null_source), not the defect
+    # site. When only events are available, resolve the *main* (sink) event.
+    filepath  = defect.get('file') or ''
     func_name = defect.get('function', '')
-    line      = defect.get('line') or first_event.get('line', 0)
+    line      = defect.get('line') or 0
+    if not line or not filepath:
+        try:
+            from coverity_events import line_source_from_events
+            ev_line, _ = line_source_from_events(events, defect.get('checker', ''))
+            if not line and ev_line:
+                line = ev_line
+            if not filepath:
+                mains = [e for e in events if e.get('main') and e.get('file')]
+                if mains:
+                    filepath = max(mains, key=lambda e: e.get('step', 0)).get('file', '')
+                elif events:
+                    filepath = events[0].get('file', '')
+        except Exception:
+            pass
 
     if filepath and not os.path.isabs(filepath):
         filepath = os.path.join(src_root, filepath)

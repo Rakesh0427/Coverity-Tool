@@ -12,6 +12,7 @@ from coverity_events import (
     events_from_json,
     events_from_summary,
     events_to_json,
+    is_sink_event,
     line_from_events,
     mark_main_events,
 )
@@ -206,6 +207,53 @@ def test_html_same_line_description_and_hyphenated_tag():
         assert events[0]["main"] is True
     finally:
         os.unlink(path)
+
+
+def test_string_null_source_is_not_the_sink():
+    """STRING_NULL's trace is var_decl -> string_null_source -> string_null.
+
+    ``string_null_source`` (where the string loses its NUL terminator) is a
+    *source* event, not the sink. It shares the checker prefix and, as a child
+    event, can carry a higher eventNumber than the real ``string_null`` sink —
+    so a naive prefix match reports the source line (174) instead of the sink
+    line (268).
+    """
+    assert is_sink_event({"type": "string_null_source"}, "STRING_NULL") is False
+    assert is_sink_event({"type": "string_null"}, "STRING_NULL") is True
+
+
+def test_line_from_events_prefers_string_null_sink_over_source():
+    # Source event discovered AFTER the sink (higher eventNumber) — exactly the
+    # interprocedural child-event ordering that used to yield the wrong line.
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "string_null", "line": 268, "main": False,
+         "description": "Passing unterminated string to strlen"},
+        {"step": 3, "type": "string_null_source", "line": 174, "main": False,
+         "description": "strncpy does not terminate the string"},
+    ]
+    assert line_from_events(events, checker="STRING_NULL") == 268
+
+
+def test_apply_events_marks_string_null_sink_main_not_source():
+    defect = {
+        "cid": 7,
+        "checker": "STRING_NULL",
+        "file": "src/foo.c",
+        "line": 268,
+    }
+    events = [
+        {"step": 1, "type": "var_decl", "line": 174, "main": False},
+        {"step": 2, "type": "string_null", "line": 268, "main": False},
+        {"step": 3, "type": "string_null_source", "line": 174, "main": False},
+    ]
+    apply_events_to_defect(defect, events)
+    assert defect["line"] == 268
+    assert defect["_line_src"] == "main_event"
+    main_flags = {e["type"]: e.get("main") for e in defect["events"]}
+    assert main_flags["string_null"] is True
+    assert main_flags["string_null_source"] is False
+    assert main_flags["var_decl"] is False
 
 
 def test_mark_main_events_picks_sink():

@@ -226,9 +226,16 @@ class CoverityExcelApp:
                 break
             cid = defect["cid"]
             checker = defect["checker"]
-            first_event = defect["events"][0] if defect["events"] else {}
-            file_path = first_event.get("file", "")
-            line = first_event.get("line", "")
+            # Use the defect-level file/line/function. parse_coverity_html ->
+            # apply_events_to_defect already resolves `line` to the Coverity
+            # *main event* (the actual sink). Taking events[0] instead is the
+            # path-start (e.g. var_decl / string_null_source) — a different,
+            # earlier line (174 vs the real 268) and possibly a callee file.
+            file_path = defect.get("file", "")
+            line = defect.get("line", 0)
+            function = defect.get("function", "")
+            confidence = 0.0
+            fix = ""
 
             try:
                 context = build_defect_context(defect, src_root, language)
@@ -236,7 +243,8 @@ class CoverityExcelApp:
                     classification, comment = "Needs review", "Context extraction failed"
                 else:
                     classification, comment, fix, confidence = analyze_defect(
-                        context, checker, defect["events"]
+                        context, checker, defect["events"],
+                        file=file_path, line=line, function=function,
                     )
             except Exception as exc:
                 classification, comment = "Needs review", f"Error: {exc}"

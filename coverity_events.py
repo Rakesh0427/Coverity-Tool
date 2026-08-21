@@ -58,6 +58,23 @@ def _norm_tag(tag: Any) -> str:
     return str(tag or "").strip().lower().replace(" ", "_")
 
 
+# Path-preamble event-tag heads that are never the defect sink, even when they
+# share a prefix with the checker ("overrun-local" matches OVERRUN; "var_decl"
+# does not).
+_PATH_EVENT_HEADS = frozenset({
+    "var", "cond", "alias", "identity", "assign", "to", "from",
+    "path", "end", "begin", "entry", "exit", "caller",
+})
+
+# Event-tag suffixes that mark a *source*/taint sub-event rather than the sink,
+# even when prefixed by the checker name. Coverity's STRING_NULL trace is
+# var_decl -> string_null_source (where the string loses its NUL) -> string_null
+# (the sink). ``string_null_source`` must never be treated as the sink: it sits
+# at the *first* path line, and as a child event it can carry a higher
+# eventNumber than the real ``string_null`` sink.
+_NON_SINK_SUFFIXES = frozenset({"source", "taint", "src", "origin"})
+
+
 def is_sink_event(event: Dict[str, Any], checker: str = "") -> bool:
     """True when the event tag is the checker sink (not a path preamble)."""
     tag = _norm_tag(event.get("type") or event.get("tag"))
@@ -67,16 +84,22 @@ def is_sink_event(event: Dict[str, Any], checker: str = "") -> bool:
     if tag in _SINK_TAGS or underscored in _SINK_TAGS:
         return True
     chk = _norm_tag(checker).replace("-", "_")
-    if chk and (underscored == chk or underscored.startswith(chk + "_")
-                or chk.startswith(underscored.split("_")[0])):
-        # "overrun-local" matches checker OVERRUN; "var_decl" does not.
-        if underscored.split("_")[0] in {
-            "var", "cond", "alias", "identity", "assign", "to", "from",
-            "path", "end", "begin", "entry", "exit", "caller",
-        }:
-            return False
+    if not chk:
+        return False
+    head = underscored.split("_")[0]
+    # Path-preamble events (var_decl, cond_true, ...) are never the sink.
+    if head in _PATH_EVENT_HEADS:
+        return False
+    if underscored == chk:
         return True
-    return False
+    # A checker-prefixed event is a sink only when its extra suffix is not a
+    # source/taint marker: "overrun-local" matches OVERRUN, but
+    # "string_null_source" is the source, not the STRING_NULL sink.
+    if underscored.startswith(chk + "_"):
+        suffix = underscored[len(chk) + 1:]
+        return suffix.split("_")[0] not in _NON_SINK_SUFFIXES
+    # Loose fallback: the checker name shares the tag's leading token.
+    return chk.startswith(head)
 
 
 def event_line(event: Dict[str, Any]) -> int:
