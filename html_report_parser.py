@@ -530,6 +530,15 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
             f" — {e.get('description', '')}"
             for e in d.get("events", [])
         )
+        # Serialize the full event trace (main flag / step / file / line /
+        # description) into the EventsJSON column so the Excel round-trip does
+        # not lose the main-event line the analysis depends on (706 vs 710).
+        try:
+            from coverity_events import events_to_json
+            events_json = events_to_json(d.get("events", []))
+        except Exception:
+            events_json = "[]"
+
         values = [
             d.get("cid", ""),
             d.get("checker", ""),
@@ -539,6 +548,7 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
             d.get("line", 0),
             d.get("function", ""),
             events_summary,
+            events_json,
         ]
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)

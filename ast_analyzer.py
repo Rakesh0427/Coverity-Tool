@@ -23,6 +23,20 @@ from code_extractor import _get_parser, _read_file
 _TREE_SOURCE_MAP: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
+def _source_for(tree) -> str:
+    """Return the cached source string for *tree*, or "" if unavailable.
+
+    tree_sitter.Tree objects do not support weak references in some
+    versions, so every WeakKeyDictionary access can raise TypeError
+    ("cannot create weak reference to 'tree_sitter.Tree' object").  Treat
+    that as "no cached source" instead of crashing the whole analysis.
+    """
+    try:
+        return _TREE_SOURCE_MAP.get(tree, "")
+    except TypeError:
+        return ""
+
+
 def parse_function_tree(filepath: str, line: int, language: str = "c") -> Tuple[str, int, Any]:
     """Parse the source file and return the function containing `line`.
 
@@ -37,7 +51,10 @@ def parse_function_tree(filepath: str, line: int, language: str = "c") -> Tuple[
 
     parser = _get_parser(language)
     tree = parser.parse(bytes(source, "utf-8"))
-    _TREE_SOURCE_MAP[tree] = source
+    try:
+        _TREE_SOURCE_MAP[tree] = source
+    except TypeError:
+        pass  # tree_sitter.Tree has no weakref support in this version
 
     root = tree.root_node
     node = _find_node_at_line(root, line)
@@ -66,7 +83,7 @@ def parse_function_tree(filepath: str, line: int, language: str = "c") -> Tuple[
 
 def get_source(tree) -> str:
     """Retrieve the original source string associated with a tree."""
-    return _TREE_SOURCE_MAP.get(tree, "")
+    return _source_for(tree)
 
 
 def _find_node_at_line(root_node, line: int) -> Optional[Any]:
@@ -91,6 +108,34 @@ def _node_text(node) -> str:
     if isinstance(text, bytes):
         return text.decode("utf-8", errors="replace")
     return str(text)
+
+
+def _subscript_index_text(node) -> str:
+    """Return the index-expression text of a subscript_expression node.
+
+    Older tree-sitter grammars expose the index as an ``index`` field.
+    Newer grammars wrap it in a ``subscript_argument_list`` node
+    (``[ index ]``) with no ``index`` field, so fall back to that node (or
+    to a regex over the raw text) to keep ``arr[i]`` extraction working on
+    both grammars.
+    """
+    index_node = node.child_by_field_name("index")
+    if index_node is not None:
+        return _node_text(index_node)
+    sal = node.child_by_field_name("subscript_argument_list")
+    if sal is None:
+        for child in node.children:
+            if child.type == "subscript_argument_list":
+                sal = child
+                break
+    if sal is not None:
+        text = _node_text(sal)
+        if text.startswith("[") and text.endswith("]"):
+            return text[1:-1].strip()
+        return text.strip()
+    raw = _node_text(node)
+    m = re.search(r"\[([^\]]*)\]", raw)
+    return m.group(1).strip() if m else ""
 
 
 def _extract_identifiers(text: str) -> List[str]:
@@ -134,7 +179,7 @@ def find_array_access(tree, target_line: int) -> Optional[Dict[str, Any]]:
     if result:
         return result
 
-    source = _TREE_SOURCE_MAP.get(tree, "")
+    source = _source_for(tree)
     if source:
         return _regex_find_array_access(source, target_line)
     return None
@@ -153,10 +198,9 @@ def _ast_find_array_access(tree, target_line: int) -> Optional[Dict[str, Any]]:
             if dist < best_dist:
                 best_dist = dist
                 array_node = node.child_by_field_name("argument")
-                index_node = node.child_by_field_name("index")
+                index_expr = _subscript_index_text(node)
 
                 array_name = _resolve_member_access(array_node)
-                index_expr = _node_text(index_node) if index_node else ""
 
                 # Determine if write: parent is assignment_expression and we are left side
                 is_write = False
@@ -205,9 +249,8 @@ def _resolve_member_access(node) -> str:
         return field_name or arg_name
     if node.type == "subscript_expression":
         arg = node.child_by_field_name("argument")
-        idx = node.child_by_field_name("index")
         arg_name = _resolve_member_access(arg)
-        idx_expr = _node_text(idx) if idx else ""
+        idx_expr = _subscript_index_text(node)
         if arg_name:
             return f"{arg_name}[{idx_expr}]"
     if node.type == "pointer_expression":
@@ -283,7 +326,7 @@ def find_declaration(tree, var_name: str) -> Optional[Dict[str, Any]]:
     result = _ast_find_declaration(tree, var_name)
     if result:
         return result
-    source = _TREE_SOURCE_MAP.get(tree, "")
+    source = _source_for(tree)
     if source:
         return _regex_find_declaration(source, var_name)
     return None
@@ -404,7 +447,7 @@ def find_assignment(tree, var_name: str, before_line: int) -> Optional[Dict[str,
     result = _ast_find_assignment(tree, var_name, before_line)
     if result:
         return result
-    source = _TREE_SOURCE_MAP.get(tree, "")
+    source = _source_for(tree)
     if source:
         return _regex_find_assignment(source, var_name, before_line)
     return None
@@ -493,7 +536,7 @@ def find_call_expression(tree, target_line: int) -> Optional[Dict[str, Any]]:
     result = _ast_find_call_expression(tree, target_line)
     if result:
         return result
-    source = _TREE_SOURCE_MAP.get(tree, "")
+    source = _source_for(tree)
     if source:
         return _regex_find_call_expression(source, target_line)
     return None
@@ -599,7 +642,7 @@ def find_enclosing_guard(tree, target_line: int) -> Optional[Dict[str, Any]]:
     result = _ast_find_enclosing_guard(tree, target_line)
     if result:
         return result
-    source = _TREE_SOURCE_MAP.get(tree, "")
+    source = _source_for(tree)
     if source:
         return _regex_find_enclosing_guard(source, target_line)
     return None

@@ -216,3 +216,28 @@ def test_mark_main_events_picks_sink():
     mark_main_events(events, checker="OVERRUN")
     assert events[1]["main"] is True
     assert events[0]["main"] is False
+
+
+def test_pull_excel_writes_eventsjson_column(tmp_path):
+    """write_pull_excel must actually serialize the event trace into the
+    EventsJSON column (it used to declare the column but never write it,
+    so the main-event line was lost in the Excel round-trip)."""
+    import openpyxl
+    defects = [{
+        "cid": 42, "checker": "OVERRUN", "type": "Out-of-bounds access",
+        "severity": "High", "file": "src/foo.c", "line": 710,
+        "function": "vulnerable_copy", "events": _trace(),
+    }]
+    out = tmp_path / "pull.xlsx"
+    write_pull_excel(defects, str(out))
+    wb = openpyxl.load_workbook(str(out), data_only=True)
+    ws = wb.active
+    headers = [str(c.value) for c in ws[1]]
+    idx = headers.index("EventsJSON")
+    blob = ws.cell(row=2, column=idx + 1).value
+    assert blob
+    events = events_from_json(blob)
+    assert len(events) == 2
+    assert events[1]["line"] == 710
+    assert events[1]["main"] is True
+

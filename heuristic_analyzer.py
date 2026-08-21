@@ -2024,6 +2024,15 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     if tree is not None:
         access_info_ast = find_array_access(tree, line)
         if access_info_ast and access_info_ast.get('array_name'):
+            ast_access_line = int(access_info_ast.get('access_line', 0) or 0)
+            # Anchor on the flagged sink line: the AST returns the *nearest*
+            # subscript anywhere in the function, so a loop body access like
+            # `buf[i]` at 707 must not shadow the actual defect (e.g. a
+            # memcpy(dest, buf, n) sink at 710). Only accept an access on (or
+            # adjacent to) the flagged line.
+            if abs(ast_access_line - line) > 1:
+                access_info_ast = None
+        if access_info_ast and access_info_ast.get('array_name'):
             arr_name = access_info_ast['array_name']
             idx_vars = access_info_ast.get('index_variables', [])
             idx_var = idx_vars[0] if idx_vars else access_info_ast.get('index_expression', '')
@@ -2061,6 +2070,11 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # 2. Fallback: regex on the extracted function snippet (runs if AST failed OR if tree is None)
     if not arr_name:
         access_info = _extract_array_access_near_line(code, line, code_start_line)
+        if access_info:
+            # Same anchoring rule as the AST path: a subscript elsewhere in
+            # the function must not be reported as the flagged access.
+            if abs(int(access_info.get('line', 0) or 0) - line) > 1:
+                access_info = None
         if access_info:
             arr_name = access_info.get('array', '')
             idx_var = access_info.get('index_var', '')
@@ -2336,7 +2350,14 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                     src_line_text = _clines[_rel].strip()
 
             _arr_m = re.search(r'(\w[\w.\-><:]*(?:\[\d+\])*(?:->|\.)\w+|\w+)\[([^\]]+)\]', src_line_text) if src_line_text else None
-            _mcpy_m = re.search(r'memcpy\s*\(([^,]+),\s*([^,]+),\s*([^)]+)\)', src_line_text) if src_line_text else None
+            # Any buffer-copy sink at the flagged line is quoted directly with
+            # its own name and arguments (memcpy/strcpy/strcat/sprintf/...),
+            # instead of only memcpy being special-cased.
+            _sink_m = (re.search(
+                r'\b(memcpy|memmove|strcpy|strncpy|strcat|strncat|sprintf|'
+                r'snprintf|vsprintf|vsnprintf|wcscpy|wcscat|swprintf|gets|'
+                r'strlcpy|strlcat)\s*\(([^)]*)\)',
+                src_line_text) if src_line_text else None)
 
             if _arr_m:
                 _found_arr = _arr_m.group(1)
@@ -2346,13 +2367,14 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 if arr_size_expr:
                     parts.append(f"`{_found_arr}` is declared with size `{arr_size_expr}`.")
                 fix = f"Validate `{_found_idx}` before indexing `{_found_arr}`:\n  if ({_found_idx} < 0 || {_found_idx} >= (int)(sizeof({_found_arr}) / sizeof({_found_arr}[0]))) return ERROR;"
-            elif _mcpy_m:
-                _dst = _mcpy_m.group(1).strip()
-                _src2 = _mcpy_m.group(2).strip()
-                _sz = _mcpy_m.group(3).strip()
-                parts.append(f"`memcpy({_dst}, {_src2}, {_sz})` at line {access_line_actual} — `{_sz}` controls the copy length but no visible check confirms it does not exceed `sizeof({_dst})`.")
+            elif _sink_m:
+                _fn = _sink_m.group(1)
+                _args = [a.strip() for a in _sink_m.group(2).split(',')]
+                _dst = _args[0] if _args else '?'
+                _sz = _args[-1] if len(_args) > 1 else '?'
+                parts.append(f"`{_fn}({', '.join(_args)})` at line {access_line_actual} — `{_sz}` controls the copy length but no visible check confirms it does not exceed `sizeof({_dst})`.")
                 parts.append(f"If `{_sz}` exceeds the destination field size, this overwrites adjacent memory and corrupts neighboring data. Enforce the bound before the copy.")
-                fix = f"Verify `{_sz}` <= sizeof destination before copying:\n  if ({_sz} > sizeof({_dst})) return ERROR;\n  memcpy({_dst}, {_src2}, {_sz});"
+                fix = f"Verify `{_sz}` <= sizeof destination before copying:\n  if ({_sz} > sizeof({_dst})) return ERROR;\n  {_fn}({', '.join(_args)});"
             elif src_line_text:
                 parts.append(f"Out-of-bounds {verb} at line {access_line_actual}: `{src_line_text[:140].rstrip()}`")
                 parts.append("Review the pointer/array bounds for this access; if the index or length exceeds the object's allocated size, it reads/writes adjacent memory, corrupts data and can crash or be exploited.")
