@@ -9,6 +9,14 @@ import csv, json, os, sys, threading, queue, re, time
 # Fixes "can't find package Tk" / Tcl errors when running as exe or when
 # Python's tcl is in a non-standard location. Works on Windows, Linux, macOS.
 import sys as _sys
+
+def _set_tcl_tk_paths(tcl_dir, tk_dir, *, force=False):
+    if os.path.isfile(os.path.join(tcl_dir, "init.tcl")) and os.path.isdir(tk_dir):
+        if force or not os.environ.get("TCL_LIBRARY"):
+            os.environ["TCL_LIBRARY"] = tcl_dir
+        if force or not os.environ.get("TK_LIBRARY"):
+            os.environ["TK_LIBRARY"] = tk_dir
+
 if getattr(_sys, 'frozen', False):
     # Running as PyInstaller bundle: Tcl/Tk is in _MEIPASS/tcl
     _meipass = getattr(_sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -31,14 +39,23 @@ if getattr(_sys, 'frozen', False):
             os.environ["TK_LIBRARY"] = _tk_candidate
             break
 elif os.name == 'nt':
-    # Regular Windows Python: try sysconfig path, but don't fail if not found
+    # Regular Windows Python: prefer the interpreter's Tcl/Tk over inherited
+    # toolchain values such as Tornado/Wind River's older Tcl layout.
     try:
         import sysconfig as _sc
-        _py_data = _sc.get_path("data")
-        _tcl_lib = os.path.join(_py_data, "tcl", "tcl8.6")
-        if os.path.isdir(_tcl_lib):
-            os.environ.setdefault("TCL_LIBRARY", _tcl_lib)
-            os.environ.setdefault("TK_LIBRARY", os.path.join(_py_data, "tcl", "tk8.6"))
+        for _py_data in dict.fromkeys([
+            _sc.get_path("data"),
+            getattr(_sys, "base_prefix", None),
+            getattr(_sys, "prefix", None),
+            os.path.dirname(os.path.dirname(_sys.executable)),
+        ]):
+            if not _py_data:
+                continue
+            _tcl_lib = os.path.join(_py_data, "tcl", "tcl8.6")
+            _tk_lib = os.path.join(_py_data, "tcl", "tk8.6")
+            if os.path.isfile(os.path.join(_tcl_lib, "init.tcl")):
+                _set_tcl_tk_paths(_tcl_lib, _tk_lib, force=True)
+                break
     except Exception:
         pass
 # --- end Tcl fix ---
