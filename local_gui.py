@@ -365,9 +365,7 @@ class SetupPage(Page):
         tk.Label(outer, text=ICON_CHAR, font=("Segoe UI", 56),
                  bg=C_BG, fg=C_ACCENT).pack(pady=(0, 4))
         tk.Label(outer, text=APP_NAME,
-                 font=("Segoe UI", 26, "bold"), bg=C_BG, fg=C_TEXT).pack()
-        tk.Label(outer, text="Automated defect triage for Coverity reports",
-                 font=("Segoe UI", 11), bg=C_BG, fg=C_SUBTEXT).pack(pady=(2, 14))
+                 font=("Segoe UI", 26, "bold"), bg=C_BG, fg=C_TEXT).pack(pady=(0, 14))
 
         # Step 0 — the stream may be empty. Upload already-analysed results
         # (an intermediate directory) before there is anything to pull.
@@ -2575,8 +2573,7 @@ class PullDialog(tk.Toplevel):
         self._sv_stream  = tk.StringVar()
         self._sv_limit   = tk.StringVar(value="5000")
         self._sv_save    = tk.StringVar()
-        self._sv_use_rest = tk.BooleanVar(value=True)  # fix current lines via Connect REST API
-        self._sv_insecure = tk.BooleanVar(value=True)  # allow self-signed cert (verify off) — default True for corp compatibility
+
         self._set_save_path("", out_default)
 
         self._build()
@@ -2628,15 +2625,6 @@ class PullDialog(tk.Toplevel):
         _conn_row(s1, "Port", self._sv_port)
         _conn_row(s1, "Username", self._sv_user)
         _conn_row(s1, "Password", self._sv_pass, show="*")
-        # SSL verification toggle — secure default is unchecked (verify on); corp self-signed needs checked
-        sec_f = tk.Frame(s1, bg=C_PANEL)
-        sec_f.pack(fill="x", padx=10, pady=2)
-        tk.Checkbutton(sec_f, text="Allow self-signed certificate (insecure — verify off)",
-                       variable=self._sv_insecure, onvalue=True, offvalue=False,
-                       bg=C_PANEL, fg=C_INTENT, selectcolor=C_CARD,
-                       activebackground=C_PANEL, font=("Segoe UI", 8, "bold"), cursor="hand2").pack(side="left")
-        tk.Label(sec_f, text="  (uncheck for production with valid cert)", font=("Segoe UI", 7), bg=C_PANEL, fg=C_SUBTEXT).pack(side="left", padx=4)
-
         tst_f = tk.Frame(s1, bg=C_PANEL)
         tst_f.pack(fill="x", padx=10, pady=(6, 10))
         self._test_btn = tk.Button(
@@ -2722,21 +2710,6 @@ class PullDialog(tk.Toplevel):
             font=("Segoe UI", 10), padx=14, pady=6,
             cursor="hand2", state="normal")
         self._close_btn.pack(side="left", padx=(10, 0))
-
-        self._use_rest_chk = tk.Checkbutton(
-            pull_f, text="Fix current lines via Connect REST API",
-            variable=self._sv_use_rest, onvalue=True, offvalue=False,
-            bg=C_BG, fg=C_SUBTEXT, selectcolor=C_CARD,
-            activebackground=C_BG, activeforeground=C_TEXT,
-            font=("Segoe UI", 9), relief="flat", bd=0, cursor="hand2")
-        self._use_rest_chk.pack(side="left", padx=(14, 0))
-        self._test_rest_btn = tk.Button(
-            pull_f, text="Test REST", command=self._test_rest,
-            bg=C_CARD, fg=C_ACCENT, relief="flat",
-            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
-            cursor="hand2", activebackground=C_BORDER,
-            state="disabled")
-        self._test_rest_btn.pack(side="left", padx=(6, 0))
 
         self._prog = ttk.Progressbar(body, mode="determinate", maximum=100)
         self._prog.pack(fill="x", padx=20, pady=(6, 2))
@@ -2830,19 +2803,15 @@ class PullDialog(tk.Toplevel):
         self._log_insert("warn", "Testing connection…\n")
 
         def _worker():
-            # Allow optional pre-supplied REST token / API key via env vars
-            rest_tok = os.environ.get("COVERITY_REST_TOKEN")
-            rest_key = os.environ.get("COVERITY_API_KEY")
-            verify = not self._sv_insecure.get()
+            verify = False
             client = CoveritySOAPClient(host, port, user, pw,
-                verify_ssl=verify, rest_token=rest_tok, api_key=rest_key)
+                verify_ssl=verify)
             ok, msg = client.test_connection()
 
             def _done():
                 self._test_btn.configure(state="normal")
                 if ok:
                     self._client = client
-                    self._test_rest_btn.configure(state="normal")
                     self._load_projects()
                 else:
                     self._conn_lbl.configure(text=f"✗ {msg}", fg=C_BUG)
@@ -2924,33 +2893,6 @@ class PullDialog(tk.Toplevel):
         else:
             self._pull_btn.configure(state="disabled")
 
-    def _test_rest(self):
-        """Probe candidate REST API bases and report what the server exposes."""
-        if not self._client:
-            self._log_insert("error", "Connect to the server first.\n")
-            return
-        self._log_insert("warn", "Probing REST API endpoints (may take a moment)…\n")
-
-        def _worker():
-            try:
-                v1, v2, info = self._client.discover_rest_base()
-                epath, emethod, elog = self._client._probe_issue_endpoint(self._sv_stream.get())
-                found = bool(v1 or v2)
-                ep = (f"  defect endpoint: /api/v2/{epath} via {emethod}\n"
-                      if epath and emethod else "  (no defect endpoint auto-detected)\n")
-                detail = f"{info}\n  {elog}\n"
-                msg = (f"✓ REST API found — v1={v1 or '-'}  v2={v2 or '-'}\n{ep}"
-                       if found else "✗ No REST endpoint responded.\n")
-                self.after(0, lambda: self._log_insert(
-                    "ok" if found else "error", msg + f"    {detail}\n"))
-            except Exception as exc:
-                self.after(0, lambda exc=exc: self._log_insert(
-                    "error", f"REST probe error: {exc}\n"))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-        
-
     # ------------------------------------------------------------------ pulling
     def _pull(self):
         if self._pulling:
@@ -3001,38 +2943,6 @@ class PullDialog(tk.Toplevel):
                        f"Events fetched: {with_events}/{len(defects)}")
             self._q.put(("tick", 90, f"Fetched {len(defects)} defects. Writing Excel…\n"))
             self._q.put(("info", f"  {summary}\n"))
-
-            # Optional: overlay the defect's CURRENT line from the Connect REST
-            # API (the web UI's authoritative line, e.g. after the code moved).
-            if self._sv_use_rest.get():
-                try:
-                    from coverity_rest_client import CoverityRESTClient, apply_rest_lines
-                    verify_rest = not self._sv_insecure.get()
-                    rc = CoverityRESTClient(
-                        self._sv_host.get().strip(), self._sv_port.get().strip(),
-                        self._sv_user.get().strip(), self._sv_pass.get(),
-                        verify_ssl=verify_rest,
-                        auth_token=os.environ.get("COVERITY_REST_TOKEN"))
-                    ok, msg = rc.login()
-                    if ok:
-                        if stream != self._client.ALL_STREAMS:
-                            streams_for_rest = [stream]
-                        else:
-                            streams_for_rest = (self._client.get_streams_for_project(project)
-                                                or [stream])
-                        cid_map = {}
-                        for st in streams_for_rest:
-                            cid_map.update(rc.fetch_defect_lines(st, limit=limit))
-                        rest_fixed = apply_rest_lines(defects, cid_map)
-                        self._q.put(("info",
-                                     f"REST current-line correction: {rest_fixed}/{len(defects)} "
-                                     f"lines updated.\n"))
-                    else:
-                        self._q.put(("warn",
-                                     f"REST API unavailable ({msg}) — keeping SOAP line numbers.\n"))
-                    rc.close()
-                except Exception as exc:
-                    self._q.put(("warn", f"REST line correction skipped: {exc}\n"))
 
             # Write a plain-text log alongside the Excel for post-pull diagnosis.
             log_path = out_path.replace(".xlsx", "_pull_log.txt")
@@ -3164,7 +3074,6 @@ class PushDialog(tk.Toplevel):
         self._sv_stream  = tk.StringVar()
         self._sv_store   = tk.StringVar(value=rp._sv_store.get()   if rp else "Default")
         self._sv_csv     = tk.StringVar()
-        self._sv_insecure = tk.BooleanVar(value=True)  # allow self-signed cert
 
         self._build()
 
@@ -3239,13 +3148,6 @@ class PushDialog(tk.Toplevel):
 
         _row(s1, "Username", self._sv_user, 18)
         _row(s1, "Password", self._sv_pass, 18, show="*")
-        sec_f = tk.Frame(s1, bg=C_PANEL)
-        sec_f.pack(fill="x", padx=10, pady=2)
-        tk.Checkbutton(sec_f, text="Allow self-signed certificate (insecure — verify off)",
-                       variable=self._sv_insecure, onvalue=True, offvalue=False,
-                       bg=C_PANEL, fg=C_INTENT, selectcolor=C_CARD,
-                       activebackground=C_PANEL, font=("Segoe UI", 8, "bold"), cursor="hand2").pack(side="left")
-        tk.Label(sec_f, text="  (uncheck for production with valid cert)", font=("Segoe UI", 7), bg=C_PANEL, fg=C_SUBTEXT).pack(side="left", padx=4)
 
         conn_f = tk.Frame(s1, bg=C_PANEL)
         conn_f.pack(fill="x", padx=10, pady=(2, 8))
@@ -3439,7 +3341,7 @@ class PushDialog(tk.Toplevel):
         self._stream_cb.configure(state="disabled")
 
         def _worker():
-            verify = not self._sv_insecure.get()
+            verify = False
             client = CoveritySOAPClient(host, port, user, pw, verify_ssl=verify)
             ok, msg = client.test_connection()
 
@@ -3896,7 +3798,6 @@ class DirectPushDialog(tk.Toplevel):
         self._sv_project = tk.StringVar()
         self._sv_mode = tk.StringVar(
             value=(rp._sv_push_mode.get() if rp else cpush.MODE_ACCEPTED))
-        self._sv_insecure = tk.BooleanVar(value=False)
         self._sv_dry_run = tk.BooleanVar(value=False)
 
         self._build()
@@ -3958,13 +3859,6 @@ class DirectPushDialog(tk.Toplevel):
         _row("Port", self._sv_port, 8)
         _row("Username", self._sv_user, 20)
         _row("Password", self._sv_pass, 20, show="*")
-
-        opt_f = tk.Frame(s1, bg=C_PANEL)
-        opt_f.pack(fill="x", padx=10, pady=3)
-        tk.Checkbutton(opt_f, text="Allow self-signed certificate (insecure)",
-                       variable=self._sv_insecure, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(side="left")
 
         conn_f = tk.Frame(s1, bg=C_PANEL)
         conn_f.pack(fill="x", padx=10, pady=(3, 8))
@@ -4141,7 +4035,7 @@ class DirectPushDialog(tk.Toplevel):
 
         self._conn_btn.configure(state="disabled", text="Connecting…")
         self._conn_lbl.configure(text="Contacting server…", fg=C_SUBTEXT)
-        verify = not self._sv_insecure.get()
+        verify = False
 
         def _worker():
             client = CoveritySOAPClient(host, port, user, pw, verify_ssl=verify)
@@ -4356,7 +4250,6 @@ class CommitDefectsDialog(tk.Toplevel):
         self._sv_user = tk.StringVar()
         self._sv_pass = tk.StringVar()
         self._sv_keyfile = tk.StringVar()
-        self._sv_trust = tk.BooleanVar(value=True)
         self._sv_desc = tk.StringVar(value="Coverity Tool commit")
         self._sv_dry = tk.BooleanVar(value=False)
 
@@ -4518,11 +4411,6 @@ class CommitDefectsDialog(tk.Toplevel):
                  ).pack(side="left", padx=6)
 
         self._field(s2, "Description", self._sv_desc)
-        tk.Checkbutton(s2, text="Trust a new/unseen server certificate",
-                       variable=self._sv_trust, bg=C_PANEL, fg=C_SUBTEXT,
-                       selectcolor=C_CARD, activebackground=C_PANEL,
-                       font=("Segoe UI", 9)).pack(anchor="w", padx=10,
-                                                  pady=(0, 4))
 
         # ── Live "what's still missing" hint ───────────────────────────
         # Rechecks validate_config(cfg) on every field change so the user
@@ -4646,7 +4534,7 @@ class CommitDefectsDialog(tk.Toplevel):
             password=self._sv_pass.get(),
             auth_key_file=self._sv_keyfile.get().strip(),
             use_ssl=bool(self._sv_ssl.get()),
-            on_new_cert_trust=bool(self._sv_trust.get()),
+            on_new_cert_trust=True,
             description=self._sv_desc.get().strip(),
         )
 
@@ -4710,10 +4598,8 @@ class CommitDefectsDialog(tk.Toplevel):
         self._stream_cb.configure(state="disabled", values=[])
         self._sv_project.set("")
         self._sv_stream.set("")
-        # verify_ssl mirrors the "trust new cert" toggle — if the user has
-        # opted to trust unseen certs for the upload, we shouldn't refuse
-        # the SOAP call for the very same server.
-        verify = not bool(self._sv_trust.get())
+        # verify_ssl is disabled for compatibility with self-signed certs
+        verify = False
 
         def _worker():
             client = CoveritySOAPClient(host, port, user, pw,
