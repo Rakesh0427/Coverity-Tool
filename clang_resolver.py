@@ -9,7 +9,7 @@ Windows: set LIBCLANG_PATH env var to the path of libclang.dll if auto-discovery
 import re
 import os
 import tempfile
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Windows DLL discovery
@@ -64,21 +64,149 @@ def _clang_available() -> bool:
 # Core helpers
 # ---------------------------------------------------------------------------
 
-def _parse_code(code: str, extra_args=None):
-    """Parse C code string into a libclang TranslationUnit. Returns (tu, tmp_path) or (None, None)."""
-    if not _clang_available():
-        return None, None
+# ---------------------------------------------------------------------------
+# Translation-unit context
+#
+# Parsing a bare function snippet in an empty temp file makes libclang almost
+# useless: every project type is unknown, every #define is missing, so
+# CONSTANTARRAY never resolves and get_array_size() returns (0, ''). The
+# regex fallback then does all the work, and the "libclang is installed"
+# claim is hollow.
+#
+# set_translation_context() lets the caller supply the real file plus the
+# workspace include directories, so the snippet is parsed *in situ* with the
+# project's own headers and macros visible.
+# ---------------------------------------------------------------------------
+
+_TU_FILE: Optional[str] = None        # real path of the file under analysis
+_INCLUDE_DIRS: Tuple[str, ...] = ()   # -I paths discovered from the workspace
+_EXTRA_ARGS: Tuple[str, ...] = ()     # e.g. -D flags supplied by the caller
+_TU_CACHE: Dict[str, object] = {}     # real path -> parsed TranslationUnit
+
+#: Cap on how many -I flags are passed; huge trees would otherwise slow parsing.
+MAX_INCLUDE_DIRS = 60
+
+
+def set_translation_context(file_path: str = '',
+                            include_dirs: Optional[Sequence[str]] = None,
+                            extra_args: Optional[Sequence[str]] = None) -> None:
+    """Tell the resolver which real file (and headers) the snippet came from.
+
+    Called once per defect by the context builder. Passing an empty
+    ``file_path`` restores snippet-only behaviour.
+    """
+    global _TU_FILE, _INCLUDE_DIRS, _EXTRA_ARGS
+    _TU_FILE = file_path or None
+    _INCLUDE_DIRS = tuple(include_dirs or ())
+    _EXTRA_ARGS = tuple(extra_args or ())
+
+
+def discover_include_dirs(src_root: str, limit: int = MAX_INCLUDE_DIRS) -> list:
+    """Collect plausible -I directories under ``src_root``.
+
+    Any directory containing a header is an include candidate. Directories
+    conventionally named include/inc/api/public are listed first so they
+    survive the cap on large trees.
+    """
+    if not src_root or not os.path.isdir(src_root):
+        return []
+    preferred, others = [], []
+    skip = {'.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target',
+            'node_modules', '.venv', 'venv', 'dist', 'CMakeFiles'}
+    for root, dirs, files in os.walk(src_root):
+        dirs[:] = [d for d in dirs if d not in skip]
+        if not any(f.endswith(('.h', '.hpp', '.hh', '.hxx', '.inc')) for f in files):
+            continue
+        base = os.path.basename(root).lower()
+        (preferred if base in ('include', 'inc', 'api', 'public', 'headers',
+                               'interface') else others).append(root)
+    ordered = preferred + others
+    if src_root not in ordered:
+        ordered.insert(0, src_root)
+    return ordered[:limit]
+
+
+def _build_args(for_cpp: bool = False) -> list:
+    """Compiler arguments: language standard, include paths, error tolerance."""
+    args = ['-std=c++14' if for_cpp else '-std=c11']
+    # Keep going despite missing system headers -- a partial AST with real
+    # project types still beats a regex guess.
+    args += ['-ferror-limit=0', '-Wno-everything']
+    for inc in _INCLUDE_DIRS:
+        args += ['-I', inc]
+    args += list(_EXTRA_ARGS)
+    return args
+
+
+def parse_real_file(file_path: str = ''):
+    """Parse the actual source file (with project headers) and cache the TU.
+
+    Returns the TranslationUnit, or None when libclang or the file is
+    unavailable. The TU is cached per path because several defects usually
+    land in the same file.
+    """
+    target = file_path or _TU_FILE
+    if not target or not os.path.isfile(target) or not _clang_available():
+        return None
+    cached = _TU_CACHE.get(target)
+    if cached is not None:
+        return cached
     try:
         import clang.cindex as cx
         idx = cx.Index.create()
-        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False, encoding='utf-8') as f:
-            f.write(code)
-            tmp = f.name
-        args = ['-std=c11'] + (extra_args or [])
-        tu = idx.parse(tmp, args=args)
+        opts = (cx.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD |
+                cx.TranslationUnit.PARSE_INCOMPLETE)
+        tu = idx.parse(target,
+                       args=_build_args(target.endswith(('.cpp', '.cc', '.cxx', '.hpp'))),
+                       options=opts)
+    except Exception:
+        tu = None
+    if tu is not None:
+        _TU_CACHE[target] = tu
+    return tu
+
+
+def clear_tu_cache() -> None:
+    """Drop cached translation units (after edits, or to release memory)."""
+    _TU_CACHE.clear()
+
+
+def _parse_code(code: str, extra_args=None):
+    """Parse a C snippet into a TranslationUnit. Returns (tu, tmp_path).
+
+    The snippet is written next to the real file when one is known, so that
+    relative ``#include "local.h"`` directives resolve and the project's own
+    include paths apply. ``tmp_path`` is returned for cleanup by the caller.
+    """
+    if not _clang_available():
+        return None, None
+    tmp = None
+    try:
+        import clang.cindex as cx
+        idx = cx.Index.create()
+        # Prefer a sibling of the real file: relative includes then resolve.
+        target_dir, for_cpp = None, False
+        if _TU_FILE and os.path.isfile(_TU_FILE):
+            target_dir = os.path.dirname(_TU_FILE)
+            for_cpp = _TU_FILE.endswith(('.cpp', '.cc', '.cxx', '.hpp'))
+        suffix = '.cpp' if for_cpp else '.c'
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, mode='w', delete=False,
+                                             encoding='utf-8', dir=target_dir) as f:
+                f.write(code)
+                tmp = f.name
+        except Exception:
+            # Read-only source tree: fall back to the system temp dir.
+            with tempfile.NamedTemporaryFile(suffix=suffix, mode='w', delete=False,
+                                             encoding='utf-8') as f:
+                f.write(code)
+                tmp = f.name
+        args = _build_args(for_cpp) + list(extra_args or [])
+        tu = idx.parse(tmp, args=args,
+                       options=cx.TranslationUnit.PARSE_INCOMPLETE)
         return (tu, tmp) if tu else (None, tmp)
     except Exception:
-        return None, None
+        return None, tmp
 
 
 def _cleanup(tmp_path: Optional[str]) -> None:
@@ -93,12 +221,61 @@ def _cleanup(tmp_path: Optional[str]) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _array_size_from_tu(tu, var_name: str, code: str) -> Tuple[int, str]:
+    """Search a parsed TranslationUnit for var_name's array size."""
+    if tu is None:
+        return 0, ''
+    try:
+        import clang.cindex as cx
+    except Exception:
+        return 0, ''
+
+    def _walk(cursor):
+        if cursor.spelling == var_name:
+            t = cursor.type
+            if t.kind == cx.TypeKind.CONSTANTARRAY:
+                sz = t.get_array_size()
+                elem_sz = t.get_array_element_type().get_size()
+                return sz * max(elem_sz, 1), str(sz)
+            if t.kind in (cx.TypeKind.POINTER, cx.TypeKind.INCOMPLETEARRAY):
+                try:
+                    tokens = ' '.join(tok.spelling for tok in cursor.get_tokens())
+                except Exception:
+                    tokens = ''
+                m = re.search(r'(?:malloc|calloc|realloc)\s*\(([^)]+)\)', tokens)
+                if m:
+                    from deep_analyzer import _resolve_constant
+                    expr = m.group(1).strip()
+                    return _resolve_constant(expr, code), expr
+        for child in cursor.get_children():
+            r = _walk(child)
+            if r[0]:
+                return r
+        return 0, ''
+
+    try:
+        return _walk(tu.cursor)
+    except Exception:
+        return 0, ''
+
+
 def get_array_size(code: str, var_name: str, line_hint: int = 0) -> Tuple[int, str]:
     """
     Resolve the byte size of var_name's array declaration via libclang.
     Returns (size_bytes, size_expr). size_bytes==0 means unresolved.
     Handles: stack arrays, macro-expanded sizes, typedef chains.
+
+    The real translation unit is tried first: parsed with the project's own
+    headers and macros, it resolves declarations whose element type or size
+    constant is defined in a header the snippet does not contain. The snippet
+    parse remains as a fallback for callers that set no context.
     """
+    real_tu = parse_real_file()
+    if real_tu is not None:
+        size, expr = _array_size_from_tu(real_tu, var_name, code)
+        if size > 0:
+            return size, expr
+
     tu, tmp = _parse_code(code)
     try:
         if tu is None:
@@ -156,6 +333,45 @@ def get_type_size(code: str, type_name: str) -> int:
         _cleanup(tmp)
 
 
+def _macro_from_real_tu(macro_name: str) -> Optional[int]:
+    """Read an integer #define from the real file's preprocessor record.
+
+    parse_real_file() requests PARSE_DETAILED_PROCESSING_RECORD, so macro
+    definitions pulled in from project headers are present in the AST even
+    though they never appear in the extracted function snippet.
+    """
+    tu = parse_real_file()
+    if tu is None:
+        return None
+    try:
+        import clang.cindex as cx
+        for cursor in tu.cursor.walk_preorder():
+            if cursor.kind != cx.CursorKind.MACRO_DEFINITION:
+                continue
+            if cursor.spelling != macro_name:
+                continue
+            tokens = [t.spelling for t in cursor.get_tokens()]
+            # tokens[0] is the macro name; the body follows.
+            body = tokens[1:]
+            if len(body) == 1:
+                try:
+                    return int(body[0], 0)
+                except ValueError:
+                    return None
+            # Simple parenthesised integer, e.g. #define N (64)
+            joined = ''.join(body)
+            m = re.fullmatch(r'\(?(-?(?:0[xX][0-9a-fA-F]+|\d+))[uUlL]*\)?', joined)
+            if m:
+                try:
+                    return int(m.group(1), 0)
+                except ValueError:
+                    return None
+            return None
+    except Exception:
+        return None
+    return None
+
+
 def expand_macro(code: str, macro_name: str) -> Optional[int]:
     """
     Resolve a #define integer macro to its integer value.
@@ -169,6 +385,11 @@ def expand_macro(code: str, macro_name: str) -> Optional[int]:
     m = re.search(rf'#\s*define\s+{re.escape(macro_name)}\s+(0[xX][0-9a-fA-F]+)\b', code)
     if m:
         return int(m.group(1), 16)
+    # The macro is usually #defined in a header, not in the extracted snippet.
+    # Ask the real translation unit's preprocessor record before giving up.
+    val = _macro_from_real_tu(macro_name)
+    if val is not None:
+        return val
     # Expression macro — evaluate via libclang sizeof probe
     probe = code + f'\nstatic int __macro_probe = {macro_name};\n'
     tu, tmp = _parse_code(probe)

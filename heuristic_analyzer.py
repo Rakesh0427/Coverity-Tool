@@ -46,6 +46,13 @@ try:
 except ImportError:
     _FLOW_ANALYSIS = False
 
+import fix_gate as _fix_gate
+
+try:
+    import capabilities as _capabilities
+except ImportError:      # capability reporting is advisory, never fatal
+    _capabilities = None
+
 
 # ---------------------------------------------------------------------------
 # Expert CWE helpers — senior perspective (CWE/CERT/OWASP as primary taxonomy)
@@ -64,69 +71,25 @@ def _cwe_header(checker: str) -> str:
     return f"CWE-{info['cwe_id']} {info['cwe_name']} (CERT {info['cert']}, {info['owasp']}, CVSS {info['cvss_base']}) — {info['cwe_url']}"
 
 def _gate_fix_on_source_evidence(fix: str, code: str, line: int,
-                                 code_start_line: int, checker: str) -> Tuple[str, str]:
+                                 code_start_line: int, checker: str,
+                                 extra_sources: Optional[List[str]] = None
+                                 ) -> Tuple[str, str]:
     """Allow a proposed patch only when it is tied to the available source.
 
-    This is intentionally conservative.  A remediation template is guidance,
-    not a patch, when it invents an error path, uses a placeholder, or cannot
-    name symbols from the analysed function.  Callers render the returned
-    reason in the analysis and suppress the Proposed Fix panel in that case.
+    Delegates to :mod:`fix_gate`, which repairs stock error paths against the
+    function's own convention instead of discarding the patch, and rejects
+    only genuinely unresolved placeholders.  Callers render the returned
+    reason in the analysis; an empty reason means the patch is clean.
+
+    The previous implementation was a substring blacklist that matched the
+    tool's own correctly-interpolated templates ('return ERROR', 'the
+    pointer', ...) and withheld valid, source-anchored fixes.
     """
-    candidate = (fix or '').strip()
-    if not candidate:
-        return candidate, ''
-    # Classification outcomes are not patches.  Keep the UI from presenting
-    # explanatory "No fix required ..." text as a source-validated fix.
-    if candidate.lower().startswith('no fix required'):
-        return 'No fix required.', ''
-    if candidate.lower().startswith('manual review required'):
-        return 'Manual review required.', ''
-
-    if not code:
-        return 'Manual review required.', (
-            'No code-specific fix was generated because the source for the '
-            'Coverity event path is unavailable.')
-
-    # These indicate a stock template rather than the project's established
-    # error-handling contract.  Do not present them as an actionable patch.
-    generic_markers = (
-        'ARRAY_SIZE', 'return ERROR', 'return ERROR_', 'handle error',
-        'Validate buffer size before copy', 'Add explicit bounds checking',
-        'Verify all string operations', 'the pointer', 'the index',
-    )
-    if any(marker.lower() in candidate.lower() for marker in generic_markers):
-        return 'Manual review required.', (
-            'No code-specific fix was generated: the available remediation '
-            'would require an invented placeholder or error-handling path.')
-
-    # A patch must mention at least one real, non-keyword identifier from the
-    # function.  This blocks fixes that look plausible but target an unrelated
-    # variable extracted from another event or a fallback name.
-    source_ids = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', code))
-    patch_ids = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', candidate))
-    ignored = {
-        'Suggestion', 'CWE', 'if', 'else', 'return', 'sizeof', 'int',
-        'size_t', 'const', 'static', 'NULL', 'nullptr', 'true', 'false',
-        'int64_t', 'INT_MAX', 'INT_MIN', 'Or', 'Also', 'Add', 'Ensure',
-    }
-    if not ((patch_ids - ignored) & source_ids):
-        return 'Manual review required.', (
-            'No code-specific fix was generated because the suggested change '
-            'could not be anchored to identifiers in the analysed function.')
-
-    # For array-overrun reports, a nested access has independent inner and
-    # outer bounds.  A one-index patch is never sufficient without resolving
-    # both objects and the semantics of their limits.
-    if checker.startswith('OVERRUN'):
-        offset = line - code_start_line
-        source_lines = code.splitlines()
-        if 0 <= offset < len(source_lines) and source_lines[offset].count('[') >= 2:
-            return 'Manual review required.', (
-                'No code-specific fix was generated: the flagged expression '
-                'uses a nested index, so the inner and outer bounds must be '
-                'proved independently.')
-
-    return candidate, ''
+    result = _fix_gate.gate_fix(
+        fix, code, line, code_start_line, checker,
+        extra_sources=extra_sources,
+        depth_note=_capabilities.depth_note() if _capabilities else "")
+    return result.fix, result.reason
 
 
 def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
@@ -599,6 +562,10 @@ def _extract_binary_operation(text: str, operators: Tuple[str, ...]) -> Optional
     assign_m = re.search(r'(?<![=!<>])=(?!=)\s*(.+)$', src)
     if assign_m:
         src = assign_m.group(1).strip()
+    # Drop a leading statement keyword so `return val << bits` yields the
+    # operand `val`, not `return val` -- which would render as the
+    # uncompilable `sizeof(return val)` in the proposed fix.
+    src = re.sub(r'^(?:return|case)\s+', '', src.strip())
     src = src.strip('() ')
     for op in operators:
         if op in ('<<', '>>'):
@@ -2534,10 +2501,13 @@ def _has_nested_subscript_at_line(code: str, line: int, code_start_line: int) ->
     """Return whether the flagged statement contains an expression like
     ``table[index_map[i]]``.  Such a statement has multiple bounds that cannot
     be safely repaired by the single-index fallback template.
+
+    Delegates to :func:`fix_gate.has_nested_subscript_at_line`, which tracks
+    bracket depth.  Counting ``[`` characters (the previous approach) also
+    fired on ``foo(a[i], b[j])`` -- two sibling subscripts that are each
+    individually boundable -- and needlessly withheld a valid patch.
     """
-    source_lines = code.splitlines()
-    offset = line - code_start_line
-    return 0 <= offset < len(source_lines) and source_lines[offset].count('[') >= 2
+    return _fix_gate.has_nested_subscript_at_line(code, line, code_start_line)
 
 
 def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
@@ -3004,7 +2974,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             else:
                 fix = (f"Suggestion: if ({idx_var} < 0 || {idx_var} >= "
                        f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) "
-                       "return ERROR; // CWE-125/787")
+                       "<<ERROR_RETURN>> // CWE-125/787")
         
         else:
             # ---- Generic fallback: extract the actual source line to name the expression ----
@@ -3032,7 +3002,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 parts.append(f"No visible bounds check on `{_found_idx}` was found in the extracted snippet — verify `{_found_idx}` is validated before this access. If `{_found_idx}` lies outside the allocated range of `{_found_arr}`, this {verb} touches adjacent memory, corrupting data and potentially crashing the process or enabling an exploit.")
                 if arr_size_expr:
                     parts.append(f"`{_found_arr}` is declared with size `{arr_size_expr}`.")
-                fix = f"Validate `{_found_idx}` before indexing `{_found_arr}`:\n  if ({_found_idx} < 0 || {_found_idx} >= (int)(sizeof({_found_arr}) / sizeof({_found_arr}[0]))) return ERROR;"
+                fix = f"Validate `{_found_idx}` before indexing `{_found_arr}`:\n  if ({_found_idx} < 0 || {_found_idx} >= (int)(sizeof({_found_arr}) / sizeof({_found_arr}[0]))) <<ERROR_RETURN>>"
             elif _sink_m:
                 _fn = _sink_m.group(1)
                 _args = [a.strip() for a in _sink_m.group(2).split(',')]
@@ -3040,7 +3010,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 _sz = _args[-1] if len(_args) > 1 else '?'
                 parts.append(f"`{_fn}({', '.join(_args)})` at line {access_line_actual} — `{_sz}` controls the copy length but no visible check confirms it does not exceed `sizeof({_dst})`.")
                 parts.append(f"If `{_sz}` exceeds the destination field size, this overwrites adjacent memory and corrupts neighboring data. Enforce the bound before the copy.")
-                fix = f"Verify `{_sz}` <= sizeof destination before copying:\n  if ({_sz} > sizeof({_dst})) return ERROR;\n  {_fn}({', '.join(_args)});"
+                fix = f"Verify `{_sz}` <= sizeof destination before copying:\n  if ({_sz} > sizeof({_dst})) <<ERROR_RETURN>>\n  {_fn}({', '.join(_args)});"
             elif src_line_text:
                 parts.append(f"Out-of-bounds {verb} at line {access_line_actual}: `{src_line_text[:140].rstrip()}`")
                 parts.append("Review the pointer/array bounds for this access; if the index or length exceeds the object's allocated size, it reads/writes adjacent memory, corrupts data and can crash or be exploited.")
@@ -3157,7 +3127,20 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             fix = "Manual review required."
         else:
             # No patch is offered unless this is a single, identifiable index.
-            fix = f"Suggestion: if ({idx_var} < 0 || {idx_var} >= ARRAY_SIZE) return ERROR; // CWE-125"
+            # Bound the guard with the array's real limit: its declared size
+            # expression when known, otherwise a sizeof() computed from the
+            # array itself. Never emit an invented ARRAY_SIZE macro.
+            if arr_size_expr:
+                _bound = arr_size_expr
+            elif arr_name and arr_name not in ('the buffer', 'the array', ''):
+                _bound = f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))"
+            else:
+                _bound = ''
+            if _bound:
+                fix = (f"Suggestion: if ({idx_var} < 0 || {idx_var} >= {_bound}) "
+                       f"<<ERROR_RETURN>> // CWE-125")
+            else:
+                fix = "Manual review required."
         return "Needs review", comment, fix, decision.confidence
 
 def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
@@ -3830,13 +3813,13 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
         else:
             comment = (f"In {function}() at line {line}, `{suspect_var}` may be negative (e.g., -1 error) and is used "
                        f"as size/index without check (CWE-20, CERT ERR33-C). Cast to unsigned → ~4GB allocation / OOB.")
-        fix = f"if ({suspect_var} < 0) return ERROR; // CWE-20 CERT ERR33-C\nptr = malloc((size_t){suspect_var});"
+        fix = f"if ({suspect_var} < 0) <<ERROR_RETURN>> // CWE-20 CERT ERR33-C\nptr = malloc((size_t){suspect_var});"
         comment = _apply_example_style('Bug', 'NEGATIVE_RETURNS', ctx, code,
                                        code_start_line, line, function, comment)
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, f"if ({suspect_var}<0) return ERROR; // CWE-20", decision.confidence
+    return "Needs review", comment, f"if ({suspect_var} < 0) <<ERROR_RETURN>> // CWE-20", decision.confidence
 
 
 # ---------------------------------------------------------------------------
@@ -4290,11 +4273,18 @@ def _analyze_divide_by_zero(code: str, sub_checker: str, events: List[Dict],
         else:
             comment = (f"In {function}() at line {line}, division by `{_divisor}` has no visible non-zero guard (CWE-369, CERT INT33-C). "
                        f"If `{_divisor}` is zero, this triggers SIGFPE — denial of service.")
-        fix = f"if ({_divisor} == 0) return ERROR; // CWE-369 CERT INT33-C\nresult = dividend / {_divisor};"
+        # Quote the real statement rather than inventing `result = dividend / x;`,
+        # which names variables that do not exist in the analysed function.
+        _div_stmt = (defect_line_code or "").strip()
+        if _div_stmt:
+            fix = (f"if ({_divisor} == 0) <<ERROR_RETURN>>  // CWE-369 CERT INT33-C\n"
+                   f"{_div_stmt}")
+        else:
+            fix = f"if ({_divisor} == 0) <<ERROR_RETURN>>  // CWE-369 CERT INT33-C"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, f"if ({_divisor} == 0) return ERROR; // CWE-369", decision.confidence
+    return "Needs review", comment, f"if ({_divisor} == 0) <<ERROR_RETURN>> // CWE-369", decision.confidence
 
 
 
@@ -4364,7 +4354,7 @@ def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
         comment = (f"At line {line} in {function}(), `{_ptr}` may be dereferenced after being freed (CWE-416, CERT MEM30-C). "
                    f"`free({_ptr})` occurs at line {facts['free_line'] or 'an earlier line'} and no replacement value or effective NULL guard "
                    f"is proven before the later use. That leaves a dangling pointer and the access can corrupt the heap or crash the process.")
-        fix = f"free({_ptr}); {_ptr} = NULL;\nif (!{_ptr}) return ERROR; // CWE-416 CERT MEM30-C"
+        fix = f"free({_ptr}); {_ptr} = NULL;  // CWE-416 CERT MEM30-C — clear the dangling pointer at every free site"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
@@ -4767,6 +4757,16 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
         'CHECKED_QRS':        _analyze_checked_return,
     }
 
+    # Callee/caller snippets let the fix gate read this module's error-handling
+    # convention when the defect function itself has no return/goto to learn from.
+    _extra_sources = [c for n, c in called_function_codes.items()
+                      if n != '__callers__' and isinstance(c, str) and c.strip()]
+    for _c in callers:
+        if isinstance(_c, str) and _c.strip():
+            _extra_sources.append(_c)
+        elif isinstance(_c, dict) and _c.get('code'):
+            _extra_sources.append(_c['code'])
+
     def _finish(classification, comment, fix, confidence):
         # Annotate the comment with uncertainty notes, and cap confidence when the
         # assessment had to rely on fallback code or an approximate line.
@@ -4782,12 +4782,19 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
         if classification == 'Needs review' and str(fix or '').strip().lower() != 'no fix required.':
             fix = 'Manual review required.'
         # A fix must be a source-anchored patch, not generic secure-coding
-        # advice.  Withhold templates that cannot be validated against this
-        # function and explain the missing proof in the analysis instead.
+        # advice.  The gate repairs stock error paths against this module's own
+        # convention and withholds only genuinely unresolvable templates.
         fix, withheld_reason = _gate_fix_on_source_evidence(
-            fix, code, line, code_start_line, checker)
+            fix, code, line, code_start_line, checker,
+            extra_sources=_extra_sources)
         if withheld_reason:
             comment = comment.rstrip() + "\n\n" + withheld_reason
+        # When a backend was missing, say so rather than letting a degraded
+        # verdict read like a confident one.
+        if _capabilities is not None and classification == 'Needs review':
+            _dnote = _capabilities.depth_note()
+            if _dnote and _dnote not in comment:
+                comment = comment.rstrip() + "\n\n" + _dnote
         comment = _append_cwe_footer(comment, checker)
         fix = _expert_fix_suggestion(checker, context, fix)
         return classification, comment, fix, confidence

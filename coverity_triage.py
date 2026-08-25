@@ -28,6 +28,11 @@ if _THIS_DIR not in sys.path:
 
 from context_builder import build_defect_context, warm_workspace_index
 from heuristic_analyzer import analyze_defect
+
+try:
+    import capabilities as _capabilities
+except ImportError:      # capability reporting is advisory, never fatal
+    _capabilities = None
 from html_report_parser import parse_coverity_html
 from checker_categories import category_for_checker, CATEGORY_ORDER
 
@@ -207,6 +212,12 @@ class CoverityExcelApp:
             return
 
         total = len(defects) if not limit else min(len(defects), limit)
+        # Log which analysis backends are live, so a degraded run is visible.
+        if _capabilities is not None:
+            try:
+                print(_capabilities.format_banner())
+            except Exception:
+                pass
         self.root.after(0, lambda: self._set_status(f"Analysing {total} defects…"))
         self.root.after(0, lambda: self.progress.configure(maximum=max(total, 1), value=0))
 
