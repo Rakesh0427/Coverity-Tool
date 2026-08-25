@@ -62,6 +62,72 @@ def _cwe_header(checker: str) -> str:
         return ""
     return f"CWE-{info['cwe_id']} {info['cwe_name']} (CERT {info['cert']}, {info['owasp']}, CVSS {info['cvss_base']}) — {info['cwe_url']}"
 
+def _gate_fix_on_source_evidence(fix: str, code: str, line: int,
+                                 code_start_line: int, checker: str) -> Tuple[str, str]:
+    """Allow a proposed patch only when it is tied to the available source.
+
+    This is intentionally conservative.  A remediation template is guidance,
+    not a patch, when it invents an error path, uses a placeholder, or cannot
+    name symbols from the analysed function.  Callers render the returned
+    reason in the analysis and suppress the Proposed Fix panel in that case.
+    """
+    candidate = (fix or '').strip()
+    if not candidate:
+        return candidate, ''
+    # Classification outcomes are not patches.  Keep the UI from presenting
+    # explanatory "No fix required ..." text as a source-validated fix.
+    if candidate.lower().startswith('no fix required'):
+        return 'No fix required.', ''
+    if candidate.lower().startswith('manual review required'):
+        return 'Manual review required.', ''
+
+    if not code:
+        return 'Manual review required.', (
+            'No code-specific fix was generated because the source for the '
+            'Coverity event path is unavailable.')
+
+    # These indicate a stock template rather than the project's established
+    # error-handling contract.  Do not present them as an actionable patch.
+    generic_markers = (
+        'ARRAY_SIZE', 'return ERROR', 'return ERROR_', 'handle error',
+        'Validate buffer size before copy', 'Add explicit bounds checking',
+        'Verify all string operations', 'the pointer', 'the index',
+    )
+    if any(marker.lower() in candidate.lower() for marker in generic_markers):
+        return 'Manual review required.', (
+            'No code-specific fix was generated: the available remediation '
+            'would require an invented placeholder or error-handling path.')
+
+    # A patch must mention at least one real, non-keyword identifier from the
+    # function.  This blocks fixes that look plausible but target an unrelated
+    # variable extracted from another event or a fallback name.
+    source_ids = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', code))
+    patch_ids = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', candidate))
+    ignored = {
+        'Suggestion', 'CWE', 'if', 'else', 'return', 'sizeof', 'int',
+        'size_t', 'const', 'static', 'NULL', 'nullptr', 'true', 'false',
+        'int64_t', 'INT_MAX', 'INT_MIN', 'Or', 'Also', 'Add', 'Ensure',
+    }
+    if not ((patch_ids - ignored) & source_ids):
+        return 'Manual review required.', (
+            'No code-specific fix was generated because the suggested change '
+            'could not be anchored to identifiers in the analysed function.')
+
+    # For array-overrun reports, a nested access has independent inner and
+    # outer bounds.  A one-index patch is never sufficient without resolving
+    # both objects and the semantics of their limits.
+    if checker.startswith('OVERRUN'):
+        offset = line - code_start_line
+        source_lines = code.splitlines()
+        if 0 <= offset < len(source_lines) and source_lines[offset].count('[') >= 2:
+            return 'Manual review required.', (
+                'No code-specific fix was generated: the flagged expression '
+                'uses a nested index, so the inner and outer bounds must be '
+                'proved independently.')
+
+    return candidate, ''
+
+
 def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
     """Make Proposed Fix a *just suggestion*: one concise code-oriented line.
     Senior reviewers want the exact change, not a paragraph.
@@ -1991,6 +2057,16 @@ def _overrun_pattern_and_caller_evidence(code: str, idx_var: str, idx_expr: str,
     return acc
 
 
+def _has_nested_subscript_at_line(code: str, line: int, code_start_line: int) -> bool:
+    """Return whether the flagged statement contains an expression like
+    ``table[index_map[i]]``.  Such a statement has multiple bounds that cannot
+    be safely repaired by the single-index fallback template.
+    """
+    source_lines = code.splitlines()
+    offset = line - code_start_line
+    return 0 <= offset < len(source_lines) and source_lines[offset].count('[') >= 2
+
+
 def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                      file: str = "", line: int = 0, function: str = "", cid: int = 0,
                      called_function_codes: Optional[Dict[str, str]] = None,
@@ -2335,10 +2411,23 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             if guard_explanation:
                 parts.append(guard_explanation)
 
-            # Fix
-            
-            # Fix
-            fix = f"Suggestion: if ({idx_var} <0 || {idx_var} >= (int)(sizeof({arr_name})/sizeof({arr_name}[0]))) return ERROR; // CWE-125/787"
+            # A nested subscript has two independent bounds: for example,
+            # ``table[index_map[i]]``.  The simple extractor can identify the
+            # inner ``index_map[i]`` but cannot prove the size/semantics of the
+            # outer table or whether a named MAX constant is a count or a last
+            # valid index.  Never offer a patch for the inner index in that
+            # case: it would be unrelated to the defect Coverity reported.
+            if _has_nested_subscript_at_line(code, access_line_actual, code_start_line):
+                parts.append(
+                    "The flagged expression contains a derived/nested index. "
+                    "Verify the bound for the value used to index the outer "
+                    "table and whether its MAX constant is inclusive before "
+                    "changing this condition; no automatic patch is safe.")
+                fix = "Manual review required."
+            else:
+                fix = (f"Suggestion: if ({idx_var} < 0 || {idx_var} >= "
+                       f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) "
+                       "return ERROR; // CWE-125/787")
         
         else:
             # ---- Generic fallback: extract the actual source line to name the expression ----
@@ -2470,7 +2559,15 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
 
         parts.append("Please verify the array bounds (including any cross-file guards) before finalizing the disposition.")
         comment = re.sub(r'\s{2,}', ' ', " ".join(parts)).strip()
-        fix = f"Suggestion: if ({idx_var}<0 || {idx_var}>=ARRAY_SIZE) return ERROR; // CWE-125"
+        if _has_nested_subscript_at_line(code, access_line_actual, code_start_line):
+            comment += (" The access uses a derived/nested index, so the inner "
+                        "index and the outer table require separate bound checks; "
+                        "the MAX constant's inclusive/exclusive meaning must be "
+                        "confirmed from its declaration.")
+            fix = "Manual review required."
+        else:
+            # No patch is offered unless this is a single, identifiable index.
+            fix = f"Suggestion: if ({idx_var} < 0 || {idx_var} >= ARRAY_SIZE) return ERROR; // CWE-125"
         return "Needs review", comment, fix, decision.confidence
 
 def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
@@ -3823,7 +3920,13 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
             confidence = min(float(confidence), 0.70)
         if notes:
             comment = (comment + "\n\n" + " ".join(notes)).strip()
-        # Expert: always append CWE reference footer and make fix a just-suggestion
+        # A fix must be a source-anchored patch, not generic secure-coding
+        # advice.  Withhold templates that cannot be validated against this
+        # function and explain the missing proof in the analysis instead.
+        fix, withheld_reason = _gate_fix_on_source_evidence(
+            fix, code, line, code_start_line, checker)
+        if withheld_reason:
+            comment = comment.rstrip() + "\n\n" + withheld_reason
         comment = _append_cwe_footer(comment, checker)
         fix = _expert_fix_suggestion(checker, context, fix)
         return classification, comment, fix, confidence

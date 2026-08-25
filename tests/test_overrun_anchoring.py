@@ -101,3 +101,37 @@ def test_overrun_keeps_direct_subscript_at_flagged_line(tmp_path):
     assert classification == "Bug"
     assert "line 707" in comment
     assert "big[n]" in comment
+
+
+def test_nested_subscript_does_not_receive_single_index_patch():
+    """A guard on ``table[index_map[i]]`` cannot be repaired as a guard on i."""
+    from heuristic_analyzer import _has_nested_subscript_at_line
+
+    code = """if ((si_conn_prity[ui_prty_idx] != INVALID_CONN_INDEX) &&
+    (si_conn_prity[ui_prty_idx] <= MAX_NUM_ADS_CONNECTIONS) &&
+    (gs_ec_rpt_tbl[si_conn_prity[ui_prty_idx]].b_ec_present == TRUE)) {
+}"""
+    assert _has_nested_subscript_at_line(code, line=3, code_start_line=1)
+    assert not _has_nested_subscript_at_line(code, line=1, code_start_line=1)
+
+
+def test_fix_gate_rejects_invented_error_path():
+    """A template with ARRAY_SIZE/ERROR must not be displayed as a patch."""
+    from heuristic_analyzer import _gate_fix_on_source_evidence
+
+    fix, reason = _gate_fix_on_source_evidence(
+        "Suggestion: if (idx < 0 || idx >= ARRAY_SIZE) return ERROR;",
+        "void check(int idx) { values[idx] = 0; }", 1, 1, "OVERRUN")
+    assert fix == "Manual review required."
+    assert "invented placeholder" in reason
+
+
+def test_fix_gate_rejects_nested_index_patch():
+    """An inner-index patch is not a fix for a nested outer-table access."""
+    from heuristic_analyzer import _gate_fix_on_source_evidence
+
+    code = "if (table[index_map[i]].present) { }"
+    fix, reason = _gate_fix_on_source_evidence(
+        "if (i < limit) return;", code, 1, 1, "OVERRUN")
+    assert fix == "Manual review required."
+    assert "nested index" in reason
