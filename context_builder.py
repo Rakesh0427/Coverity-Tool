@@ -5,7 +5,16 @@ from typing import Dict, List, Tuple
 from code_extractor import extract_enclosing_function, find_function_line_by_name, _read_file
 from workspace_indexer import build_symbol_index, get_function_code, get_function_entry
 
+try:
+    import clang_resolver as _clang_resolver
+except Exception:      # libclang support is optional
+    _clang_resolver = None
+
 _CALLER_CACHE: Dict[Tuple, List[Dict]] = {}
+
+# src_root -> discovered -I directories. Walking the tree for headers is done
+# once per root; every defect then reuses the result.
+_INCLUDE_DIR_CACHE: Dict[str, List[str]] = {}
 
 # C stdlib / common functions whose source we don't need to fetch
 _SKIP_CALLEES = frozenset({
@@ -190,9 +199,44 @@ def warm_workspace_index(src_root: str, language: str = 'c') -> bool:
         return False
     try:
         _build_callsite_index(src_root)
+        # Discover header directories once here too, so the first defect does
+        # not pay for the tree walk that libclang's -I flags need.
+        _include_dirs_for(src_root)
         return True
     except Exception:
         return False
+
+
+def _include_dirs_for(src_root: str) -> List[str]:
+    """Cached list of -I directories under src_root."""
+    if not src_root:
+        return []
+    cached = _INCLUDE_DIR_CACHE.get(src_root)
+    if cached is None:
+        try:
+            cached = _clang_resolver.discover_include_dirs(src_root) \
+                if _clang_resolver else []
+        except Exception:
+            cached = []
+        _INCLUDE_DIR_CACHE[src_root] = cached
+    return cached
+
+
+def _set_clang_context(filepath: str, src_root: str) -> None:
+    """Point libclang at the real file and the project's header directories.
+
+    Without this the resolver parses the extracted snippet in an empty temp
+    file, where no project type or macro is visible, so array sizes never
+    resolve and every answer falls through to regex.
+    """
+    if _clang_resolver is None:
+        return
+    try:
+        _clang_resolver.set_translation_context(
+            filepath if filepath and os.path.exists(filepath) else '',
+            _include_dirs_for(src_root))
+    except Exception:
+        pass
 
 
 def build_defect_context(defect: Dict, src_root: str, language: str = 'c') -> Dict:
@@ -227,6 +271,9 @@ def build_defect_context(defect: Dict, src_root: str, language: str = 'c') -> Di
 
     if filepath and not os.path.isabs(filepath):
         filepath = os.path.join(src_root, filepath)
+
+    # Give libclang the real file + include paths before any analysis runs.
+    _set_clang_context(filepath, src_root)
 
     func_code = ''
     func_tree = None

@@ -1,4 +1,10 @@
 # Pinned versions for reproducibility — update via pip-tools
+#
+# These are NOT optional extras. Every one of tree-sitter, libclang and
+# z3-solver is imported behind a try/except that silently degrades the
+# analysis when it is absent, which produces far more "Needs review" rows.
+# Run `python capabilities.py` to see which backends are actually live and
+# what the current analysis depth is.
 lxml==5.2.2
 requests==2.32.3
 zeep==4.2.1
@@ -12,8 +18,10 @@ beautifulsoup4==4.12.3
 openpyxl==3.1.5
 pyyaml==6.0.1
 pygments==2.18.0
-networkx==3.3; python_version >= '3.10'
-networkx==3.2.1; python_version < '3.10'  # last release supporting Python 3.9 (CI matrix)
+# networkx: listed historically but imported nowhere in the codebase.
+# Left commented out rather than installed on every machine for nothing.
+# networkx==3.3; python_version >= '3.10'
+# networkx==3.2.1; python_version < '3.10'  # last release supporting Python 3.9 (CI matrix)
 
 # Dev-only: regenerates the Word user guide (build_guide.py). Not needed at runtime.
 python-docx==1.1.2

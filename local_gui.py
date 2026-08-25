@@ -73,6 +73,11 @@ from coverity_soap_client import CoveritySOAPClient, zeep_available, CLASSIFICAT
 import coverity_push as cpush
 import cov_cli
 
+try:
+    import capabilities as _capabilities
+except ImportError:      # capability reporting is advisory, never fatal
+    _capabilities = None
+
 from checker_categories import (
     category_for_checker,
     group_results_by_category,
@@ -985,6 +990,18 @@ class AnalysisPage(Page):
                            f"  Verify the Source Code Root points to the same tree Coverity "
                            f"analysed, or check the paths in the sheet's File column.\n"))
 
+            # Report which analysis backends are actually live. A run with
+            # libclang/z3/tree-sitter missing produces far more 'Needs review'
+            # rows, and without this banner that is indistinguishable from a
+            # full-strength run that genuinely found nothing.
+            if _capabilities is not None:
+                try:
+                    _depth = _capabilities.analysis_depth()
+                    _tag = "info" if _depth == _capabilities.DEPTH_FULL else "warn"
+                    q.put((_tag, _capabilities.format_banner() + "\n"))
+                except Exception:
+                    pass
+
             # Warm the one-time workspace index up front so the first defect does
             # not silently stall the whole run for tens of seconds, and so the
             # per-defect ETA below excludes this one-time indexing cost.
@@ -1204,6 +1221,15 @@ class AnalysisPage(Page):
                             needs_review_reason = "no_code"
                         else:
                             needs_review_reason = "low_confidence_or_unhandled"
+                        # A missing backend is a better explanation than
+                        # 'inconclusive evidence' -- record it as the reason.
+                        if _capabilities is not None and needs_review_reason in (
+                                "low_confidence_or_unhandled", ""):
+                            try:
+                                if _capabilities.analysis_depth() != _capabilities.DEPTH_FULL:
+                                    needs_review_reason = "reduced_" + _capabilities.analysis_depth()
+                            except Exception:
+                                pass
 
                     action = cpush.normalize_action(defect.get("action", "")) or cpush.default_action_for_classification(classification)
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1222,6 +1248,8 @@ class AnalysisPage(Page):
                         "source_code": src_code,
                         "source_origin": source_status,
                         "needs_review_reason": needs_review_reason,
+                        "analysis_depth": (_capabilities.analysis_depth()
+                                           if _capabilities is not None else "unknown"),
                         "events": events,
                         "accepted": False,
                         "accepted_by": "",
@@ -1389,6 +1417,8 @@ class AnalysisPage(Page):
                         "line_various": "line reported as 'Various'",
                         "exception": "analysis error",
                         "low_confidence_or_unhandled": "low confidence",
+                        "reduced_partial": "reduced analysis (backend missing)",
+                        "reduced_minimal": "reduced analysis (no AST backend)",
                         "other": "other",
                     }
                     _by = Counter(

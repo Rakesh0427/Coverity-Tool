@@ -115,15 +115,31 @@ def test_nested_subscript_does_not_receive_single_index_patch():
     assert not _has_nested_subscript_at_line(code, line=1, code_start_line=1)
 
 
-def test_fix_gate_rejects_invented_error_path():
-    """A template with ARRAY_SIZE/ERROR must not be displayed as a patch."""
+def test_fix_gate_rejects_undefined_macro_placeholder():
+    """ARRAY_SIZE is rejected only because the source never defines it."""
     from heuristic_analyzer import _gate_fix_on_source_evidence
 
     fix, reason = _gate_fix_on_source_evidence(
         "Suggestion: if (idx < 0 || idx >= ARRAY_SIZE) return ERROR;",
         "void check(int idx) { values[idx] = 0; }", 1, 1, "OVERRUN")
     assert fix == "Manual review required."
-    assert "invented placeholder" in reason
+    assert "ARRAY_SIZE" in reason
+    assert "unresolved placeholder" in reason
+
+
+def test_fix_gate_keeps_macro_the_project_actually_defines():
+    """The same macro is fine when the codebase really has it."""
+    from heuristic_analyzer import _gate_fix_on_source_evidence
+
+    code = ("#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))\n"
+            "void check(int idx) { if (idx < 0) return; values[idx] = 0; }")
+    fix, reason = _gate_fix_on_source_evidence(
+        "Suggestion: if (idx < 0 || idx >= ARRAY_SIZE(values)) return ERROR;",
+        code, 2, 1, "OVERRUN")
+    assert fix != "Manual review required."
+    assert "ARRAY_SIZE(values)" in fix
+    # 'return ERROR;' was resolved to the function's own void-return convention.
+    assert "return ERROR" not in fix
 
 
 def test_fix_gate_rejects_nested_index_patch():

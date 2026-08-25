@@ -49,7 +49,13 @@ int check(void) {
     classification, comment, fix, confidence = _run_analysis(str(path), "NEGATIVE_RETURNS", 5)
     assert classification == "Bug"
     assert "resolves to -1" in comment
-    assert fix == "Manual review required."
+    # A proven Bug on a named local must yield a patch anchored to that local.
+    # This function has no readable error convention (it only ever returns 0),
+    # so the error branch is marked for the reviewer rather than invented --
+    # but the guard itself is still offered.
+    assert "ret" in fix
+    assert "if (ret < 0)" in fix
+    assert fix != "Manual review required."
 
 
 def test_divide_by_zero_false_positive_from_concrete_nonzero_divisor(tmp_path):

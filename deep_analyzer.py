@@ -774,7 +774,7 @@ def generate_contextual_fix(checker_family: str, classification: str, context: D
             'gets': "Remove gets(). Use fgets({dest_var}, sizeof({dest_var}), stdin) instead.",
             'strncpy': "strncpy() does not guarantee null termination. Add after the call:\n  {dest_var}[sizeof({dest_var}) - 1] = '\\0';\nOr switch to strlcpy() if available.",
             'strncat': "Ensure strncat() size argument accounts for existing content:\n  strncat({dest_var}, {src_var}, sizeof({dest_var}) - strlen({dest_var}) - 1);",
-            'snprintf': "snprintf() is generally safe, but verify the return value to detect truncation:\n  int n = snprintf({dest_var}, sizeof({dest_var}), ...);\n  if (n < 0 || (size_t)n >= sizeof({dest_var})) { /* handle error */ }",
+            'snprintf': "snprintf() is generally safe, but verify the return value to detect truncation:\n  int n = snprintf({dest_var}, sizeof({dest_var}), ...);\n  if (n < 0 || (size_t)n >= sizeof({dest_var})) { <<ERROR_RETURN>> }",
             'wcscpy': "Replace wcscpy({dest_var}, {src_var}) with wcsncpy({dest_var}, {src_var}, sizeof({dest_var})/sizeof(wchar_t) - 1); and null-terminate.",
             'wcscat': "Replace wcscat({dest_var}, {src_var}) with wcsncat({dest_var}, {src_var}, remaining_size - 1);",
             'memmove': "Ensure size <= sizeof({dest_var}):\n  size_t copy_len = (src_len < sizeof({dest_var})) ? src_len : sizeof({dest_var});\n  memmove({dest_var}, {src_var}, copy_len);",
@@ -782,16 +782,16 @@ def generate_contextual_fix(checker_family: str, classification: str, context: D
             'default': "Validate buffer size before copy. Use bounded functions (snprintf, strncpy, strncat) with explicit size checks and ensure null termination.",
         },
         'null_deref': {
-            'default': "Add null validation before use:\n  if (!{var}) {{\n      // handle error: return, goto cleanup, or allocate\n      return ERROR;\n  }}\n  // safe to use {var} here",
+            'default': "Add null validation before use:\n  if (!{var}) {{\n      <<ERROR_RETURN>>\n  }}\n  // safe to use {var} here",
         },
         'resource_leak': {
-            'default': "Ensure {release_func}({resource}) is called on all paths.\nRecommended pattern:\n  {resource_type} {resource} = {alloc_expr};\n  if (!{resource}) return ERROR;\n  // ... use resource ...\ncleanup:\n  {release_func}({resource});",
+            'default': "Ensure {release_func}({resource}) is called on all paths.\nRecommended pattern:\n  {resource_type} {resource} = {alloc_expr};\n  if (!{resource}) <<ERROR_RETURN>>\n  // ... use resource ...\ncleanup:\n  {release_func}({resource});",
         },
         'integer_overflow': {
-            'multiplication': "Validate before multiplying:\n  if ({var} != 0 && {operand} > INT_MAX / {var}) return ERROR_OVERFLOW;\n  result = {var} * {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} * {operand};\n  if (tmp > INT_MAX || tmp < INT_MIN) return ERROR_OVERFLOW;",
-            'subtraction':    "Validate before subtracting:\n  if ({operand} > {var}) return ERROR_UNDERFLOW;  // prevent wrap-below-zero\n  result = {var} - {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} - {operand};\n  if (tmp < INT_MIN || tmp > INT_MAX) return ERROR_OVERFLOW;",
-            'addition':       "Validate before adding:\n  if ({var} > INT_MAX - {operand}) return ERROR_OVERFLOW;\n  result = {var} + {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} + {operand};\n  if (tmp > INT_MAX) return ERROR_OVERFLOW;",
-            'default':        "Validate before the {operation}:\n  // Ensure {var} and {operand} are within safe range before combining them.\n  if ({var} > INT_MAX / 2 || {operand} > INT_MAX / 2) return ERROR_OVERFLOW;\n  result = {var} {operation} {operand};",
+            'multiplication': "Validate before multiplying:\n  if ({var} != 0 && {operand} > INT_MAX / {var}) <<ERROR_RETURN>>\n  result = {var} * {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} * {operand};\n  if (tmp > INT_MAX || tmp < INT_MIN) <<ERROR_RETURN>>",
+            'subtraction':    "Validate before subtracting:\n  if ({operand} > {var}) <<ERROR_RETURN>>  // prevent wrap-below-zero\n  result = {var} - {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} - {operand};\n  if (tmp < INT_MIN || tmp > INT_MAX) <<ERROR_RETURN>>",
+            'addition':       "Validate before adding:\n  if ({var} > INT_MAX - {operand}) <<ERROR_RETURN>>\n  result = {var} + {operand};\nOr use a wider type:\n  int64_t tmp = (int64_t){var} + {operand};\n  if (tmp > INT_MAX) <<ERROR_RETURN>>",
+            'default':        "Validate before the {operation}:\n  // Ensure {var} and {operand} are within safe range before combining them.\n  if ({var} > INT_MAX / 2 || {operand} > INT_MAX / 2) <<ERROR_RETURN>>\n  result = {var} {operation} {operand};",
         },
     }
 
