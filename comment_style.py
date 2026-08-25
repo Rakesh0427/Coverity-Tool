@@ -383,12 +383,27 @@ def _render_integer_overflow(classification: str, checker: str, ctx: Dict, code:
     var = _normalize_var(ctx.get('var') or 'the counter')
 
     if classification == "False positive":
+        if ctx.get('concrete_result') is not None:
+            lhs = ctx.get('lhs_expr') or 'lhs'
+            rhs = ctx.get('rhs_expr') or 'rhs'
+            op = ctx.get('op_token') or '?'
+            return (f"At line {line} in {function}(), the flagged arithmetic resolves to "
+                    f"`{lhs} {op} {rhs}` = {ctx['concrete_result']}. That fits in "
+                    f"`{ctx.get('integer_type', 'int')}`, so no overflow occurs on the reported path. "
+                    f"False positive.")
         reason = _fp_reason_text(ctx, "")
         base = f"The arithmetic at line {line} in {function}() is bounded and cannot overflow"
         if reason:
             return f"{base}: {reason}. False positive."
         return f"{base} the machine representation on the flagged path. False positive."
     if classification == "Bug":
+        if ctx.get('concrete_result') is not None:
+            lhs = ctx.get('lhs_expr') or 'lhs'
+            rhs = ctx.get('rhs_expr') or 'rhs'
+            op = ctx.get('op_token') or '?'
+            return (f"At line {line} in {function}(), the flagged arithmetic resolves to "
+                    f"`{lhs} {op} {rhs}` = {ctx['concrete_result']}. That lies outside the range of "
+                    f"`{ctx.get('integer_type', 'int')}`, so the operation overflows on the reported path.")
         return (f"At line {line} in {function}(), `{var}` is advanced without a maximum-value "
                 f"guard. If it approaches the type's maximum (e.g. UINT_MAX), the increment "
                 "wraps/overflows the counter and the loop/index can escape its intended range.")
@@ -423,6 +438,10 @@ def _render_negative_returns(classification: str, checker: str, ctx: Dict, code:
                              code_start_line: int, line: int, function: str) -> Optional[str]:
     var = _normalize_var(ctx.get('var') or 'the return value')
     if classification == "False positive":
+        if ctx.get('concrete_value') is not None and ctx['concrete_value'] >= 0:
+            return (f"At line {line} in {function}(), `{var}` resolves to {ctx['concrete_value']} before it is used "
+                    f"as a size/index, so the flagged path does not carry a negative error value into the memory "
+                    f"operation. False positive.")
         reason = _fp_reason_text(ctx, "")
         if reason:
             return (f"{var} is validated before it is consumed at line {line} "
@@ -431,6 +450,10 @@ def _render_negative_returns(classification: str, checker: str, ctx: Dict, code:
         return (f"At line {line} in {function}(), the signed return value is checked for a "
                 "negative/error value before being used as a size or index. False positive.")
     if classification == "Bug":
+        if ctx.get('concrete_value') is not None and ctx['concrete_value'] < 0:
+            return (f"At line {line} in {function}(), `{var}` resolves to {ctx['concrete_value']} and is then used "
+                    f"as a size/index. Converting that negative error code to an unsigned quantity yields a very large "
+                    f"value and can drive an out-of-bounds access or huge allocation.")
         return (f"At line {line} in {function}(), a signed return value is used as a size or "
                 f"index without first validating it is >= 0. If {var} returns a negative error "
                 "code, it is cast to a large unsigned value, causing a massive allocation or "

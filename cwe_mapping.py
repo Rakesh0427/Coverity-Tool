@@ -1,5 +1,10 @@
 """CWE / CERT C / OWASP mapping for every Coverity checker in the dispatch table."""
 
+# OWASP Top 10 is a web-application taxonomy and many native-code Coverity
+# checkers do not map cleanly to it. For those cases we say so explicitly
+# instead of forcing an inaccurate label such as "Injection".
+OWASP_NATIVE = "Not directly applicable (native-code / non-web defect)"
+
 # Each entry: cwe_id, cwe_name, cwe_url, cert (CERT C rule), owasp (Top 10 2021), cvss_base
 CWE_MAP = {
     'BUFFER_SIZE': {
@@ -7,7 +12,7 @@ CWE_MAP = {
         'cwe_name': 'Buffer Copy without Checking Size of Input',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/120.html',
         'cert':     'STR31-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '8.1',
     },
     'OVERRUN': {
@@ -15,7 +20,7 @@ CWE_MAP = {
         'cwe_name': 'Out-of-bounds Read',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/125.html',
         'cert':     'ARR30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'OVERRUN_STATIC': {
@@ -23,7 +28,7 @@ CWE_MAP = {
         'cwe_name': 'Out-of-bounds Write',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/787.html',
         'cert':     'ARR30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '9.8',
     },
     'OVERRUN_DYNAMIC': {
@@ -31,7 +36,7 @@ CWE_MAP = {
         'cwe_name': 'Out-of-bounds Write',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/787.html',
         'cert':     'ARR30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '9.8',
     },
     'FORWARD_NULL': {
@@ -39,7 +44,7 @@ CWE_MAP = {
         'cwe_name': 'NULL Pointer Dereference',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/476.html',
         'cert':     'EXP34-C',
-        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'REVERSE_INULL': {
@@ -47,7 +52,7 @@ CWE_MAP = {
         'cwe_name': 'NULL Pointer Dereference',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/476.html',
         'cert':     'EXP34-C',
-        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'INTEGER_OVERFLOW': {
@@ -55,7 +60,7 @@ CWE_MAP = {
         'cwe_name': 'Integer Overflow or Wraparound',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/190.html',
         'cert':     'INT32-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.8',
     },
     'RESOURCE_LEAK': {
@@ -63,7 +68,7 @@ CWE_MAP = {
         'cwe_name': 'Missing Release of Memory after Effective Lifetime',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/401.html',
         'cert':     'MEM31-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'USE_AFTER_FREE': {
@@ -71,7 +76,7 @@ CWE_MAP = {
         'cwe_name': 'Use After Free',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/416.html',
         'cert':     'MEM30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '9.8',
     },
     'DIVIDE_BY_ZERO': {
@@ -79,7 +84,7 @@ CWE_MAP = {
         'cwe_name': 'Divide By Zero',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/369.html',
         'cert':     'INT33-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'UNINIT': {
@@ -87,7 +92,7 @@ CWE_MAP = {
         'cwe_name': 'Use of Uninitialized Variable',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/457.html',
         'cert':     'EXP33-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'DEADCODE': {
@@ -95,7 +100,7 @@ CWE_MAP = {
         'cwe_name': 'Dead Code',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/561.html',
         'cert':     'MSC12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '3.1',
     },
     'STRING_NULL': {
@@ -103,7 +108,7 @@ CWE_MAP = {
         'cwe_name': 'Improper Null Termination',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/170.html',
         'cert':     'STR32-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'SIZEOF_MISMATCH': {
@@ -111,7 +116,7 @@ CWE_MAP = {
         'cwe_name': 'Use of sizeof() on a Pointer Type',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/467.html',
         'cert':     'ARR01-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'SHIFT_OVERFLOW': {
@@ -119,7 +124,7 @@ CWE_MAP = {
         'cwe_name': 'Reliance on Undefined, Unspecified, or Implementation-Defined Behavior',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/758.html',
         'cert':     'INT34-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'NO_BREAK': {
@@ -127,7 +132,7 @@ CWE_MAP = {
         'cwe_name': 'Omitted Break Statement in Switch',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/484.html',
         'cert':     'MSC17-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '4.3',
     },
     'NEGATIVE_RETURNS': {
@@ -135,7 +140,7 @@ CWE_MAP = {
         'cwe_name': 'Improper Input Validation',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/20.html',
         'cert':     'ERR33-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'UNUSED_VALUE': {
@@ -143,7 +148,7 @@ CWE_MAP = {
         'cwe_name': 'Assignment to Variable without Use',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/563.html',
         'cert':     'MSC13-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '3.1',
     },
     'ARRAY_VS_SINGLETON': {
@@ -151,7 +156,7 @@ CWE_MAP = {
         'cwe_name': 'Incorrect Calculation of Buffer Size',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/131.html',
         'cert':     'ARR36-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'CONSTANT_EXPRESSION_RESULT': {
@@ -159,7 +164,7 @@ CWE_MAP = {
         'cwe_name': 'Expression is Always False',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/570.html',
         'cert':     'MSC12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '3.1',
     },
     # --- Extended mappings for checkers in checker_categories that previously returned {} ---
@@ -168,7 +173,7 @@ CWE_MAP = {
         'cwe_name': 'Buffer Copy without Checking Size of Input',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/120.html',
         'cert':     'STR31-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'STRING_OVERFLOW': {
@@ -176,7 +181,7 @@ CWE_MAP = {
         'cwe_name': 'Buffer Copy without Checking Size of Input',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/120.html',
         'cert':     'STR31-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '8.1',
     },
     'TAINTED_STRING': {
@@ -184,7 +189,7 @@ CWE_MAP = {
         'cwe_name': 'Improper Input Validation',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/20.html',
         'cert':     'STR31-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'WRAPPER_OVERRUN': {
@@ -192,7 +197,7 @@ CWE_MAP = {
         'cwe_name': 'Out-of-bounds Write',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/787.html',
         'cert':     'ARR30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '8.1',
     },
     'DOUBLE_FREE': {
@@ -200,7 +205,7 @@ CWE_MAP = {
         'cwe_name': 'Double Free',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/415.html',
         'cert':     'MEM31-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '7.5',
     },
     'FREE_RETURNS': {
@@ -208,7 +213,7 @@ CWE_MAP = {
         'cwe_name': 'Use After Free',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/416.html',
         'cert':     'MEM30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '8.1',
     },
     'WRAPPER_ESCAPE': {
@@ -216,7 +221,7 @@ CWE_MAP = {
         'cwe_name': 'Use After Free',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/416.html',
         'cert':     'MEM30-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'UNINIT_CTOR': {
@@ -224,7 +229,7 @@ CWE_MAP = {
         'cwe_name': 'Use of Uninitialized Variable',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/457.html',
         'cert':     'EXP33-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'UNREACHABLE': {
@@ -232,7 +237,7 @@ CWE_MAP = {
         'cwe_name': 'Dead Code',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/561.html',
         'cert':     'MSC12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '2.7',
     },
     'NULL_RETURNS': {
@@ -240,7 +245,7 @@ CWE_MAP = {
         'cwe_name': 'Unchecked Return Value to NULL Pointer Dereference',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/690.html',
         'cert':     'EXP34-C',
-        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'NULL_DEREF': {
@@ -248,7 +253,7 @@ CWE_MAP = {
         'cwe_name': 'NULL Pointer Dereference',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/476.html',
         'cert':     'EXP34-C',
-        'owasp':    'A06:2021 – Vulnerable and Outdated Components',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '6.5',
     },
     'SIGN_EXTENSION': {
@@ -256,7 +261,7 @@ CWE_MAP = {
         'cwe_name': 'Unexpected Sign Extension',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/194.html',
         'cert':     'INT31-C',
-        'owasp':    'A03:2021 – Injection',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'UNRELEASED_RESOURCE': {
@@ -264,7 +269,7 @@ CWE_MAP = {
         'cwe_name': 'Improper Resource Shutdown or Release',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/404.html',
         'cert':     'FIO42-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'CHECKED_RETURN': {
@@ -272,7 +277,7 @@ CWE_MAP = {
         'cwe_name': 'Incorrect Check or Handling of Exceptional Conditions',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/703.html',
         'cert':     'EXP12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '4.3',
     },
     'CHECKED_QRS': {
@@ -280,7 +285,7 @@ CWE_MAP = {
         'cwe_name': 'Incorrect Check or Handling of Exceptional Conditions',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/703.html',
         'cert':     'EXP12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '4.3',
     },
     'MISSING_BREAK': {
@@ -288,7 +293,7 @@ CWE_MAP = {
         'cwe_name': 'Omitted Break Statement in Switch',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/484.html',
         'cert':     'MSC17-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '4.3',
     },
     'MISSING_LOCK': {
@@ -296,7 +301,7 @@ CWE_MAP = {
         'cwe_name': 'Unrestricted Externally Accessible Lock',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/412.html',
         'cert':     'CON32-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '5.5',
     },
     'NEGATIVE_RELEASE': {
@@ -304,7 +309,7 @@ CWE_MAP = {
         'cwe_name': 'Improper Resource Shutdown or Release',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/404.html',
         'cert':     'FIO42-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '4.3',
     },
     'IDENTICAL_BRANCHES': {
@@ -312,7 +317,7 @@ CWE_MAP = {
         'cwe_name': 'Dead Code',
         'cwe_url':  'https://cwe.mitre.org/data/definitions/561.html',
         'cert':     'MSC12-C',
-        'owasp':    'A05:2021 – Security Misconfiguration',
+        'owasp':    OWASP_NATIVE,
         'cvss_base': '3.1',
     },
 }
