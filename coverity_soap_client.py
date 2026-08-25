@@ -32,6 +32,23 @@ CLASSIFICATION_MAP = {
     "Accepted":       "Bug",
 }
 
+# Coverity's built-in Action attribute values.  The server normally uses the
+# American spelling "Modeling Required"; accept "Modelling Required" on input.
+ACTION_MAP = {
+    "undecided": "Undecided",
+    "fix required": "Fix Required",
+    "fix submitted": "Fix Submitted",
+    "ignore": "Ignore",
+    "modeling required": "Modeling Required",
+    "modelling required": "Modeling Required",
+}
+
+
+def normalize_action(action):
+    raw = str(action or "").strip()
+    key = " ".join(raw.replace("_", " ").replace("-", " ").split()).lower()
+    return ACTION_MAP.get(key, raw)
+
 
 def zeep_available():
     return ZEEP_AVAILABLE
@@ -58,6 +75,49 @@ def _flatten_events(evs):
         flat.append(ev)
         flat.extend(_flatten_events(getattr(ev, "events", None) or []))
     return flat
+
+
+def _defect_state_value(obj, attr_name):
+    """Extract a triage attribute value such as Classification/Action.
+
+    Coverity SOAP/REST responses vary by endpoint/version: sometimes the value
+    is a direct field (``action``), sometimes it is one of the
+    ``defectStateAttributeValues`` entries.  This helper tolerates both shapes.
+    """
+    wanted = str(attr_name or "").strip().lower()
+    if not obj:
+        return ""
+    if isinstance(obj, dict):
+        for key in (attr_name, attr_name.lower(), attr_name.upper()):
+            if obj.get(key) not in (None, ""):
+                return str(obj.get(key) or "")
+        values = obj.get("defectStateAttributeValues") or obj.get("attributeValues") or []
+    else:
+        for key in (attr_name, attr_name.lower(), attr_name[0].lower() + attr_name[1:]):
+            try:
+                val = getattr(obj, key, None)
+            except Exception:
+                val = None
+            if val not in (None, ""):
+                return str(val or "")
+        values = (getattr(obj, "defectStateAttributeValues", None)
+                  or getattr(obj, "attributeValues", None) or [])
+    for av in values or []:
+        if isinstance(av, dict):
+            defi = av.get("attributeDefinitionId") or av.get("attributeDefinition") or {}
+            vali = av.get("attributeValueId") or av.get("attributeValue") or {}
+            name = defi.get("name") if isinstance(defi, dict) else getattr(defi, "name", "")
+            value = vali.get("name") if isinstance(vali, dict) else getattr(vali, "name", "")
+            if str(name or "").strip().lower() == wanted:
+                return str(value or "")
+        else:
+            defi = getattr(av, "attributeDefinitionId", None) or getattr(av, "attributeDefinition", None)
+            vali = getattr(av, "attributeValueId", None) or getattr(av, "attributeValue", None)
+            name = getattr(defi, "name", "") if defi is not None else ""
+            value = getattr(vali, "name", "") if vali is not None else ""
+            if str(name or "").strip().lower() == wanted:
+                return str(value or "")
+    return ""
 
 
 def _unwrap_stream_defects(response):
@@ -206,6 +266,7 @@ def _rest_defect_from_issue(issue, is_v1=False):
         "type": str(issue.get("displayType")
                     or issue.get("checkerSubcategoryLongDescription") or ""),
         "severity": str(issue.get("displayImpact") or ""),
+        "action": normalize_action(_defect_state_value(issue, "Action")),
         "file": filepath,
         "line": line,
         "function": func,
@@ -1385,17 +1446,25 @@ class CoveritySOAPClient:
                 # Impact / severity string (High / Medium / Low)
                 severity_str = str(getattr(d, "displayImpact", "") or "")
 
+                action_str = normalize_action(_defect_state_value(d, "Action"))
+
                 defects.append({"cid": cid, "checker": chk, "file": fpath,
                                 "function": func, "line": line,
-                                "type": type_str, "severity": severity_str})
+                                "type": type_str, "severity": severity_str,
+                                "action": action_str})
             except Exception:
                 continue
         return defects if defects else None
 
     # ------------------------------------------------------------------
-    def update_triage(self, cid_list, triage_store_name, classification, comment):
+    def update_triage(self, cid_list, triage_store_name, classification, comment, action=None):
         """
-        Push classification + comment for each CID in cid_list.
+        Push classification + action + comment for each CID in cid_list.
+
+        ``Action`` is the Coverity triage attribute whose server values include
+        Undecided, Fix Required, Fix Submitted, Ignore and Modeling Required.
+        It is optional for backward compatibility, but the GUI/push pipeline now
+        passes it so Connect receives the same disposition the output file shows.
 
         Returns (success_count, failed_cid_list, error_message_or_None).
         Batches 100 CIDs per SOAP call (server limit).
@@ -1404,6 +1473,7 @@ class CoveritySOAPClient:
             return 0, list(cid_list), "zeep library not installed. Run: pip install zeep"
 
         mapped_cls = CLASSIFICATION_MAP.get(classification, classification)
+        mapped_action = normalize_action(action)
 
         try:
             client = self._get_defect_client()
@@ -1425,6 +1495,11 @@ class CoveritySOAPClient:
                         "attributeValueId":      {"name": comment},
                     },
                 ]
+                if mapped_action:
+                    attr_values.insert(1, {
+                        "attributeDefinitionId": {"name": "Action"},
+                        "attributeValueId":      {"name": mapped_action},
+                    })
                 try:
                     client.service.updateTriageForCIDsInTriageStore(
                         triageStore={"name": triage_store_name},

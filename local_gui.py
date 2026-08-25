@@ -1004,7 +1004,7 @@ class AnalysisPage(Page):
 
             with open(out_csv, "w", newline="", encoding="utf-8") as csvf:
                 writer = csv.writer(csvf)
-                writer.writerow(["CID", "Checker", "Type", "Severity",
+                writer.writerow(["CID", "Checker", "Type", "Severity", "Action",
                                   "File", "Line", "Function",
                                   "Classification", "Comment", "Fix", "Timestamp",
                                   "Category"])
@@ -1205,8 +1205,9 @@ class AnalysisPage(Page):
                         else:
                             needs_review_reason = "low_confidence_or_unhandled"
 
+                    action = cpush.normalize_action(defect.get("action", "")) or cpush.default_action_for_classification(classification)
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    writer.writerow([cid, checker, type_val, sev, filepath, line,
+                    writer.writerow([cid, checker, type_val, sev, action, filepath, line,
                                      func, classification, comment, fix, ts,
                                      category_for_checker(checker)])
                     csvf.flush()
@@ -1216,6 +1217,7 @@ class AnalysisPage(Page):
                         "severity": sev, "file": filepath, "line": line,
                         "line_is_various": line_is_various,
                         "function": func, "classification": classification,
+                        "action": action,
                         "comment": comment, "fix": fix, "confidence": confidence,
                         "source_code": src_code,
                         "source_origin": source_status,
@@ -2084,6 +2086,7 @@ class ResultsPage(Page):
             classification = cls_var.get()
             comment = cmt.get("1.0", "end-1c").strip() or "Manually overridden"
             self._sel_idx["classification"] = classification
+            self._sel_idx["action"] = cpush.default_action_for_classification(classification)
             self._sel_idx["comment"] = comment
             self._sel_idx["accepted"] = False
             # Overrides are a deliberate reviewer decision, so they count as
@@ -2113,8 +2116,9 @@ class ResultsPage(Page):
         os.makedirs(out_dir, exist_ok=True)
         out_file = os.path.join(out_dir, "coverity_final_decisions.csv")
 
+        action = cpush.normalize_action(defect.get("action", "")) or cpush.default_action_for_classification(classification)
         header = ["CID", "Checker", "File", "Line",
-                  "FinalClassification", "FinalComment", "Fix",
+                  "FinalClassification", "FinalAction", "FinalComment", "Fix",
                   "Reviewer", "Timestamp", "Status", "Category"]
 
         status = "Accepted" if accepted else "Overridden"
@@ -2124,6 +2128,7 @@ class ResultsPage(Page):
             "File": defect.get("file", ""),
             "Line": defect.get("line", ""),
             "FinalClassification": classification,
+            "FinalAction": action,
             "FinalComment": comment,
             "Fix": defect.get("fix", ""),
             "Reviewer": reviewer,
@@ -2531,6 +2536,7 @@ class DetailWindow(tk.Toplevel):
             cm = cmt.get("1.0", "end-1c").strip() or "Manually overridden"
 
             self.defect["classification"] = c
+            self.defect["action"]         = cpush.default_action_for_classification(c)
             self.defect["comment"]        = cm
             self.defect["accepted"]       = False
             self.defect["accepted_by"]    = ""
@@ -3270,15 +3276,15 @@ class PushDialog(tk.Toplevel):
         tbl_f = tk.Frame(s3, bg=C_PANEL)
         tbl_f.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
-        cols = ("CID", "ServerCID", "Classification", "Comment", "Checker", "File")
+        cols = ("CID", "ServerCID", "Classification", "Action", "Comment", "Checker", "File")
         self._defect_tree = ttk.Treeview(tbl_f, columns=cols,
                                          show="headings", height=8,
                                          selectmode="browse")
         col_widths = {"CID": 55, "ServerCID": 70, "Classification": 110,
-                      "Comment": 200, "Checker": 120, "File": 140}
+                      "Action": 120, "Comment": 200, "Checker": 120, "File": 140}
         hdrs = {"CID": "CSV CID", "ServerCID": "Server CID",
-                "Classification": "Classification", "Comment": "Comment",
-                "Checker": "Checker", "File": "File"}
+                "Classification": "Classification", "Action": "Action",
+                "Comment": "Comment", "Checker": "Checker", "File": "File"}
         for c in cols:
             self._defect_tree.heading(c, text=hdrs[c], anchor="w")
             self._defect_tree.column(c, width=col_widths[c],
@@ -3301,7 +3307,7 @@ class PushDialog(tk.Toplevel):
 
         self._defect_tree.bind("<Double-1>", self._edit_row)
 
-        tk.Label(s3, text="Double-click a row to edit Classification/Comment.  Green = CID confirmed on server.  Red = not found (will be skipped).",
+        tk.Label(s3, text="Double-click a row to edit Classification/Action/Comment.  Green = CID confirmed on server.  Red = not found (will be skipped).",
                  font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8", anchor="w"
                  ).pack(fill="x", padx=10, pady=(0, 6))
 
@@ -3474,11 +3480,14 @@ class PushDialog(tk.Toplevel):
                        row.get("classification") or "")
             cmt     = (row.get("Comment") or row.get("FinalComment") or
                        row.get("comment") or "")
+            action  = cpush.normalize_action(row.get("Action") or row.get("FinalAction") or
+                                             row.get("action") or "") or cpush.default_action_for_classification(cls)
             checker = row.get("Checker") or row.get("checker") or ""
             fpath   = row.get("File") or row.get("file") or ""
             if cid and cls:
                 valid.append({
                     "cid": int(cid), "classification": cls,
+                    "action": action,
                     "comment": cmt, "checker": checker, "file": fpath,
                 })
 
@@ -3495,7 +3504,7 @@ class PushDialog(tk.Toplevel):
 
         if not valid:
             self._csv_lbl.configure(
-                text="✗ No valid rows found. CSV must have CID + Classification columns.",
+                text="✗ No valid rows found. CSV must have CID + Classification columns (Action is optional).", 
                 fg=C_BUG)
         else:
             from collections import Counter
@@ -3508,7 +3517,7 @@ class PushDialog(tk.Toplevel):
                 tag = r["classification"] if r["classification"] in CLASS_COLOR else ""
                 self._defect_tree.insert("", "end", iid=str(r["cid"]),
                     tags=(tag,),
-                    values=(r["cid"], "", r["classification"],
+                    values=(r["cid"], "", r["classification"], r["action"],
                             r["comment"][:80], r["checker"],
                             os.path.basename(r["file"])))
         self._refresh_push_btn()
@@ -3628,8 +3637,8 @@ class PushDialog(tk.Toplevel):
             return
         iid  = sel[0]
         vals = self._defect_tree.item(iid)["values"]
-        # cols: CID(0), ServerCID(1), Classification(2), Comment(3), Checker(4), File(5)
-        cid, cur_cls, cur_cmt = vals[0], vals[2], vals[3]
+        # cols: CID(0), ServerCID(1), Classification(2), Action(3), Comment(4), Checker(5), File(6)
+        cid, cur_cls, cur_action, cur_cmt = vals[0], vals[2], vals[3], vals[4]
 
         # Find full comment from csv_rows (table truncates to 80 chars)
         full_cmt = next(
@@ -3638,11 +3647,11 @@ class PushDialog(tk.Toplevel):
 
         win = tk.Toplevel(self)
         win.title(f"Edit CID {cid}")
-        win.geometry("480x260")
+        win.geometry("500x320")
         win.configure(bg=C_BG)
         win.grab_set()
 
-        tk.Label(win, text=f"CID {cid}  —  {vals[3]}",
+        tk.Label(win, text=f"CID {cid}  —  {cur_cmt}",
                  font=("Segoe UI", 11, "bold"), bg=C_BG, fg=C_ACCENT
                  ).pack(anchor="w", padx=20, pady=(16, 8))
 
@@ -3658,6 +3667,16 @@ class PushDialog(tk.Toplevel):
                               width=18, font=("Segoe UI", 9))
         cls_cb.pack(side="left")
 
+        action_var = tk.StringVar(value=cur_action or cpush.default_action_for_classification(cur_cls))
+        action_f = tk.Frame(win, bg=C_BG)
+        action_f.pack(fill="x", padx=20, pady=4)
+        tk.Label(action_f, text="Action", width=14, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_SUBTEXT
+                 ).pack(side="left")
+        ttk.Combobox(action_f, textvariable=action_var, state="readonly",
+                     values=cpush.ACTION_VALUES, width=18,
+                     font=("Segoe UI", 9)).pack(side="left")
+
         tk.Label(win, text="Comment", font=("Segoe UI", 9, "bold"),
                  bg=C_BG, fg=C_SUBTEXT).pack(anchor="w", padx=20, pady=(8, 2))
         cmt_box = tk.Text(win, height=4, bg="#FFFFFF", fg=C_TEXT,
@@ -3669,16 +3688,18 @@ class PushDialog(tk.Toplevel):
 
         def _save():
             new_cls = cls_var.get()
+            new_action = cpush.normalize_action(action_var.get()) or cpush.default_action_for_classification(new_cls)
             new_cmt = cmt_box.get("1.0", "end-1c").strip()
             for r in self._csv_rows:
                 if r["cid"] == int(cid):
                     r["classification"] = new_cls
+                    r["action"]         = new_action
                     r["comment"]        = new_cmt
                     break
-            # Preserve existing tags (matched/unmatched); just update classification+comment cols
+            # Preserve existing tags (matched/unmatched); just update editable cols
             existing_tags = self._defect_tree.item(iid)["tags"]
             self._defect_tree.item(iid, tags=existing_tags,
-                values=(vals[0], vals[1], new_cls, new_cmt[:80], vals[4], vals[5]))
+                values=(vals[0], vals[1], new_cls, new_action, new_cmt[:80], vals[5], vals[6]))
             win.destroy()
 
         tk.Button(win, text="Save", command=_save,
@@ -3720,7 +3741,7 @@ class PushDialog(tk.Toplevel):
                         if self._defect_tree.exists(iid):
                             vals = self._defect_tree.item(iid)["values"]
                             self._defect_tree.item(iid, tags=("push_fail",),
-                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5]))
+                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
                     self.after(0, _mark_skip)
                     def _tick_skip(done=i + 1):
                         self._progress_lbl.configure(text=f"Pushing {done}/{total}…")
@@ -3729,7 +3750,8 @@ class PushDialog(tk.Toplevel):
 
                 ok, _, err = self._client.update_triage(
                     [push_cid], store,
-                    row["classification"], row["comment"])
+                    row["classification"], row["comment"],
+                    action=row.get("action") or cpush.default_action_for_classification(row.get("classification")))
                 if ok:
                     pushed_ok += 1
                     def _mark_ok(cid=row["cid"]):
@@ -3737,7 +3759,7 @@ class PushDialog(tk.Toplevel):
                         if self._defect_tree.exists(iid):
                             vals = self._defect_tree.item(iid)["values"]
                             self._defect_tree.item(iid, tags=("pushed",),
-                                values=(f"✓ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5]))
+                                values=(f"✓ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
                     self.after(0, _mark_ok)
                 else:
                     pushed_fail += 1
@@ -3748,7 +3770,7 @@ class PushDialog(tk.Toplevel):
                         if self._defect_tree.exists(iid):
                             vals = self._defect_tree.item(iid)["values"]
                             self._defect_tree.item(iid, tags=("push_fail",),
-                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5]))
+                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
                     self.after(0, _mark_fail)
 
                 def _tick(done=i + 1):
@@ -3948,9 +3970,9 @@ class DirectPushDialog(tk.Toplevel):
         # Preview table
         tbl_f = tk.Frame(s3, bg=C_PANEL)
         tbl_f.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        cols = ("CID", "ServerCID", "Classification", "Comment", "Checker", "File")
+        cols = ("CID", "ServerCID", "Classification", "Action", "Comment", "Checker", "File")
         widths = {"CID": 60, "ServerCID": 75, "Classification": 110,
-                  "Comment": 220, "Checker": 130, "File": 140}
+                  "Action": 120, "Comment": 220, "Checker": 130, "File": 140}
         self._tree = ttk.Treeview(tbl_f, columns=cols, show="headings",
                                   height=9, selectmode="browse")
         for c in cols:
@@ -3969,8 +3991,9 @@ class DirectPushDialog(tk.Toplevel):
         self._tree.tag_configure("unmatched", background="#FEE2E2")
         self._tree.tag_configure("pushed", foreground="#16A34A")
         self._tree.tag_configure("push_fail", foreground="#DC2626")
+        self._tree.bind("<Double-1>", self._edit_row)
 
-        tk.Label(s3, text="Green = CID confirmed on the server.  Red = not found "
+        tk.Label(s3, text="Double-click a row to edit Classification/Action/Comment. Green = CID confirmed on the server.  Red = not found "
                           "(skipped).  Validation is required before pushing.",
                  font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8", anchor="w"
                  ).pack(fill="x", padx=10, pady=(0, 6))
@@ -4014,13 +4037,85 @@ class DirectPushDialog(tk.Toplevel):
         for row in self._rows:
             tag = row.classification if row.classification in CLASS_COLOR else ""
             self._tree.insert("", "end", iid=str(row.cid), tags=(tag,),
-                              values=(row.cid, "", row.classification,
+                              values=(row.cid, "", row.classification, row.server_action,
                                       row.comment.replace("\n", " ")[:90],
                                       row.checker, os.path.basename(row.file)))
         total = len(self._results)
         self._count_lbl.configure(
             text=f"{len(self._rows)} of {total} defect(s) selected for push")
         self._refresh_buttons()
+
+    def _edit_row(self, _event=None):
+        """Allow the reviewer to choose Coverity Action before direct push."""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        vals = list(self._tree.item(iid)["values"])
+        # cols: CID, ServerCID, Classification, Action, Comment, Checker, File
+        try:
+            cid = int(str(vals[0]).replace("✓", "").replace("✗", "").strip())
+        except Exception:
+            return
+        row = next((r for r in self._rows if r.cid == cid), None)
+        if row is None:
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Edit CID {cid}")
+        win.geometry("520x340")
+        win.configure(bg=C_BG)
+        win.grab_set()
+
+        tk.Label(win, text=f"CID {cid}",
+                 font=("Segoe UI", 11, "bold"), bg=C_BG, fg=C_ACCENT
+                 ).pack(anchor="w", padx=20, pady=(16, 8))
+
+        cls_var = tk.StringVar(value=row.classification)
+        cls_f = tk.Frame(win, bg=C_BG)
+        cls_f.pack(fill="x", padx=20, pady=4)
+        tk.Label(cls_f, text="Classification", width=14, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_SUBTEXT
+                 ).pack(side="left")
+        ttk.Combobox(cls_f, textvariable=cls_var, state="readonly",
+                     values=["Bug", "False positive", "Intentional", "Needs review"],
+                     width=20, font=("Segoe UI", 9)).pack(side="left")
+
+        action_var = tk.StringVar(value=row.server_action)
+        action_f = tk.Frame(win, bg=C_BG)
+        action_f.pack(fill="x", padx=20, pady=4)
+        tk.Label(action_f, text="Action", width=14, anchor="w",
+                 font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_SUBTEXT
+                 ).pack(side="left")
+        ttk.Combobox(action_f, textvariable=action_var, state="readonly",
+                     values=cpush.ACTION_VALUES, width=20,
+                     font=("Segoe UI", 9)).pack(side="left")
+
+        tk.Label(win, text="Comment", font=("Segoe UI", 9, "bold"),
+                 bg=C_BG, fg=C_SUBTEXT).pack(anchor="w", padx=20, pady=(8, 2))
+        cmt_box = tk.Text(win, height=5, bg="#FFFFFF", fg=C_TEXT,
+                          insertbackground=C_TEXT, relief="flat",
+                          font=("Segoe UI", 9), borderwidth=1,
+                          highlightthickness=1, highlightbackground=C_BORDER)
+        cmt_box.pack(fill="x", padx=20)
+        cmt_box.insert("end", row.comment)
+
+        def _save():
+            row.classification = cls_var.get()
+            row.action = cpush.normalize_action(action_var.get()) or cpush.default_action_for_classification(row.classification)
+            row.comment = cmt_box.get("1.0", "end-1c").strip()
+            existing_tags = self._tree.item(iid)["tags"]
+            self._tree.item(iid, tags=existing_tags,
+                            values=(vals[0], vals[1], row.classification,
+                                    row.server_action,
+                                    row.comment.replace("\n", " ")[:90],
+                                    row.checker, os.path.basename(row.file)))
+            win.destroy()
+
+        tk.Button(win, text="Save", command=_save,
+                  bg=C_ACCENT, fg="#FFFFFF", relief="flat",
+                  font=("Segoe UI", 10, "bold"), padx=16, pady=6,
+                  cursor="hand2").pack(pady=12)
 
     def _refresh_buttons(self):
         connected = self._client is not None

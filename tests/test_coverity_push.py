@@ -18,8 +18,8 @@ class FakeClient:
         self.raise_exc = raise_exc
         self.understate_success = understate_success
 
-    def update_triage(self, cid_list, triage_store_name, classification, comment):
-        self.calls.append((list(cid_list), triage_store_name, classification, comment))
+    def update_triage(self, cid_list, triage_store_name, classification, comment, action=None):
+        self.calls.append((list(cid_list), triage_store_name, classification, comment, action))
         if self.raise_exc:
             raise RuntimeError(self.raise_exc)
         failed = [c for c in cid_list if c in self.fail_cids]
@@ -98,6 +98,17 @@ def test_duplicate_cids_collapse_to_last():
     assert len(rows) == 1 and rows[0].classification == "Intentional"
 
 
+def test_action_defaults_from_classification_when_missing():
+    assert cp.build_push_rows([defect(1, cls="Bug")])[0].server_action == "Fix Required"
+    assert cp.build_push_rows([defect(2, cls="False positive")])[0].server_action == "Ignore"
+    assert cp.build_push_rows([defect(3, cls="Needs review")])[0].server_action == "Undecided"
+
+
+def test_action_is_read_and_normalized_from_output_rows():
+    rows = cp.build_push_rows([defect(1, action="modelling required")])
+    assert rows[0].server_action == "Modeling Required"
+
+
 # --------------------------------------------------------------------------- #
 # validate_rows
 # --------------------------------------------------------------------------- #
@@ -135,7 +146,7 @@ def test_rows_sharing_classification_and_comment_batch_together():
     rows = cp.build_push_rows([defect(1, comment="same"), defect(2, comment="same")],
                               stamp_comment=False)
     batches = cp.group_rows(rows)
-    assert len(batches) == 1 and len(batches[0][2]) == 2
+    assert len(batches) == 1 and len(batches[0][3]) == 2
 
 
 def test_differing_comments_are_separate_calls():
@@ -147,7 +158,7 @@ def test_batches_respect_the_hundred_cid_server_limit():
     rows = cp.build_push_rows(
         [defect(i, comment="same") for i in range(1, 251)], stamp_comment=False)
     batches = cp.group_rows(rows)
-    assert [len(b[2]) for b in batches] == [100, 100, 50]
+    assert [len(b[3]) for b in batches] == [100, 100, 50]
 
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +178,7 @@ def test_successful_push_marks_every_row():
     assert rep.ok and len(rep.succeeded) == 2
     assert all(r.status == "✓" for r in rows)
     assert client.calls[0][1] == "MyStore"
+    assert client.calls[0][4] == "Fix Required"
 
 
 def test_partial_failure_is_reported_per_cid():
