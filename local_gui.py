@@ -1591,7 +1591,7 @@ class ResultsPage(Page):
         self._detail_comment.bind("<Control-a>", _select_all_text)
         self._detail_comment.pack(fill="both", expand=True, padx=14, pady=(2, 6))
 
-        self._fix_label = tk.Label(mid, text="Proposed Fix",
+        self._fix_label = tk.Label(mid, text="Source-validated Proposed Fix",
                  font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_ACCENT)
         self._fix_box = tk.Text(mid,
             height=4, bg="#EFF6FF", fg=C_TEXT, font=("Consolas", 9),
@@ -2252,7 +2252,7 @@ class DetailWindow(tk.Toplevel):
         if not is_accepted and cls in ("Bug", "Needs review"):
             fix_text = defect.get("fix", "")
             if fix_text and fix_text not in ("No fix required.", "Manual review required."):
-                tk.Label(left, text="Proposed Fix",
+                tk.Label(left, text="Source-validated Proposed Fix",
                     font=("Segoe UI", 10, "bold"), bg=C_PANEL, fg=C_ACCENT
                 ).pack(anchor="w", padx=16, pady=(6, 2))
                 fix_frame = tk.Frame(left, bg="#EFF6FF")
@@ -3314,7 +3314,7 @@ class PushDialog(tk.Toplevel):
         # ── Footer buttons ──────────────────────────────────────────────
         foot = tk.Frame(body, bg=C_BG)
         foot.pack(fill="x", padx=20, pady=(10, 20))
-        tk.Button(foot, text="Cancel", command=self.destroy,
+        tk.Button(foot, text="Close", command=self.destroy,
                   bg=C_CARD, fg=C_TEXT, relief="flat",
                   font=("Segoe UI", 10), padx=14, pady=6,
                   cursor="hand2").pack(side="left")
@@ -3792,8 +3792,9 @@ class PushDialog(tk.Toplevel):
                 getattr(messagebox, icon)(
                     "Push Complete" if pushed_fail == 0 else "Push Finished with Errors",
                     msg, parent=self)
-                if pushed_fail == 0:
-                    self.destroy()
+                # Keep the dialog open after acknowledgement so the user can
+                # review the per-defect status in the table. It is closed only
+                # when the user chooses Close (or uses the window close control).
             self.after(0, _done)
 
         threading.Thread(target=_worker, daemon=True).start()
