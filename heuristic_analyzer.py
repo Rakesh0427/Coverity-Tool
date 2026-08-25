@@ -2207,6 +2207,148 @@ def _analyze_buffer_size(code: str, sub_checker: str, events: List[Dict],
     return decision.classification, comment, fix, decision.confidence
 
 
+# ---------------------------------------------------------------------------
+# Loop-counter awareness for OVERRUN triage
+#
+# `for (idx = E_FIRST; idx <= E_LAST; idx++) ... arr[idx] ...`: the nearest
+# assignment to `idx` before the flagged access is the loop *initialiser*,
+# which can hold an in-range value even though the loop's terminal iteration
+# overruns the array. The initialiser alone must therefore never prove an
+# in-bounds access for a counter the function mutates — the loop's terminal
+# bound decides instead.
+# ---------------------------------------------------------------------------
+
+
+def _strip_c_comments(text: str) -> str:
+    text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
+    text = re.sub(r'//[^\n]*', ' ', text)
+    return text
+
+
+def _index_mutated_in_function(snippet: str, var: str) -> bool:
+    """True when `var` is a loop counter: incremented/decremented,
+    compound-assigned, or re-assigned via ``i = i + n`` anywhere in the
+    function snippet.
+
+    A mutated variable's nearest preceding plain assignment (typically the
+    ``for``-header initialiser) cannot be assumed to hold at the flagged
+    access — later loop iterations can carry it past that value.
+    """
+    if not snippet or not var or not re.match(r'^[A-Za-z_]\w*$', var):
+        return False
+    body = _strip_c_comments(snippet)
+    v = re.escape(var)
+    patterns = (
+        rf'\b{v}\s*(?:\+\+|--)',            # i++  i--
+        rf'(?:\+\+|--)\s*{v}\b',            # ++i  --i
+        rf'\b{v}\s*(?:\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)',    # i += n ...
+        rf'\b{v}\s*=\s*{v}\s*(?:\+|-|\*|/|%|<<|>>|&|\||\^)',    # i = i + n
+    )
+    return any(re.search(p, body) for p in patterns)
+
+
+def _split_top_level_semicolons(text: str) -> List[str]:
+    """Split on semicolons that are not nested inside parentheses."""
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for c in text:
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        if c == ';' and depth == 0:
+            parts.append(''.join(cur))
+            cur = []
+        else:
+            cur.append(c)
+    parts.append(''.join(cur))
+    return parts
+
+
+def _extract_loop_headers(snippet: str) -> List[Tuple[str, str]]:
+    """Return (kind, condition_text) for every for/while header in snippet.
+
+    Uses balanced-paren scanning so multi-line headers and casts inside the
+    clauses (e.g. ``for (i = (unsigned)E_A; i <= (unsigned)E_B; i++)``) do
+    not truncate the extraction.
+    """
+    out: List[Tuple[str, str]] = []
+    for kw in re.finditer(r'\b(for|while)\s*\(', snippet):
+        kind = kw.group(1)
+        depth = 0
+        i = kw.end() - 1
+        end = i
+        while i < len(snippet):
+            c = snippet[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+            i += 1
+        inner = snippet[kw.end():end]
+        if kind == 'for':
+            clauses = _split_top_level_semicolons(inner)
+            cond = clauses[1] if len(clauses) >= 3 else inner
+        else:
+            cond = inner
+        out.append((kind, cond.strip()))
+    return out
+
+
+def _loop_bound_assessment(code: str, idx_var: str, arr_name: str, arr_size: int,
+                           resolve_constant) -> Tuple[str, str]:
+    """Assess every for/while bound on `idx_var` against `arr_size`.
+
+    For a loop counter the decisive bound is the loop's terminal value, not
+    the initialiser: ``for (i = E_HIGH; i <= E_LOW; i++)`` is in range on the
+    first iteration and overruns on the last one whenever ``E_LOW`` reaches
+    the array size. Returns ('safe'|'unsafe'|'', explanation); '' means no
+    loop bound on `idx_var` could be resolved.
+    """
+    if not code or not idx_var or not re.match(r'^[A-Za-z_]\w*$', idx_var) or arr_size <= 0:
+        return '', ''
+    body = _strip_c_comments(code)
+    v = re.escape(idx_var)
+    cast = r'(?:\(\s*[\w\s]+?\s*\)\s*)?'      # optional C cast before the bound
+    patterns = (
+        (rf'\b{v}\b\s*(<=|<)\s*{cast}(\w+)', 'fwd'),   # i <= N / i < N
+        (rf'{cast}(\w+)\s*(>=|>)\s*\b{v}\b', 'rev'),   # N >= i / N > i
+    )
+    safe_explanation = ''
+    for _kind, cond in _extract_loop_headers(body):
+        for pat, orient in patterns:
+            m = re.search(pat, cond)
+            if not m:
+                continue
+            if orient == 'fwd':
+                op, tok = m.group(1), m.group(2).strip()
+            else:
+                op, tok = m.group(2), m.group(1).strip()
+            if tok == idx_var:
+                continue
+            tok = re.sub(r'[uUlL]+$', '', tok)   # drop 7u / 100L style suffixes
+            limit = int(tok) if tok.isdigit() else resolve_constant(tok)
+            if limit is None:
+                continue
+            strict = op in ('<', '>')
+            max_reach = limit - 1 if strict else limit
+            cond_txt = re.sub(r'\s+', ' ', cond).strip()
+            if max_reach >= arr_size:
+                return 'unsafe', (
+                    f"the loop bound `{cond_txt}` lets `{idx_var}` reach index {max_reach}, "
+                    f"past the end of the {arr_size}-element `{arr_name}` "
+                    f"(valid indices [0, {arr_size - 1}])")
+            safe_explanation = (
+                f"the loop bound `{cond_txt}` caps `{idx_var}` at {max_reach}, "
+                f"within [0, {arr_size - 1}] of `{arr_name}`")
+            break
+    return ('safe', safe_explanation) if safe_explanation else ('', '')
+
+
 def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
                            concrete_idx, arr_size, arr_size_expr, arr_name,
                            guard_line, covers_all_paths,
@@ -2293,7 +2435,15 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
             f"`{ub_str}`, but the bound could not be tied to `{arr_name}`'s size; the guard's "
             f"protective value is not provable from the extracted snippet.")
 
-    if covers_all_paths:
+    # Dominance alone is not a bound: a guard that merely mentions idx_var
+    # (e.g. the index appearing inside a subscripted value in the condition)
+    # does not restrict a counter. Require an actual bound-shaped comparison
+    # on idx_var before claiming safety from dominance.
+    bound_shaped = re.search(
+        rf'\b{re.escape(idx_var)}\b\s*(?:<=|>=|<|>|==)\s*\w'
+        rf'|\w\s*(?:<=|>=|<|>)\s*\b{re.escape(idx_var)}\b',
+        guard_cond or '')
+    if covers_all_paths and bound_shaped:
         return "safe", (
             f"Guard `{guard_cond}` at line {guard_line} references `{idx_var}` and dominates "
             f"all paths; control-flow dominance justifies treating the access as in range.")
@@ -2678,6 +2828,28 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         concrete_idx = resolved_assign_value
         concrete_idx_source = f"the assignment `{idx_var} = {assign_expr}`"
 
+    # ------------------------------------------------------------------
+    # Loop-counter guard. A locally resolved assignment proves only the
+    # value the index held at the assignment site. When the function also
+    # mutates the index (`ui_prty_idx++` in a for header, `i += n`, ...),
+    # later iterations can carry it past that value — the classic shape is
+    # `for (idx = E_FIRST; idx <= E_LAST; idx++) ... arr[idx] ...` where the
+    # initialiser is in range but the terminal value runs one past the end.
+    # In that case the initialiser must not be treated as decisive proof of
+    # safety; the loop's terminal bound decides instead. (Coverity's own
+    # trace value, when present, already reflects the flagged path and is
+    # kept.)
+    # ------------------------------------------------------------------
+    loop_guard_status, loop_guard_explanation = '', ''
+    if (concrete_idx is not None
+            and concrete_idx_source.startswith('the assignment')
+            and _index_mutated_in_function(code, idx_var)):
+        loop_guard_status, loop_guard_explanation = _loop_bound_assessment(
+            code, idx_var, arr_name, arr_size,
+            lambda tok: _resolve_integer_constant(tok, resolution_sources))
+        concrete_idx = None
+        concrete_idx_source = ''
+
     if guard_limit and not str(guard_limit).isdigit() and resolved_guard_limit is not None:
         guard_limit = str(resolved_guard_limit)
 
@@ -2760,6 +2932,18 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         bool(ctx.get('guard_covers_all_paths', False)),
         concrete_idx_source)
 
+    # A resolved loop bound is decisive for a loop counter: it bounds every
+    # iteration, not just the first. Prefer it over weaker guard evidence,
+    # and let a provably overrun bound convert the verdict to Bug.
+    if loop_guard_status == 'unsafe':
+        guard_status, guard_explanation = 'unsafe', loop_guard_explanation
+        if decision.classification != 'Bug':
+            decision = type(decision)(
+                classification='Bug', confidence=0.80,
+                reasoning=decision.reasoning + [loop_guard_explanation])
+    elif loop_guard_status == 'safe' and guard_status in ('none', 'irrelevant', 'unknown'):
+        guard_status, guard_explanation = 'safe', loop_guard_explanation
+
     # A locally/cross-file resolved constant can prove that the *inner* access is
     # in range even when Coverity flagged a larger nested expression. Do not keep
     # a Bug verdict solely on that inner subscript when the remaining question is
@@ -2789,10 +2973,15 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                                           [f"Guard at line {guard_line} references `{idx_var}` but allows "
                                            f"an out-of-bounds value for `{arr_name}`."])
         elif has_real_names and not inner_index_proven_safe:
+            if guard_status == 'irrelevant':
+                why = (f"Real array access `{arr_name}[{idx_var}]` found; the nearby "
+                       f"guard does not reference `{idx_var}`.")
+            else:
+                why = (f"Real array access `{arr_name}[{idx_var}]` found; the nearby guard "
+                       f"references `{idx_var}` but does not provably bound it within "
+                       f"`{arr_name}`'s range.")
             decision = type(decision)(classification='Bug', confidence=0.60,
-                                      reasoning=decision.reasoning +
-                                      [f"Real array access `{arr_name}[{idx_var}]` found; the nearby "
-                                       f"guard does not reference `{idx_var}`."])
+                                      reasoning=decision.reasoning + [why])
         elif has_real_names:
             decision = type(decision)(classification='Needs review', confidence=0.55,
                                       reasoning=decision.reasoning +
@@ -3041,8 +3230,19 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             reasons.append(f"{concrete_idx_source} places `{idx_var}` at {concrete_idx}, within the declared bounds [0, {arr_size-1}] of `{arr_name}`")
         if guard_explanation:
             # guard_explanation already ends with a sentence; strip the trailing
-            # period so the wrapper can close it cleanly.
-            reasons.append(guard_explanation.rstrip('.'))
+            # period so the wrapper can close it cleanly. Skip it when it
+            # restates the same concrete-index fact as an existing reason
+            # (otherwise the comment repeats the same clause twice).
+            g_txt = guard_explanation.rstrip('.')
+            dup = False
+            if concrete_idx is not None and idx_var:
+                for existing in reasons:
+                    if (idx_var in existing and str(concrete_idx) in existing
+                            and idx_var in g_txt and str(concrete_idx) in g_txt):
+                        dup = True
+                        break
+            if not dup:
+                reasons.append(g_txt)
         if not reasons and arr_size_expr and arr_name not in ('the buffer',):
             reasons.append(f"`{arr_name}` is declared with size `{arr_size_expr}`")
         if ctx.get('safe_api_note'):
