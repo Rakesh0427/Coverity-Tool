@@ -10,6 +10,7 @@ v7.0 — Expert CWE Edition (senior review perspective)
   • Retained v6 decision thresholds; confidence remains calibrated
 """
 import re
+import ast
 import subprocess
 import json
 import os
@@ -146,8 +147,8 @@ def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
         else:
             fix = lines[0][:220] + cwe_tag
         return fix.strip()
-    # Only tag concise fixes that look like code, not generic "No fix required"
-    if fix.lower().startswith("no fix"):
+    # Never decorate terminal disposition text as if it were a code patch.
+    if fix.lower().startswith("no fix") or fix.lower().startswith("manual review required"):
         return fix.strip()
     if cwe_tag and len(fix) < 300:
         # append tag as code comment, not sentence
@@ -531,8 +532,474 @@ def _extract_index_flow(code: str, idx_var: str, access_line: int, code_start_li
     
     return result
 
+
+def _line_text_at(code: str, target_line: int, code_start_line: int = 1) -> str:
+    offset = target_line - code_start_line
+    lines = code.splitlines()
+    return lines[offset].strip() if 0 <= offset < len(lines) else ''
+
+
+_INTEGRAL_TYPE_BOUNDS = {
+    'uint8_t': (0, 2**8 - 1, 8, True),
+    'int8_t': (-(2**7), 2**7 - 1, 8, False),
+    'uint16_t': (0, 2**16 - 1, 16, True),
+    'int16_t': (-(2**15), 2**15 - 1, 16, False),
+    'uint32_t': (0, 2**32 - 1, 32, True),
+    'int32_t': (-(2**31), 2**31 - 1, 32, False),
+    'uint64_t': (0, 2**64 - 1, 64, True),
+    'int64_t': (-(2**63), 2**63 - 1, 64, False),
+    'size_t': (0, 2**64 - 1, 64, True),
+    'char': (-(2**7), 2**7 - 1, 8, False),
+    'unsigned char': (0, 2**8 - 1, 8, True),
+    'short': (-(2**15), 2**15 - 1, 16, False),
+    'unsigned short': (0, 2**16 - 1, 16, True),
+    'int': (-(2**31), 2**31 - 1, 32, False),
+    'unsigned int': (0, 2**32 - 1, 32, True),
+    'long': (-(2**63), 2**63 - 1, 64, False),
+    'unsigned long': (0, 2**64 - 1, 64, True),
+    'long long': (-(2**63), 2**63 - 1, 64, False),
+    'unsigned long long': (0, 2**64 - 1, 64, True),
+}
+
+
+def _infer_integral_decl_bounds(var_name: str, sources: List[str]) -> Dict:
+    """Best-effort integral type inference for a local/parameter variable."""
+    default = {'type_text': '', 'min': -(2**31), 'max': 2**31 - 1, 'bits': 32, 'unsigned': False}
+    if not var_name:
+        return default
+    pat = re.compile(
+        rf'\b((?:const\s+|static\s+|volatile\s+|signed\s+|unsigned\s+|long\s+|short\s+|'
+        rf'int\s+|char\s+|size_t\s+|uint\d+_t\s+|int\d+_t\s+)+)\**\s*{re.escape(var_name)}\b')
+    for source in sources:
+        for line in (source or '').splitlines():
+            if var_name not in line:
+                continue
+            m = pat.search(line)
+            if not m:
+                continue
+            type_text = ' '.join(m.group(1).split()).strip()
+            for key, bounds in sorted(_INTEGRAL_TYPE_BOUNDS.items(), key=lambda kv: len(kv[0]), reverse=True):
+                if type_text == key or type_text.endswith(key):
+                    lo, hi, bits, is_unsigned = bounds
+                    return {'type_text': type_text, 'min': lo, 'max': hi, 'bits': bits, 'unsigned': is_unsigned}
+            if 'unsigned' in type_text:
+                lo, hi, bits, is_unsigned = _INTEGRAL_TYPE_BOUNDS['unsigned int']
+                return {'type_text': type_text, 'min': lo, 'max': hi, 'bits': bits, 'unsigned': is_unsigned}
+            if any(tok in type_text for tok in ('int', 'long', 'short', 'char')):
+                lo, hi, bits, is_unsigned = _INTEGRAL_TYPE_BOUNDS['int']
+                return {'type_text': type_text, 'min': lo, 'max': hi, 'bits': bits, 'unsigned': is_unsigned}
+    return default
+
+
+def _extract_binary_operation(text: str, operators: Tuple[str, ...]) -> Optional[Tuple[str, str, str]]:
+    """Extract a simple binary operation from a source line / RHS expression."""
+    src = (text or '').strip().rstrip(';')
+    if not src:
+        return None
+    assign_m = re.search(r'(?<![=!<>])=(?!=)\s*(.+)$', src)
+    if assign_m:
+        src = assign_m.group(1).strip()
+    src = src.strip('() ')
+    for op in operators:
+        if op in ('<<', '>>'):
+            pat = re.compile(rf'(.+?)\s*{re.escape(op)}\s*(.+)')
+        elif op == '*':
+            pat = re.compile(r'(.+?)\s*\*\s*(.+)')
+        elif op == '/':
+            pat = re.compile(r'(.+?)\s*/\s*(.+)')
+        elif op == '%':
+            pat = re.compile(r'(.+?)\s%\s*(.+)')
+        elif op == '+':
+            pat = re.compile(r'(.+?)\s*\+\s*(.+)')
+        else:
+            pat = re.compile(r'(.+?)\s*-\s*(.+)')
+        m = pat.search(src)
+        if m:
+            lhs = m.group(1).strip().strip('()')
+            rhs = m.group(2).strip().strip('()')
+            if lhs and rhs:
+                return lhs, op, rhs
+    return None
+
+
+def _guard_proves_nonzero(var_name: str, cond: str) -> bool:
+    cond = cond or ''
+    if not var_name or not cond:
+        return False
+    pats = (
+        rf'\b{re.escape(var_name)}\b\s*!=\s*0\b',
+        rf'\b{re.escape(var_name)}\b\s*>\s*0\b',
+        rf'\b{re.escape(var_name)}\b\s*>=\s*1\b',
+        rf'\b0\b\s*<\s*\b{re.escape(var_name)}\b',
+        rf'\b1\b\s*<=\s*\b{re.escape(var_name)}\b',
+    )
+    return any(re.search(p, cond) for p in pats)
+
+
+def _guard_rejects_negative(var_name: str, cond: str) -> bool:
+    cond = cond or ''
+    if not var_name or not cond:
+        return False
+    pats = (
+        rf'\b{re.escape(var_name)}\b\s*>=\s*0\b',
+        rf'\b{re.escape(var_name)}\b\s*>\s*-1\b',
+        rf'\b0\b\s*<=\s*\b{re.escape(var_name)}\b',
+        rf'\b{re.escape(var_name)}\b\s*!=\s*EOF\b',
+    )
+    return any(re.search(p, cond) for p in pats)
+
+
+def _resolve_var_value_before_line(code: str, var_name: str, access_line: int,
+                                   code_start_line: int, resolution_sources: List[str]) -> Optional[int]:
+    flow = _extract_index_flow(code, var_name, access_line, code_start_line)
+    if flow.get('assign_expr'):
+        return _resolve_integer_constant(flow['assign_expr'], resolution_sources)
+    return None
+
+
+def _resolve_expr_value_before_line(code: str, expr: str, access_line: int,
+                                    code_start_line: int, resolution_sources: List[str]) -> Optional[int]:
+    expr = (expr or '').strip()
+    if not expr:
+        return None
+    val = _resolve_integer_constant(expr, resolution_sources)
+    if val is not None:
+        return val
+    m = re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', expr)
+    if m:
+        return _resolve_var_value_before_line(code, expr, access_line, code_start_line, resolution_sources)
+    return None
+
+
+def _use_after_free_facts(code: str, ptr_name: str, access_line: int,
+                          code_start_line: int = 1) -> Dict:
+    facts = {'free_line': 0, 'null_line': 0, 'reassign_line': 0, 'guard_line': 0, 'guard_cond': ''}
+    if not ptr_name:
+        return facts
+    lines = code.splitlines()
+    access_rel = access_line - code_start_line + 1
+    if access_rel < 1 or access_rel > len(lines):
+        return facts
+
+    free_rel = 0
+    for i in range(access_rel - 1, -1, -1):
+        if re.search(rf'\bfree\s*\(\s*{re.escape(ptr_name)}\s*\)', lines[i]):
+            free_rel = i + 1
+            facts['free_line'] = i + code_start_line
+            break
+    if not free_rel:
+        return facts
+
+    for i in range(free_rel, access_rel):
+        line = lines[i]
+        abs_line = i + code_start_line
+        if not facts['null_line'] and re.search(rf'\b{re.escape(ptr_name)}\s*=\s*NULL\s*;', line):
+            facts['null_line'] = abs_line
+        if not facts['reassign_line'] and re.search(rf'\b{re.escape(ptr_name)}\s*=\s*(?!NULL\b)([^;]+);', line):
+            facts['reassign_line'] = abs_line
+        if not facts['guard_line']:
+            gm = re.search(r'\b(if|while)\s*\(([^)]+)\)', line)
+            if gm and ptr_name in gm.group(2):
+                facts['guard_line'] = abs_line
+                facts['guard_cond'] = gm.group(2).strip()
+    return facts
+
+
 def _lines(code: str) -> List[str]:
     return code.splitlines()
+
+
+# ---------------------------------------------------------------------------
+# Cross-file constant / enum resolution helpers
+# ---------------------------------------------------------------------------
+
+_DEFECT_NATIVE_OWASP = 'Not directly applicable (native-code / non-web defect)'
+_CONST_EVAL_CACHE: Dict[Tuple[str, Tuple[int, ...]], Optional[int]] = {}
+
+
+def _strip_c_casts(expr: str) -> str:
+    """Drop leading C/C++ casts from an expression.
+
+    Examples:
+      (unsigned int)E_HIGH_PRIORITY -> E_HIGH_PRIORITY
+      (uint8_t)(MAX_VAL - 1)        -> (MAX_VAL - 1)
+    """
+    cur = (expr or '').strip()
+    while True:
+        m = re.match(r'^\(\s*[A-Za-z_][A-Za-z0-9_:\s\*<>]*\)\s*(.+)$', cur)
+        if not m:
+            break
+        cur = m.group(1).strip()
+    return cur
+
+
+def _safe_eval_python_int(expr: str) -> Optional[int]:
+    """Evaluate a small integer-only expression with Python's AST.
+
+    Accepts literals, unary +/-/~, arithmetic/bitwise ops, and shifts. Returns
+    None when the expression contains anything else.
+    """
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except Exception:
+        return None
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return int(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub, ast.Invert)):
+            v = _eval(node.operand)
+            if v is None:
+                return None
+            if isinstance(node.op, ast.UAdd):
+                return +v
+            if isinstance(node.op, ast.USub):
+                return -v
+            return ~v
+        if isinstance(node, ast.BinOp) and isinstance(
+                node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div,
+                          ast.Mod, ast.LShift, ast.RShift, ast.BitOr,
+                          ast.BitAnd, ast.BitXor)):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, (ast.FloorDiv, ast.Div)):
+                if right == 0:
+                    return None
+                return left // right
+            if isinstance(node.op, ast.Mod):
+                if right == 0:
+                    return None
+                return left % right
+            if isinstance(node.op, ast.LShift):
+                return left << right
+            if isinstance(node.op, ast.RShift):
+                return left >> right
+            if isinstance(node.op, ast.BitOr):
+                return left | right
+            if isinstance(node.op, ast.BitAnd):
+                return left & right
+            if isinstance(node.op, ast.BitXor):
+                return left ^ right
+        return None
+
+    try:
+        return _eval(tree)
+    except Exception:
+        return None
+
+
+def _safe_read_text(path: str) -> str:
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            return fh.read()
+    except Exception:
+        return ''
+
+
+def _gather_resolution_sources(code: str, file: str,
+                               called_function_codes: Optional[Dict[str, str]] = None,
+                               callers: Optional[List[Dict]] = None) -> List[str]:
+    """Collect nearby source text used to resolve macros / enum constants.
+
+    Resolution is intentionally local-first: the defect function, then its file,
+    then caller/callee bodies already fetched by context_builder. This improves
+    precision without doing a whole-workspace grep per defect.
+    """
+    sources: List[str] = []
+    if code and code.strip():
+        sources.append(code)
+    if file and os.path.isfile(file):
+        try:
+            full = _safe_read_text(file) or ''
+            if full and full not in sources:
+                sources.append(full)
+        except Exception:
+            pass
+    if called_function_codes:
+        for name, fcode in called_function_codes.items():
+            if name == '__callers__':
+                continue
+            if isinstance(fcode, str) and fcode.strip() and fcode not in sources:
+                sources.append(fcode)
+    if callers:
+        for caller in callers[:10]:
+            body = ''
+            if isinstance(caller, dict):
+                body = str(caller.get('code') or '')
+            elif isinstance(caller, str):
+                body = caller
+            if body.strip() and body not in sources:
+                sources.append(body)
+    return sources
+
+
+def _split_enum_items(enum_body: str) -> List[str]:
+    return _split_top_level_commas(enum_body)
+
+
+def _resolve_enum_member_value(name: str, sources: List[str], _seen: Optional[set] = None) -> Optional[int]:
+    """Resolve an enum member, handling both explicit and implicit values."""
+    target = (name or '').split('::')[-1]
+    if not target:
+        return None
+    seen = _seen or set()
+    enum_pat = re.compile(r'enum(?:\s+class|\s+struct)?(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{([^}]*)\}', re.S)
+    for source in sources:
+        for block in enum_pat.finditer(source or ''):
+            items = _split_enum_items(block.group(1))
+            current = -1
+            for item in items:
+                item = re.sub(r'/\*.*?\*/', ' ', item, flags=re.S)
+                item = re.sub(r'//.*', ' ', item).strip()
+                if not item:
+                    continue
+                if '=' in item:
+                    lhs, rhs = item.split('=', 1)
+                    enum_name = lhs.strip().split()[-1]
+                    val = _resolve_integer_constant(rhs.strip(), sources, seen)
+                    if val is None:
+                        continue
+                    current = val
+                else:
+                    enum_name = item.strip().split()[-1]
+                    current += 1
+                if enum_name == target:
+                    return current
+    return None
+
+
+def _resolve_integer_constant(expr: str, sources: List[str], _seen: Optional[set] = None) -> Optional[int]:
+    """Resolve a small integer constant from local/cross-file source.
+
+    Supports literals, casts, macros, enum members, constexpr/const integral
+    declarations, and simple arithmetic over those symbols.
+    """
+    expr = _strip_c_casts(expr or '')
+    expr = re.sub(r'/\*.*?\*/', ' ', expr, flags=re.S)
+    expr = expr.strip().rstrip(';')
+    if not expr:
+        return None
+
+    cache_key = (expr, tuple(hash(s or '') for s in sources[:6]))
+    if cache_key in _CONST_EVAL_CACHE:
+        return _CONST_EVAL_CACHE[cache_key]
+
+    seen = set(_seen or set())
+    if expr in seen:
+        return None
+    seen.add(expr)
+
+    # Literal fast paths
+    if re.fullmatch(r'[+-]?\d+', expr):
+        val = int(expr, 10)
+        _CONST_EVAL_CACHE[cache_key] = val
+        return val
+    if re.fullmatch(r'[+-]?0[xX][0-9a-fA-F]+', expr):
+        val = int(expr, 16)
+        _CONST_EVAL_CACHE[cache_key] = val
+        return val
+
+    # Strip balanced outer parentheses.
+    while expr.startswith('(') and expr.endswith(')'):
+        inner = expr[1:-1].strip()
+        if not inner:
+            break
+        if inner.count('(') != inner.count(')'):
+            break
+        expr = inner
+
+    # Direct symbol lookup.
+    symbol = expr.split('::')[-1]
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_:]*', expr):
+        macro_names = [expr, symbol] if symbol != expr else [expr]
+        for source in sources:
+            for macro_name in macro_names:
+                m = re.search(rf'#\s*define\s+{re.escape(macro_name)}\s+([^\n/]+)', source or '')
+                if m:
+                    val = _resolve_integer_constant(m.group(1).strip(), sources, seen)
+                    if val is not None:
+                        _CONST_EVAL_CACHE[cache_key] = val
+                        return val
+            for const_name in macro_names:
+                const_pat = re.compile(
+                    rf'\b(?:static\s+)?(?:constexpr\s+)?(?:const\s+)?'
+                    rf'(?:unsigned\s+|signed\s+|long\s+|short\s+|int\s+|size_t\s+|'
+                    rf'uint\d+_t\s+|int\d+_t\s+|auto\s+)*'
+                    rf'{re.escape(const_name)}\s*=\s*([^;]+);')
+                m = const_pat.search(source or '')
+                if m:
+                    val = _resolve_integer_constant(m.group(1).strip(), sources, seen)
+                    if val is not None:
+                        _CONST_EVAL_CACHE[cache_key] = val
+                        return val
+        enum_val = _resolve_enum_member_value(expr, sources, seen)
+        if enum_val is not None:
+            _CONST_EVAL_CACHE[cache_key] = enum_val
+            return enum_val
+
+    # Arithmetic over symbols/literals: replace every identifier token we can resolve.
+    replaced = expr
+    unresolved = False
+    for tok in sorted(set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_:]*\b', expr)), key=len, reverse=True):
+        if tok in {'sizeof', 'true', 'false'}:
+            unresolved = True
+            continue
+        val = _resolve_integer_constant(tok, sources, seen)
+        if val is None:
+            unresolved = True
+            continue
+        replaced = re.sub(rf'\b{re.escape(tok)}\b', str(val), replaced)
+    val = _safe_eval_python_int(replaced)
+    if val is not None:
+        _CONST_EVAL_CACHE[cache_key] = val
+        return val
+
+    # As a last enum-only fallback, try resolving the entire expression's base token.
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_:]*', expr):
+        enum_val = _resolve_enum_member_value(expr, sources, seen)
+        if enum_val is not None:
+            _CONST_EVAL_CACHE[cache_key] = enum_val
+            return enum_val
+
+    if not unresolved:
+        _CONST_EVAL_CACHE[cache_key] = None
+    return None
+
+
+def _extract_array_initializer_values(code: str, arr_name: str,
+                                      sources: List[str]) -> Optional[List[int]]:
+    """Return integer initializer values for a local array when they are simple.
+
+    Example: `int map[4] = {0, 2, 3, 0};` -> [0, 2, 3, 0]
+    """
+    if not code or not arr_name:
+        return None
+    pat = re.compile(
+        rf'\b(?:[A-Za-z_][A-Za-z0-9_<>:]*\s+)+{re.escape(arr_name)}\s*\[[^\]]+\]\s*=\s*\{{([^}}]+)\}}',
+        re.S)
+    m = pat.search(code)
+    if not m:
+        return None
+    values = []
+    for item in _split_top_level_commas(m.group(1)):
+        item = item.strip()
+        if not item or item.startswith('.'):
+            return None
+        val = _resolve_integer_constant(item, sources)
+        if val is None:
+            return None
+        values.append(val)
+    return values
 
 
 # Semgrep per-file cache and enable flag — semgrep is heavy (2-30s per file) and
@@ -1774,8 +2241,9 @@ def _analyze_buffer_size(code: str, sub_checker: str, events: List[Dict],
 
 
 def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
-                           confirmed_idx, arr_size, arr_size_expr, arr_name,
-                           guard_line, covers_all_paths):
+                           concrete_idx, arr_size, arr_size_expr, arr_name,
+                           guard_line, covers_all_paths,
+                           concrete_idx_source: str = "Coverity's trace"):
     """Assess the guard near an OVERRUN access vs. the flagged index idx_var.
 
     For OVERRUN the surrounding guard is often a NULL check on the buffer
@@ -1812,37 +2280,42 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
             f"pointer (`{arr_name}`) but does not reference `{idx_var}`; it is not a "
             f"bounds check and cannot rule out an out-of-bounds `{arr_name}[{idx_var}]`.")
 
-    # A concrete Coverity trace value is the decisive signal.
-    if confirmed_idx is not None and arr_size > 0:
-        if 0 <= confirmed_idx < arr_size:
+    # A concrete index value from Coverity's path or a resolved local constant
+    # assignment is the decisive signal.
+    if concrete_idx is not None and arr_size > 0:
+        if 0 <= concrete_idx < arr_size:
             if covers_all_paths:
                 return "safe", (
                     f"Guard `{guard_cond}` at line {guard_line} references `{idx_var}` and "
-                    f"dominates all paths; Coverity's trace places `{idx_var}` at {confirmed_idx}, "
+                    f"dominates all paths; {concrete_idx_source} places `{idx_var}` at {concrete_idx}, "
                     f"within [0, {arr_size - 1}] of `{arr_name}`.")
             return "safe", (
-                f"Coverity's trace places `{idx_var}` at {confirmed_idx}, within [0, {arr_size - 1}] "
+                f"{concrete_idx_source} places `{idx_var}` at {concrete_idx}, within [0, {arr_size - 1}] "
                 f"of `{arr_name}`; the access is in range.")
-        where = (f"{confirmed_idx}, past the end of the {arr_size}-element `{arr_name}`"
-                 if confirmed_idx >= arr_size
-                 else f"{confirmed_idx}, a negative value (an invalid index)")
+        where = (f"{concrete_idx}, past the end of the {arr_size}-element `{arr_name}`"
+                 if concrete_idx >= arr_size
+                 else f"{concrete_idx}, a negative value (an invalid index)")
         return "unsafe", (
             f"Guard `{guard_cond}` at line {guard_line} references `{idx_var}`, but "
-            f"Coverity's trace shows `{idx_var}` can still reach {where}; the guard does "
+            f"{concrete_idx_source} shows `{idx_var}` can still reach {where}; the guard does "
             f"not prevent the out-of-bounds access.")
 
     # No concrete trace value -- find an upper bound on idx_var in the condition.
     ub_str, ub_int = _upper_bound(guard_cond, idx_var)
     if ub_str:
         if ub_int is not None and arr_size > 0:
-            if ub_int <= arr_size:
+            max_reachable = ub_int - 1 if guard_op == '<' else ub_int
+            if max_reachable < arr_size:
+                cmp_txt = f"{guard_op} {ub_int}" if guard_op else f"< {ub_int}"
                 return "safe", (
-                    f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` to < {ub_int}; "
-                    f"with `{arr_name}` of {arr_size} elements the access stays in range.")
+                    f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` with `{cmp_txt}`; "
+                    f"the largest reachable index is {max_reachable}, inside `{arr_name}`'s "
+                    f"valid range [0, {arr_size - 1}].")
+            cmp_txt = f"{guard_op} {ub_int}" if guard_op else f"< {ub_int}"
             return "unsafe", (
-                f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` to < {ub_int}, "
-                f"but `{arr_name}` only has {arr_size} elements, so `{idx_var}` can still "
-                f"run out of bounds.")
+                f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` with `{cmp_txt}`, "
+                f"which still permits index {max_reachable}; `{arr_name}` only has {arr_size} elements, "
+                f"so the access can still run out of bounds.")
         if arr_size_expr and (ub_str in arr_size_expr or "sizeof" in guard_cond
                               or ub_str == arr_name):
             return "safe", (
@@ -2077,8 +2550,6 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     acc = build_evidence(ctx, ev, 'OVERRUN')
     decision = DecisionAgent.evaluate(acc, 'OVERRUN')
 
-    # confirmed_idx: concrete index value from Coverity's trace (int or None)
-    confirmed_idx = ev.get('index_value') if ev.get('index_value') else None
 
     # --- Extract precise array access details ---
     # Initialize with safe defaults
@@ -2171,6 +2642,23 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 guard_op = flow.get('guard_op', '')
                 guard_limit = flow.get('guard_limit', '')
 
+    # AST declarations can miss macro-sized local arrays or declarations on the
+    # same line as initializers. Re-run the lightweight regex extractor before
+    # giving up on the local size / assignment facts.
+    if arr_name and not arr_size_expr:
+        decl_info = _extract_array_declaration(code, arr_name, code_start_line)
+        if decl_info:
+            arr_size_expr = decl_info.get('size_expr', '')
+            arr_size = decl_info.get('size', 0)
+    if idx_var and idx_var != 'the index' and (not assign_expr or not guard_cond):
+        flow = _extract_index_flow(code, idx_var, access_line_actual, code_start_line)
+        assign_line = assign_line or flow.get('assign_line', 0)
+        assign_expr = assign_expr or flow.get('assign_expr', '')
+        guard_line = guard_line or flow.get('guard_line', 0)
+        guard_cond = guard_cond or flow.get('guard_cond', '')
+        guard_op = guard_op or flow.get('guard_op', '')
+        guard_limit = guard_limit or flow.get('guard_limit', '')
+
     # 3. Last-resort pointer-arithmetic scan
     if not arr_name:
         m = re.search(r'\*\s*\(\s*(\w+)\s*\+\s*([^\)]+)\)', code)
@@ -2196,6 +2684,75 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         arr_size = int(ev['array_size'])
         if not arr_size_expr:
             arr_size_expr = str(arr_size)
+
+    # Resolve local or cross-file constants (enum members, #defines, constexprs)
+    # before defaulting to "Needs review". This is especially important for
+    # patterns like `idx = (unsigned)E_HIGH_PRIORITY; table[idx]` where the
+    # surrounding function snippet alone does not show the enum values.
+    resolution_sources = _gather_resolution_sources(
+        code, file, called_function_codes, ctx.get('callers_list', []))
+    if arr_size == 0 and arr_size_expr:
+        resolved_arr_size = _resolve_integer_constant(arr_size_expr, resolution_sources)
+        if resolved_arr_size is not None and resolved_arr_size >= 0:
+            arr_size = resolved_arr_size
+    resolved_guard_limit = None
+    if guard_limit:
+        resolved_guard_limit = _resolve_integer_constant(guard_limit, resolution_sources)
+    resolved_assign_value = None
+    if assign_expr:
+        resolved_assign_value = _resolve_integer_constant(assign_expr, resolution_sources)
+
+    concrete_idx = ev.get('index_value') if ev.get('index_value') is not None else None
+    concrete_idx_source = "Coverity's trace"
+    if concrete_idx is None and resolved_assign_value is not None:
+        concrete_idx = resolved_assign_value
+        concrete_idx_source = f"the assignment `{idx_var} = {assign_expr}`"
+
+    if guard_limit and not str(guard_limit).isdigit() and resolved_guard_limit is not None:
+        guard_limit = str(resolved_guard_limit)
+
+    nested_access = _has_nested_subscript_at_line(code, access_line_actual, code_start_line)
+    inner_index_proven_safe = False
+    nested_inner_arr = ''
+    nested_inner_idx_var = ''
+    nested_inner_idx_value = None
+    nested_match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_:.>-]*)\s*\[\s*([^\]]+)\s*\]', (idx_expr or '').strip())         if nested_access else None
+    if nested_match:
+        nested_inner_arr = nested_match.group(1).strip()
+        nested_inner_idx_expr = nested_match.group(2).strip()
+        nested_inner_idx_var_m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', nested_inner_idx_expr)
+        nested_inner_idx_var = nested_inner_idx_var_m.group(1) if nested_inner_idx_var_m else nested_inner_idx_expr
+        inner_flow = _extract_index_flow(code, nested_inner_idx_var, access_line_actual, code_start_line) \
+            if nested_inner_idx_var else {}
+        if inner_flow.get('assign_line', 0):
+            assign_line = assign_line or inner_flow.get('assign_line', 0)
+        if inner_flow.get('assign_expr'):
+            assign_expr = assign_expr or inner_flow.get('assign_expr', '')
+
+        inner_decl = _extract_array_declaration(code, nested_inner_arr, code_start_line)
+        inner_arr_size_expr = inner_decl.get('size_expr', '')
+        inner_arr_size = inner_decl.get('size', 0)
+        if inner_arr_size == 0 and inner_arr_size_expr:
+            resolved_inner_size = _resolve_integer_constant(inner_arr_size_expr, resolution_sources)
+            if resolved_inner_size is not None and resolved_inner_size >= 0:
+                inner_arr_size = resolved_inner_size
+
+        nested_inner_idx_value = _resolve_integer_constant(nested_inner_idx_expr, resolution_sources)
+        if nested_inner_idx_value is None and nested_inner_idx_var and nested_inner_idx_var != nested_inner_idx_expr:
+            if inner_flow.get('assign_expr'):
+                nested_inner_idx_value = _resolve_integer_constant(inner_flow['assign_expr'], resolution_sources)
+
+        if nested_inner_idx_value is not None and inner_arr_size > 0 and 0 <= nested_inner_idx_value < inner_arr_size:
+            inner_index_proven_safe = True
+            init_vals = _extract_array_initializer_values(code, nested_inner_arr, resolution_sources)
+            if init_vals and nested_inner_idx_value < len(init_vals):
+                concrete_idx = init_vals[nested_inner_idx_value]
+                concrete_idx_source = (
+                    f"the derived value `{nested_inner_arr}[{nested_inner_idx_var}]` "
+                    f"with `{nested_inner_idx_var}` = {nested_inner_idx_value}")
+    else:
+        inner_index_proven_safe = bool(
+            concrete_idx is not None and arr_size > 0 and 0 <= concrete_idx < arr_size)
 
     # --- path_prover: off-by-one / guard safety proof ---
     prover_result: Dict = {}
@@ -2228,29 +2785,49 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     has_real_names = (arr_name not in ('', 'the buffer', 'the array', 'array') and
                       idx_var not in ('', 'the offset', 'the index', 'index'))
     guard_status, guard_explanation = _assess_guard_vs_index(
-        guard_cond, idx_var, guard_op, guard_limit, confirmed_idx,
+        guard_cond, idx_var, guard_op, guard_limit, concrete_idx,
         arr_size, arr_size_expr, arr_name, guard_line,
-        bool(ctx.get('guard_covers_all_paths', False)))
+        bool(ctx.get('guard_covers_all_paths', False)),
+        concrete_idx_source)
+
+    # A locally/cross-file resolved constant can prove that the *inner* access is
+    # in range even when Coverity flagged a larger nested expression. Do not keep
+    # a Bug verdict solely on that inner subscript when the remaining question is
+    # the outer table's bound.
+    if decision.classification == "Bug" and guard_status == "safe":
+        if nested_access:
+            decision = type(decision)(classification='Needs review', confidence=max(0.55, decision.confidence - 0.10),
+                                      reasoning=decision.reasoning +
+                                      [f"The inner access `{arr_name}[{idx_var}]` is provably in range; the remaining uncertainty is the derived outer-table access on the same line."])
+        else:
+            decision = type(decision)(classification='False positive', confidence=max(0.60, decision.confidence - 0.10),
+                                      reasoning=decision.reasoning +
+                                      [f"Resolved constants place `{idx_var}` within `{arr_name}`'s bounds on the flagged access."])
 
     # Correct an over-eager false-positive signal raised by the evidence agent
     # (or an earlier fallback) when the apparent guard is irrelevant/ineffective.
     if decision.classification == "False positive" and guard_status in ("irrelevant", "unsafe", "unknown"):
         if guard_status == "unsafe":
-            if confirmed_idx is not None and arr_size > 0 and confirmed_idx >= arr_size:
+            if concrete_idx is not None and arr_size > 0 and concrete_idx >= arr_size:
                 decision = type(decision)(classification='Bug', confidence=0.78,
                                           reasoning=decision.reasoning +
-                                          [f"Coverity confirms index {confirmed_idx} is out of bounds "
+                                          [f"{concrete_idx_source} confirms index {concrete_idx} is out of bounds "
                                            f"(array size {arr_size}); the guard does not bound `{idx_var}`."])
             else:
                 decision = type(decision)(classification='Bug', confidence=0.60,
                                           reasoning=decision.reasoning +
                                           [f"Guard at line {guard_line} references `{idx_var}` but allows "
                                            f"an out-of-bounds value for `{arr_name}`."])
-        elif has_real_names:
+        elif has_real_names and not inner_index_proven_safe:
             decision = type(decision)(classification='Bug', confidence=0.60,
                                       reasoning=decision.reasoning +
                                       [f"Real array access `{arr_name}[{idx_var}]` found; the nearby "
                                        f"guard does not reference `{idx_var}`."])
+        elif has_real_names:
+            decision = type(decision)(classification='Needs review', confidence=0.55,
+                                      reasoning=decision.reasoning +
+                                      [f"The inner access `{arr_name}[{idx_var}]` resolves in range, but the "
+                                       f"derived outer-table access on the same line still needs a separate bound proof."])
         else:
             decision = type(decision)(classification='Needs review', confidence=0.55,
                                       reasoning=decision.reasoning +
@@ -2260,11 +2837,11 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # If the evidence agent was inconclusive, commit to a verdict (Bug / FP)
     # instead of "Needs review" whenever the extracted facts decide it.
     if decision.classification == "Needs review":
-        if confirmed_idx is not None and arr_size > 0 and confirmed_idx >= arr_size:
+        if concrete_idx is not None and arr_size > 0 and concrete_idx >= arr_size:
             decision = type(decision)(classification='Bug', confidence=0.78,
                                       reasoning=decision.reasoning +
-                                      [f"Coverity confirms index {confirmed_idx} is out of bounds (array size {arr_size})."])
-        elif guard_status == "safe":
+                                      [f"{concrete_idx_source} confirms index {concrete_idx} is out of bounds (array size {arr_size})."])
+        elif guard_status == "safe" and not (nested_access and inner_index_proven_safe):
             decision = type(decision)(classification='False positive', confidence=0.55,
                                       reasoning=decision.reasoning +
                                       [f"Effective bounds guard at line {guard_line} for `{idx_var}`."])
@@ -2273,12 +2850,12 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                                       reasoning=decision.reasoning +
                                       [f"Guard at line {guard_line} references `{idx_var}` but allows "
                                        f"an out-of-bounds value for `{arr_name}`."])
-        elif guard_status in ("irrelevant", "none") and has_real_names:
+        elif guard_status in ("irrelevant", "none") and has_real_names and not inner_index_proven_safe:
             decision = type(decision)(classification='Bug', confidence=0.55,
                                       reasoning=decision.reasoning +
                                       [f"Real array access of `{arr_name}[{idx_var}]` found with no effective "
                                        f"bounds guard on `{idx_var}`."])
-        # 'unknown', or no identifiable names -> stays Needs review (inconclusive)
+        # 'unknown', or nested access whose inner index is proven safe -> stays Needs review (inconclusive)
 
     # --------------------------------------------------------------------------
     # Call-graph / pattern resolution for still-inconclusive OVERRUN.
@@ -2287,7 +2864,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # manual review, harvest index provenance and the caller sites the tool
     # already collected and let that evidence break the tie toward Bug / FP.
     # --------------------------------------------------------------------------
-    if decision.classification == "Needs review":
+    if decision.classification == "Needs review" and not (nested_access and inner_index_proven_safe):
         extra_acc = _overrun_pattern_and_caller_evidence(
             code, idx_var, idx_expr, arr_name, arr_size, assign_expr, ctx)
         extra_decision = DecisionAgent.evaluate(extra_acc, 'OVERRUN')
@@ -2396,11 +2973,11 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 parts.append(f"If `{idx_var}` falls outside the valid range [0, size-1], this {verb} accesses adjacent memory, corrupting neighboring data and potentially crashing the process or enabling an exploit.")
 
             # Coverity trace confirmation
-            if confirmed_idx is not None and arr_size > 0:
-                if confirmed_idx >= arr_size:
-                    parts.append(f"Coverity's trace confirms `{idx_var}` can reach {confirmed_idx}, which is beyond the buffer limit of {arr_size-1}.")
-                elif confirmed_idx < 0:
-                    parts.append(f"Coverity's trace confirms `{idx_var}` can be negative ({confirmed_idx}), which is an invalid array index.")
+            if concrete_idx is not None and arr_size > 0:
+                if concrete_idx >= arr_size:
+                    parts.append(f"{concrete_idx_source} confirms `{idx_var}` can reach {concrete_idx}, which is beyond the buffer limit of {arr_size-1}.")
+                elif concrete_idx < 0:
+                    parts.append(f"{concrete_idx_source} confirms `{idx_var}` can be negative ({concrete_idx}), which is an invalid array index.")
 
             # path_prover off-by-one explanation
             if prover_result.get('is_off_by_one') and prover_result.get('off_by_one_explanation'):
@@ -2490,8 +3067,8 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         reasons = []
         if _has_pattern(code, r'for\s*\(.*<\s*sizeof\s*\('):
             reasons.append("the array access is driven by a sizeof()-bounded loop")
-        if arr_size > 0 and confirmed_idx is not None and 0 <= confirmed_idx < arr_size:
-            reasons.append(f"Coverity's trace places `{idx_var}` at {confirmed_idx}, within the declared bounds [0, {arr_size-1}] of `{arr_name}`")
+        if arr_size > 0 and concrete_idx is not None and 0 <= concrete_idx < arr_size:
+            reasons.append(f"{concrete_idx_source} places `{idx_var}` at {concrete_idx}, within the declared bounds [0, {arr_size-1}] of `{arr_name}`")
         if guard_explanation:
             # guard_explanation already ends with a sentence; strip the trailing
             # period so the wrapper can close it cleanly.
@@ -2523,8 +3100,9 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # Needs review
     # ------------------------------------------------------------------
     else:
-        idx_is_param = (idx_var not in ('', 'the offset', 'the index', 'index')
-                        and idx_var in _function_param_names(code))
+        review_idx_var = nested_inner_idx_var if (nested_access and nested_inner_idx_var) else idx_var
+        idx_is_param = (review_idx_var not in ('', 'the offset', 'the index', 'index')
+                        and review_idx_var in _function_param_names(code))
         callers = ctx.get('callers_list', []) or []
         if not isinstance(callers, list):
             callers = []
@@ -2537,11 +3115,11 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             gaps.append("no definitive bounds guard is visible")
         if not arr_size_expr:
             gaps.append("the array size could not be determined")
-        if assign_line == 0 and idx_var != 'the index':
+        if assign_line == 0 and review_idx_var != 'the index':
             if idx_is_param:
-                gaps.append(f"{idx_var} is a function parameter, so its bound must be resolved at the call sites")
+                gaps.append(f"{review_idx_var} is a function parameter, so its bound must be resolved at the call sites")
             else:
-                gaps.append(f"the assignment of {idx_var} could not be traced")
+                gaps.append(f"the assignment of {review_idx_var} could not be traced")
 
         if gaps:
             if len(gaps) == 1:
@@ -2553,17 +3131,29 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             caller_brief = ", ".join(sorted({str(c.get('caller', '')) for c in callers
                                              if isinstance(c, dict) and c.get('caller')})[:5])
             if caller_brief:
-                parts.append(f"It is reachable from {caller_brief}, but no reachable call site proves a hard upper bound on `{idx_var}` for `{arr_name}`.")
+                parts.append(f"It is reachable from {caller_brief}, but no reachable call site proves a hard upper bound on `{review_idx_var}` for `{arr_name}`.")
         elif function and not re.search(r'\bmain\b|\b_init\b|\b_fini\b|callback|hook|handler', function, re.I):
-            parts.append(f"No caller of {function}() was found in the workspace, so the bound on `{idx_var}` cannot be settled from the call graph.")
+            parts.append(f"No caller of {function}() was found in the workspace, so the bound on `{review_idx_var}` cannot be settled from the call graph.")
 
         parts.append("Please verify the array bounds (including any cross-file guards) before finalizing the disposition.")
         comment = re.sub(r'\s{2,}', ' ', " ".join(parts)).strip()
-        if _has_nested_subscript_at_line(code, access_line_actual, code_start_line):
-            comment += (" The access uses a derived/nested index, so the inner "
-                        "index and the outer table require separate bound checks; "
-                        "the MAX constant's inclusive/exclusive meaning must be "
-                        "confirmed from its declaration.")
+        if nested_access:
+            if inner_index_proven_safe:
+                inner_text = (f"`{nested_inner_arr}[{nested_inner_idx_var}]`"
+                              if nested_inner_arr and nested_inner_idx_var else f"`{idx_expr}`")
+                inner_bound = (f" within `{nested_inner_arr}`'s declared limit"
+                               if nested_inner_arr else " in range")
+                comment += (f" The inner access {inner_text} resolves with `{nested_inner_idx_var}` = "
+                            f"{nested_inner_idx_value}{inner_bound}. "
+                            f"That makes the derived outer index into `{arr_name}` evaluate to `{concrete_idx}` via "
+                            f"{concrete_idx_source}. The remaining question is whether the outer-table bound/check "
+                            f"for `{arr_name}` is semantically correct and whether its MAX constant is inclusive or "
+                            f"exclusive.")
+            else:
+                comment += (" The access uses a derived/nested index, so the inner "
+                            "index and the outer table require separate bound checks; "
+                            "the MAX constant's inclusive/exclusive meaning must be "
+                            "confirmed from its declaration.")
             fix = "Manual review required."
         else:
             # No patch is offered unless this is a single, identifiable index.
@@ -2577,8 +3167,45 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
     ctx = _build_analysis_context(code, 'INTEGER_OVERFLOW', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = build_evidence(ctx, ctx['ev'], 'INTEGER_OVERFLOW')
 
-    if _has_pattern(code, r'\buint(8|16|32|64)_t\b|\bunsigned\b') and \
-       not _has_pattern(code, r'\b(signed|int32_t|int64_t)\b'):
+    resolution_sources = _gather_resolution_sources(
+        code, file, called_function_codes, ctx.get('callers_list', []))
+    defect_line_code = _line_text_at(code, line, code_start_line)
+    op_info = _extract_binary_operation(defect_line_code or code, ('*', '+', '-'))
+    call_names = set(re.findall(r'(\w+)\s*\(', defect_line_code or code))
+    all_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
+    ctx['var'] = all_vars[0] if all_vars else 'the operand'
+
+    lhs_expr = rhs_expr = ''
+    lhs_val = rhs_val = None
+    if op_info:
+        lhs_expr, op_token, rhs_expr = op_info
+        ctx['lhs_expr'] = lhs_expr
+        ctx['rhs_expr'] = rhs_expr
+        ctx['op_token'] = op_token
+        if op_token == '*':
+            ctx['operation'] = 'multiplication'
+            ctx['operand'] = rhs_expr or 'multiplier'
+        elif op_token == '-':
+            ctx['operation'] = 'subtraction'
+            ctx['operand'] = rhs_expr or 'subtrahend'
+        else:
+            ctx['operation'] = 'addition'
+            ctx['operand'] = rhs_expr or 'addend'
+        lhs_val = _resolve_expr_value_before_line(code, lhs_expr, line, code_start_line, resolution_sources)
+        rhs_val = _resolve_expr_value_before_line(code, rhs_expr, line, code_start_line, resolution_sources)
+    else:
+        ctx['operation'] = 'arithmetic'
+        ctx['operand'] = all_vars[1] if len(all_vars) > 1 else 'value'
+        op_token = ''
+
+    type_bounds = _infer_integral_decl_bounds(ctx.get('var', ''), resolution_sources)
+    ctx['integer_type'] = type_bounds.get('type_text') or 'int'
+    ctx['integer_bits'] = type_bounds.get('bits', 32)
+    ctx['integer_min'] = type_bounds.get('min', -(2**31))
+    ctx['integer_max'] = type_bounds.get('max', 2**31 - 1)
+    ctx['integer_unsigned'] = type_bounds.get('unsigned', False)
+
+    if _has_pattern(code, r'uint(8|16|32|64)_t|unsigned') and        not _has_pattern(code, r'(signed|int32_t|int64_t)'):
         acc.add(Evidence(
             label="unsigned_wrap_defined_behavior",
             polarity="fp",
@@ -2586,64 +3213,118 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
             description="Arithmetic operates on unsigned integers — wrap-around is well-defined in C."
         ))
 
+    if lhs_val is not None and rhs_val is not None and op_token:
+        if op_token == '*':
+            result_val = lhs_val * rhs_val
+        elif op_token == '+':
+            result_val = lhs_val + rhs_val
+        else:
+            result_val = lhs_val - rhs_val
+        ctx['concrete_lhs'] = lhs_val
+        ctx['concrete_rhs'] = rhs_val
+        ctx['concrete_result'] = result_val
+        if ctx['integer_unsigned']:
+            acc.add(Evidence(
+                label="concrete_unsigned_arithmetic",
+                polarity="fp",
+                weight=0.70,
+                description=(f"The flagged expression evaluates concretely to {lhs_val} {op_token} {rhs_val} = {result_val} "
+                             f"on unsigned type `{ctx['integer_type']}`; wrap semantics are defined.")
+            ))
+        elif ctx['integer_min'] <= result_val <= ctx['integer_max']:
+            acc.add(Evidence(
+                label="concrete_arithmetic_in_range",
+                polarity="fp",
+                weight=0.92,
+                description=(f"The flagged expression evaluates to {result_val}, which fits in `{ctx['integer_type']}` "
+                             f"[{ctx['integer_min']}, {ctx['integer_max']}].")
+            ))
+        else:
+            acc.add(Evidence(
+                label="concrete_arithmetic_overflow",
+                polarity="bug",
+                weight=0.95,
+                description=(f"The flagged expression evaluates to {result_val}, outside `{ctx['integer_type']}` "
+                             f"[{ctx['integer_min']}, {ctx['integer_max']}].")
+            ))
+    elif op_token:
+        primary_var = all_vars[0] if all_vars else ''
+        if primary_var:
+            flow = _extract_index_flow(code, primary_var, line, code_start_line)
+            guard_limit_val = _resolve_integer_constant(flow.get('guard_limit', ''), resolution_sources)                 if flow.get('guard_limit') else None
+            const_other = rhs_val if primary_var == lhs_expr.strip() else lhs_val
+            if guard_limit_val is not None and const_other is not None and flow.get('guard_op') in ('<', '<=', '>', '>='):
+                if flow['guard_op'] in ('<', '<='):
+                    max_primary = guard_limit_val - 1 if flow['guard_op'] == '<' else guard_limit_val
+                    if op_token == '+' and max_primary + const_other <= ctx['integer_max']:
+                        acc.add(Evidence(
+                            label="guarded_arithmetic_in_range",
+                            polarity="fp",
+                            weight=0.82,
+                            description=(f"Guard `{flow['guard_cond']}` bounds `{primary_var}` so `{primary_var} {op_token} {const_other}` "
+                                         f"cannot exceed `{ctx['integer_type']}`.")
+                        ))
+                    elif op_token == '*' and max_primary * const_other <= ctx['integer_max']:
+                        acc.add(Evidence(
+                            label="guarded_arithmetic_in_range",
+                            polarity="fp",
+                            weight=0.82,
+                            description=(f"Guard `{flow['guard_cond']}` bounds `{primary_var}` so `{primary_var} * {const_other}` "
+                                         f"stays within `{ctx['integer_type']}`.")
+                        ))
+
     decision = DecisionAgent.evaluate(acc, 'INTEGER_OVERFLOW')
 
-    code_lines = code.splitlines()
-    rel = line - code_start_line + 1 if line and code_start_line else line
-    defect_line_code = code_lines[rel - 1].strip() if 0 < rel <= len(code_lines) else ''
-    call_names = set(re.findall(r'\b(\w+)\s*\(', defect_line_code or code))
-    all_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
-    ctx['var'] = all_vars[0] if all_vars else 'the operand'
-    op_char = defect_line_code or code
-    if '*' in op_char:
-        ctx['operation'] = 'multiplication'
-        ctx['operand'] = all_vars[1] if len(all_vars) > 1 else 'multiplier'
-    elif '-' in op_char:
-        ctx['operation'] = 'subtraction'
-        ctx['operand'] = all_vars[1] if len(all_vars) > 1 else 'subtrahend'
-    elif '+' in op_char:
-        ctx['operation'] = 'addition'
-        ctx['operand'] = all_vars[1] if len(all_vars) > 1 else 'addend'
-    else:
-        ctx['operation'] = 'arithmetic'
-        ctx['operand'] = all_vars[1] if len(all_vars) > 1 else 'value'
-
     if decision.classification == "False positive":
-        has_unsigned = any(e.label == 'unsigned_wrap_defined_behavior' for e in acc.evidence)
-        has_sizeof   = bool(re.search(r'sizeof\s*\(', code))
-        has_bounded  = bool(re.search(r'\b(min|max|clamp|bound|<\s*\d{1,3}\s*)\b', code, re.I))
-
-        op_label = ctx['operation'] if ctx['operation'] != 'arithmetic' else 'arithmetic operation'
-
-        if has_unsigned:
-            comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
-                       f"The {op_label} operates on unsigned integer type(s) — wrap-around is defined behavior "
-                       f"in C and cannot overflow the machine representation.{(' The expression is also bounded by `sizeof`.' if has_sizeof else '')} "
-                       f"Coverity raised this purely because it applies overflow heuristics to all arithmetic regardless of signedness.")
-            fix = "No fix required. Optionally silence with a range assertion for clarity."
-        elif has_bounded:
-            comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
-                       f"The {op_label} is bounded by an explicit guard visible in the extracted code; "
-                       f"the operand(s) cannot reach values large enough to overflow.")
-            fix = "No fix required. Keep the guard and consider documenting it as a Coverity suppression."
+        if ctx.get('concrete_result') is not None and not ctx.get('integer_unsigned'):
+            comment = (f"At line {line} in {function}(), the flagged arithmetic resolves to "
+                       f"`{lhs_expr} {op_token} {rhs_expr}` = {ctx['concrete_result']}. That result fits in "
+                       f"`{ctx['integer_type']}` [{ctx['integer_min']}, {ctx['integer_max']}], so no signed overflow "
+                       f"occurs on this path. False positive.")
+            fix = "No fix required."
+        elif ctx.get('integer_unsigned') and ctx.get('concrete_result') is not None:
+            comment = (f"At line {line} in {function}(), the flagged arithmetic resolves concretely on unsigned type "
+                       f"`{ctx['integer_type']}`. Unsigned wrap-around is defined by the language, so this is not a "
+                       f"signed overflow defect on the reported path. False positive.")
+            fix = "No fix required."
         else:
-            # Generic fallback when the decision was FP but no specific dismissal reason applies.
-            comment = _build_comment_from_evidence(decision, ctx)
-            fix = "No fix required. Ensure the final result fits in the destination type."
+            has_unsigned = any(e.label == 'unsigned_wrap_defined_behavior' for e in acc.evidence)
+            has_bounded = any(e.label == 'guarded_arithmetic_in_range' for e in acc.evidence)
+            op_label = ctx['operation'] if ctx['operation'] != 'arithmetic' else 'arithmetic operation'
+            if has_unsigned:
+                comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
+                           f"The {op_label} operates on unsigned integer type(s) — wrap-around is defined behavior in C. "
+                           f"Coverity raised this because it applies overflow heuristics broadly to arithmetic.")
+                fix = "No fix required. Optionally silence with a range assertion for clarity."
+            elif has_bounded:
+                comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
+                           f"The {op_label} is bounded by an explicit guard visible in the extracted code; "
+                           f"the operand(s) cannot reach values large enough to overflow.")
+                fix = "No fix required. Keep the guard and consider documenting it as a Coverity suppression."
+            else:
+                comment = _build_comment_from_evidence(decision, ctx)
+                fix = "No fix required. Ensure the final result fits in the destination type."
         comment = _apply_example_style('False positive', 'INTEGER_OVERFLOW', ctx, code,
                                        code_start_line, line, function, comment)
         return "False positive", comment, fix, decision.confidence
 
     if decision.classification == "Bug":
-        comment = synthesize_expert_comment('integer_overflow', 'bug', ctx)
-        fix = generate_contextual_fix('integer_overflow', 'Bug', ctx)
+        if ctx.get('concrete_result') is not None and not ctx.get('integer_unsigned'):
+            comment = (f"At line {line} in {function}(), the flagged arithmetic resolves to "
+                       f"`{lhs_expr} {op_token} {rhs_expr}` = {ctx['concrete_result']}. That lies outside "
+                       f"`{ctx['integer_type']}` [{ctx['integer_min']}, {ctx['integer_max']}], so the computation "
+                       f"overflows on this path.")
+            fix = generate_contextual_fix('integer_overflow', 'Bug', ctx)
+        else:
+            comment = synthesize_expert_comment('integer_overflow', 'bug', ctx)
+            fix = generate_contextual_fix('integer_overflow', 'Bug', ctx)
         comment = _apply_example_style('Bug', 'INTEGER_OVERFLOW', ctx, code,
                                        code_start_line, line, function, comment)
         return "Bug", comment, fix, decision.confidence
     else:
-        # Needs review — use the rich context builder since no decisive evidence exists.
         comment = _build_comment_from_evidence(decision, ctx)
         return "Needs review", comment, "Validate arithmetic inputs before operation. Consider upcasting to wider type or adding range guards.", decision.confidence
+
 
 
 def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
@@ -3053,6 +3734,18 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
                          code_start_line: int = 1, tree=None) -> Tuple[str, str, str, float]:
     ctx = _build_analysis_context(code, 'NEGATIVE_RETURNS', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = EvidenceAccumulator()
+    resolution_sources = _gather_resolution_sources(
+        code, file, called_function_codes, ctx.get('callers_list', []))
+    defect_line_code = _line_text_at(code, line, code_start_line)
+
+    call_names = set(re.findall(r'(\w+)\s*\(', defect_line_code or code))
+    line_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
+    suspect_var = line_vars[-1] if line_vars else (ctx.get('var') or 'result')
+    ctx['var'] = suspect_var
+    flow = _extract_index_flow(code, suspect_var, line, code_start_line)
+    concrete_val = _resolve_var_value_before_line(code, suspect_var, line, code_start_line, resolution_sources)
+    if concrete_val is None and ctx['ev'].get('variables', {}).get(suspect_var) is not None:
+        concrete_val = ctx['ev']['variables'][suspect_var]
 
     if _has_pattern(code, r'if\s*\(.*<\s*0\s*\)') or _has_pattern(code, r'if\s*\(.*==\s*EOF\s*\)'):
         acc.add(Evidence(
@@ -3071,7 +3764,32 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
             description="Coverity trace shows validation of the return value before consumption."
         ))
 
-    if _has_pattern(code, r'\bmalloc\s*\(|\bmemcpy\s*\(|\[\s*\w+\s*\]'):
+    if flow.get('guard_cond') and _guard_rejects_negative(suspect_var, flow['guard_cond']):
+        acc.add(Evidence(
+            label="guard_rejects_negative_value",
+            polarity="fp",
+            weight=0.88,
+            description=f"Guard `{flow['guard_cond']}` rejects negative/error values of `{suspect_var}` before use."
+        ))
+
+    if concrete_val is not None:
+        ctx['concrete_value'] = concrete_val
+        if concrete_val < 0:
+            acc.add(Evidence(
+                label="concrete_negative_value_used",
+                polarity="bug",
+                weight=0.95,
+                description=f"`{suspect_var}` resolves to negative value {concrete_val} on the flagged path."
+            ))
+        else:
+            acc.add(Evidence(
+                label="concrete_nonnegative_value_used",
+                polarity="fp",
+                weight=0.90,
+                description=f"`{suspect_var}` resolves to non-negative value {concrete_val} on the flagged path."
+            ))
+
+    if _has_pattern(code, r'malloc\s*\(|memcpy\s*\(|\[\s*\w+\s*\]'):
         acc.add(Evidence(
             label="negative_used_as_size",
             polarity="bug",
@@ -3090,22 +3808,35 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
     decision = DecisionAgent.evaluate(acc, 'NEGATIVE_RETURNS')
 
     if decision.classification == "False positive":
-        comment = _build_comment_from_evidence(decision, ctx)
+        if concrete_val is not None and concrete_val >= 0:
+            comment = (f"At line {line} in {function}(), `{suspect_var}` resolves to {concrete_val} before it is used "
+                       f"as a size/index. The flagged path therefore does not carry a negative error code into the "
+                       f"memory operation. False positive.")
+        elif flow.get('guard_cond') and _guard_rejects_negative(suspect_var, flow['guard_cond']):
+            comment = (f"At line {line} in {function}(), `{suspect_var}` is consumed only after guard "
+                       f"`{flow['guard_cond']}` at line {flow.get('guard_line', 0)} rejects negative values. "
+                       f"The signed error path is blocked before the size/index use. False positive.")
+        else:
+            comment = _build_comment_from_evidence(decision, ctx)
         comment = _apply_example_style('False positive', 'NEGATIVE_RETURNS', ctx, code,
                                        code_start_line, line, function, comment)
         return "False positive", comment, "No fix required.", decision.confidence
 
-    _v = ctx.get('var') or 'result'
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, `{_v}` may be negative (e.g., -1 error) and is used as size/index without check (CWE-20, CERT ERR33-C). "
-                   f"Cast to unsigned → ~4GB allocation / OOB.")
-        fix = f"if ({_v} < 0) return ERROR; // CWE-20 CERT ERR33-C\nptr = malloc((size_t){_v});"
+        if concrete_val is not None and concrete_val < 0:
+            comment = (f"In {function}() at line {line}, `{suspect_var}` resolves to {concrete_val} and is then used "
+                       f"as a size/index. Converting that negative error code to an unsigned quantity produces a very "
+                       f"large value and can trigger a huge allocation or out-of-bounds access.")
+        else:
+            comment = (f"In {function}() at line {line}, `{suspect_var}` may be negative (e.g., -1 error) and is used "
+                       f"as size/index without check (CWE-20, CERT ERR33-C). Cast to unsigned → ~4GB allocation / OOB.")
+        fix = f"if ({suspect_var} < 0) return ERROR; // CWE-20 CERT ERR33-C\nptr = malloc((size_t){suspect_var});"
         comment = _apply_example_style('Bug', 'NEGATIVE_RETURNS', ctx, code,
                                        code_start_line, line, function, comment)
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
-    return "Needs review", comment, f"if ({_v}<0) return ERROR; // CWE-20", decision.confidence
+    return "Needs review", comment, f"if ({suspect_var}<0) return ERROR; // CWE-20", decision.confidence
 
 
 # ---------------------------------------------------------------------------
@@ -3474,6 +4205,19 @@ def _analyze_divide_by_zero(code: str, sub_checker: str, events: List[Dict],
                          code_start_line: int = 1, tree=None) -> Tuple[str, str, str, float]:
     ctx = _build_analysis_context(code, 'DIVIDE_BY_ZERO', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = EvidenceAccumulator()
+    resolution_sources = _gather_resolution_sources(
+        code, file, called_function_codes, ctx.get('callers_list', []))
+
+    defect_line_code = _line_text_at(code, line, code_start_line)
+    op_info = _extract_binary_operation(defect_line_code or code, ('/', '%'))
+    divisor_expr = ''
+    divisor_var = ''
+    divisor_val = None
+    if op_info:
+        _, _, divisor_expr = op_info
+        divisor_val = _resolve_expr_value_before_line(code, divisor_expr, line, code_start_line, resolution_sources)
+        vm = re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', divisor_expr)
+        divisor_var = vm.group(0) if vm else ''
 
     if _has_pattern(code, r'if\s*\(.*!=\s*0\s*\)|if\s*\(.*>\s*0\s*\)|if\s*\(.*>=\s*1\s*\)'):
         acc.add(Evidence(
@@ -3492,6 +4236,33 @@ def _analyze_divide_by_zero(code: str, sub_checker: str, events: List[Dict],
             description="Coverity event trace shows explicit non-zero validation before division."
         ))
 
+    if divisor_var:
+        flow = _extract_index_flow(code, divisor_var, line, code_start_line)
+        if flow.get('guard_cond') and _guard_proves_nonzero(divisor_var, flow['guard_cond']):
+            acc.add(Evidence(
+                label="guard_proves_divisor_nonzero",
+                polarity="fp",
+                weight=0.90,
+                description=f"Guard `{flow['guard_cond']}` proves `{divisor_var}` is non-zero on the flagged path."
+            ))
+
+    if divisor_val is not None:
+        ctx['divisor_value'] = divisor_val
+        if divisor_val == 0:
+            acc.add(Evidence(
+                label="concrete_zero_divisor",
+                polarity="bug",
+                weight=0.96,
+                description=f"The divisor resolves to 0 on the flagged path."
+            ))
+        else:
+            acc.add(Evidence(
+                label="concrete_nonzero_divisor",
+                polarity="fp",
+                weight=0.92,
+                description=f"The divisor resolves to non-zero constant {divisor_val} on the flagged path."
+            ))
+
     if not any(e.polarity == "fp" for e in acc.evidence):
         acc.add(Evidence(
             label="division_without_guard",
@@ -3502,35 +4273,29 @@ def _analyze_divide_by_zero(code: str, sub_checker: str, events: List[Dict],
 
     decision = DecisionAgent.evaluate(acc, 'DIVIDE_BY_ZERO')
 
+    _divisor = divisor_var or divisor_expr or ctx.get('var','divisor') or 'divisor'
     if decision.classification == "False positive":
-        comment = _build_comment_from_evidence(decision, ctx)
+        if divisor_val not in (None, 0):
+            comment = (f"At line {line} in {function}(), the divisor `{_divisor}` resolves to {divisor_val} before "
+                       f"the operation. The flagged division therefore cannot execute with a zero denominator on this path. "
+                       f"False positive.")
+        else:
+            comment = _build_comment_from_evidence(decision, ctx)
         return "False positive", comment, "No fix required.", decision.confidence
 
-    # Extract actual divisor variable for accurate fix
-    _divisor = ""
-    try:
-        _lines = code.splitlines()
-        _rel = line - code_start_line
-        if 0 <= _rel < len(_lines):
-            _dl = _lines[_rel]
-            # find divisor after / or %
-            _m = __import__('re').search(r'/\s*([A-Za-z_][A-Za-z0-9_]*)', _dl)
-            if not _m:
-                _m = __import__('re').search(r'%\s*([A-Za-z_][A-Za-z0-9_]*)', _dl)
-            if _m:
-                _divisor = _m.group(1)
-        if not _divisor:
-            _divisor = ctx.get('var','divisor') or 'divisor'
-    except Exception:
-        _divisor = 'divisor'
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, division by `{_divisor}` has no visible non-zero guard (CWE-369, CERT INT33-C). "
-                   f"If `{_divisor}` is zero, this triggers SIGFPE — denial of service.")
+        if divisor_val == 0:
+            comment = (f"In {function}() at line {line}, the divisor `{_divisor}` resolves concretely to 0 on the flagged "
+                       f"path. Executing this division triggers SIGFPE / undefined behavior immediately.")
+        else:
+            comment = (f"In {function}() at line {line}, division by `{_divisor}` has no visible non-zero guard (CWE-369, CERT INT33-C). "
+                       f"If `{_divisor}` is zero, this triggers SIGFPE — denial of service.")
         fix = f"if ({_divisor} == 0) return ERROR; // CWE-369 CERT INT33-C\nresult = dividend / {_divisor};"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
     return "Needs review", comment, f"if ({_divisor} == 0) return ERROR; // CWE-369", decision.confidence
+
 
 
 def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
@@ -3540,14 +4305,39 @@ def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
     ctx = _build_analysis_context(code, 'USE_AFTER_FREE', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = EvidenceAccumulator()
 
-    if _has_pattern(code, r'\bfree\s*\(.*\)\s*;') and _has_pattern(code, r'\b\w+\s*=\s*NULL\s*;'):
-        if _has_pattern(code, r'\bif\s*\(.*!=\s*NULL'):
-            acc.add(Evidence(
-                label="null_after_free_with_check",
-                polarity="fp",
-                weight=0.80,
-                description="Pointer set to NULL after free() and re-checked before reuse — prevents use-after-free."
-            ))
+    _ptr = ctx.get('var') or _extract_var_from_deref(_line_text_at(code, line, code_start_line) or code) or 'ptr'
+    try:
+        _ml = re.search(r'free\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', code)
+        if _ml:
+            _ptr = _ml.group(1)
+    except Exception:
+        pass
+    facts = _use_after_free_facts(code, _ptr, line, code_start_line)
+
+    if facts['null_line'] and facts['guard_line'] and facts['guard_line'] >= facts['null_line'] and        re.search(rf'!\s*{re.escape(_ptr)}|{re.escape(_ptr)}\s*==\s*NULL|{re.escape(_ptr)}\s*!=\s*NULL', facts['guard_cond']):
+        acc.add(Evidence(
+            label="null_after_free_with_check",
+            polarity="fp",
+            weight=0.88,
+            description=(f"`{_ptr}` is set to NULL at line {facts['null_line']} and checked by `{facts['guard_cond']}` "
+                         f"before the flagged use.")
+        ))
+
+    if facts['reassign_line'] and facts['reassign_line'] > facts['free_line']:
+        acc.add(Evidence(
+            label="reassigned_after_free_before_use",
+            polarity="fp",
+            weight=0.86,
+            description=f"`{_ptr}` is reassigned at line {facts['reassign_line']} after free() and before the flagged use."
+        ))
+
+    if facts['free_line']:
+        acc.add(Evidence(
+            label="free_precedes_flagged_use",
+            polarity="bug",
+            weight=0.82,
+            description=f"`free({_ptr})` appears at line {facts['free_line']} before the flagged use at line {line}."
+        ))
 
     if not any(e.polarity == "fp" for e in acc.evidence):
         acc.add(Evidence(
@@ -3560,25 +4350,26 @@ def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
     decision = DecisionAgent.evaluate(acc, 'USE_AFTER_FREE')
 
     if decision.classification == "False positive":
-        comment = _build_comment_from_evidence(decision, ctx)
+        if facts['reassign_line']:
+            comment = (f"`{_ptr}` is freed at line {facts['free_line']} but is assigned a new value at line {facts['reassign_line']} "
+                       f"before the flagged use at line {line}. The later access therefore targets the replacement object, "
+                       f"not freed storage. False positive.")
+        else:
+            comment = (f"`{_ptr}` is freed at line {facts['free_line']} and then set to NULL at line {facts['null_line']}; "
+                       f"the following guard `{facts['guard_cond']}` prevents the flagged path from dereferencing freed storage. "
+                       f"False positive.")
         return "False positive", comment, "No fix required.", decision.confidence
 
-    _ptr = ctx.get('var') or _extract_var_from_deref(code) or 'ptr'
-    # try to find actual freed var: look for free(var) near line
-    try:
-        _ml = __import__('re').search(r'free\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', code)
-        if _ml:
-            _ptr = _ml.group(1)
-    except Exception:
-        pass
     if decision.classification == "Bug":
         comment = (f"At line {line} in {function}(), `{_ptr}` may be dereferenced after being freed (CWE-416, CERT MEM30-C). "
-                   f"If `{_ptr}` is not NULLed after free(), subsequent access is use-after-free — heap corruption / code execution.")
+                   f"`free({_ptr})` occurs at line {facts['free_line'] or 'an earlier line'} and no replacement value or effective NULL guard "
+                   f"is proven before the later use. That leaves a dangling pointer and the access can corrupt the heap or crash the process.")
         fix = f"free({_ptr}); {_ptr} = NULL;\nif (!{_ptr}) return ERROR; // CWE-416 CERT MEM30-C"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
     return "Needs review", comment, f"free({_ptr}); {_ptr}=NULL; if(!{_ptr}) return; // CWE-416", decision.confidence
+
 
 
 def _analyze_sizeof_mismatch(code: str, sub_checker: str, events: List[Dict],
@@ -3692,6 +4483,28 @@ def _analyze_shift_overflow(code: str, sub_checker: str, events: List[Dict],
                          code_start_line: int = 1, tree=None) -> Tuple[str, str, str, float]:
     ctx = _build_analysis_context(code, 'SHIFT_OVERFLOW', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = EvidenceAccumulator()
+    resolution_sources = _gather_resolution_sources(
+        code, file, called_function_codes, ctx.get('callers_list', []))
+    defect_line_code = _line_text_at(code, line, code_start_line)
+    op_info = _extract_binary_operation(defect_line_code or code, ('<<', '>>'))
+    value_expr = shift_expr = shift_var = ''
+    shift_val = None
+    bit_width = 32
+    if op_info:
+        value_expr, op_token, shift_expr = op_info
+        shift_val = _resolve_expr_value_before_line(code, shift_expr, line, code_start_line, resolution_sources)
+        vm = re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', shift_expr)
+        shift_var = vm.group(0) if vm else ''
+        base_name_m = re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', value_expr)
+        if base_name_m:
+            decl = _infer_integral_decl_bounds(base_name_m.group(0), resolution_sources)
+            bit_width = decl.get('bits', 32)
+            ctx['integer_type'] = decl.get('type_text') or 'int'
+        else:
+            ctx['integer_type'] = 'int'
+        ctx['shift_operator'] = op_token
+    else:
+        ctx['integer_type'] = 'int'
 
     if _has_pattern(code, r'if\s*\(.*<\s*\d+|if\s*\(.*>=\s*\d+'):
         acc.add(Evidence(
@@ -3700,6 +4513,37 @@ def _analyze_shift_overflow(code: str, sub_checker: str, events: List[Dict],
             weight=0.80,
             description="Shift amount is validated against the operand bit-width before shifting."
         ))
+
+    if shift_var:
+        flow = _extract_index_flow(code, shift_var, line, code_start_line)
+        limit_val = _resolve_integer_constant(flow.get('guard_limit', ''), resolution_sources) if flow.get('guard_limit') else None
+        if limit_val is not None and flow.get('guard_op') in ('<', '<='):
+            max_shift = limit_val - 1 if flow['guard_op'] == '<' else limit_val
+            if max_shift < bit_width:
+                acc.add(Evidence(
+                    label="guard_keeps_shift_in_range",
+                    polarity="fp",
+                    weight=0.90,
+                    description=(f"Guard `{flow['guard_cond']}` keeps `{shift_var}` below the {bit_width}-bit width of the shifted value.")
+                ))
+
+    if shift_val is not None:
+        ctx['shift_value'] = shift_val
+        ctx['shift_bits'] = bit_width
+        if 0 <= shift_val < bit_width:
+            acc.add(Evidence(
+                label="concrete_shift_in_range",
+                polarity="fp",
+                weight=0.93,
+                description=f"Shift amount {shift_val} is within the {bit_width}-bit width of the operand."
+            ))
+        else:
+            acc.add(Evidence(
+                label="concrete_shift_out_of_range",
+                polarity="bug",
+                weight=0.96,
+                description=f"Shift amount {shift_val} is outside the valid range [0, {bit_width - 1}]."
+            ))
 
     if not any(e.polarity == "fp" for e in acc.evidence):
         acc.add(Evidence(
@@ -3712,17 +4556,29 @@ def _analyze_shift_overflow(code: str, sub_checker: str, events: List[Dict],
     decision = DecisionAgent.evaluate(acc, 'SHIFT_OVERFLOW')
 
     if decision.classification == "False positive":
-        comment = _build_comment_from_evidence(decision, ctx)
+        if shift_val is not None and 0 <= shift_val < bit_width:
+            comment = (f"At line {line} in {function}(), the shift amount resolves to {shift_val}. That is inside the valid "
+                       f"range [0, {bit_width - 1}] for `{ctx['integer_type']}`, so the flagged shift is defined on this path. "
+                       f"False positive.")
+        else:
+            comment = _build_comment_from_evidence(decision, ctx)
         return "False positive", comment, "No fix required.", decision.confidence
 
     if decision.classification == "Bug":
-        comment = (f"In {function}() at line {line}, a shift operation has no guard against shift amount >= bit-width. "
-                   f"In C, shifting by >= width is undefined behavior.")
-        fix = "Guard shift operation:\nif (shift >= sizeof(x)*8) return ERROR;\nresult = x << shift;"
+        if shift_val is not None and shift_val >= bit_width:
+            comment = (f"In {function}() at line {line}, the shift amount resolves to {shift_val}, but `{ctx['integer_type']}` is only "
+                       f"{bit_width} bits wide. Shifting by {shift_val} is out of range and therefore undefined behavior in C.")
+        else:
+            comment = (f"In {function}() at line {line}, a shift operation has no guard against shift amount >= bit-width. "
+                       f"In C, shifting by >= width is undefined behavior.")
+        shift_ref = shift_var or shift_expr or 'shift'
+        value_ref = value_expr or 'value'
+        fix = f"if ({shift_ref} >= sizeof({value_ref})*8) return;\nresult = {value_ref} {ctx.get('shift_operator', '<<')} {shift_ref};"
         return "Bug", comment, fix, decision.confidence
 
     comment = _build_comment_from_evidence(decision, ctx)
     return "Needs review", comment, "Add explicit shift amount validation before all shift operations.", decision.confidence
+
 
 
 def _analyze_missing_break(code: str, sub_checker: str, events: List[Dict],
@@ -3920,6 +4776,11 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
             confidence = min(float(confidence), 0.70)
         if notes:
             comment = (comment + "\n\n" + " ".join(notes)).strip()
+        # A "Needs review" verdict means the tool could not prove a code-specific
+        # remediation. Do not present a placeholder guard as if it were a valid
+        # patch; keep the analysis open and explain why.
+        if classification == 'Needs review' and str(fix or '').strip().lower() != 'no fix required.':
+            fix = 'Manual review required.'
         # A fix must be a source-anchored patch, not generic secure-coding
         # advice.  Withhold templates that cannot be validated against this
         # function and explain the missing proof in the analysis instead.
