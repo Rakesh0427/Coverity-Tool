@@ -393,6 +393,7 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
     col_checker   = _fuzzy_col_match(headers, ["checker", "type", "issue type", "checker type"])
     col_type      = _fuzzy_col_match(headers, ["type", "subtype", "checker type"])
     col_severity  = _fuzzy_col_match(headers, ["severity", "impact", "priority"])
+    col_action    = _fuzzy_col_match(headers, ["action", "triage action", "defect action"])
     col_file      = _fuzzy_col_match(headers, ["file", "source file", "path", "filepath", "file path"])
     col_line      = _fuzzy_col_match(headers, ["line", "line number", "location", "lineno"])
     col_function  = _fuzzy_col_match(headers, ["function", "function name", "procedure", "func"])
@@ -442,6 +443,13 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
         checker_val = str(row[col_checker]) if col_checker != -1 and col_checker < len(row) and row[col_checker] is not None else ""
         type_val = str(row[col_type]) if col_type != -1 and col_type < len(row) and row[col_type] is not None else ""
         severity_val = str(row[col_severity]) if col_severity != -1 and col_severity < len(row) and row[col_severity] is not None else ""
+        action_val = str(row[col_action]) if col_action != -1 and col_action < len(row) and row[col_action] is not None else ""
+        if action_val:
+            try:
+                from coverity_push import normalize_action
+                action_val = normalize_action(action_val)
+            except Exception:
+                pass
 
         events = []
         if col_events_json != -1 and col_events_json < len(row) and row[col_events_json]:
@@ -473,6 +481,7 @@ def parse_coverity_excel(excel_path: str) -> List[Dict[str, Any]]:
             "checker": checker_val,
             "type": type_val,
             "severity": severity_val,
+            "action": action_val,
             "file": file_val,
             "line": line,
             "line_is_various": line_is_various,
@@ -501,9 +510,9 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
     ws  = wb.active
     ws.title = "Coverity"
 
-    headers = ["CID", "Checker", "Subtype", "Severity", "File",
+    headers = ["CID", "Checker", "Subtype", "Severity", "Action", "File",
                "Line", "Function", "Events Summary", "EventsJSON"]
-    widths  = [8, 22, 25, 12, 45, 7, 30, 60, 40]
+    widths  = [8, 22, 25, 12, 18, 45, 7, 30, 60, 40]
 
     # ---- Header row ----
     hdr_fill  = PatternFill("solid", fgColor="1F4E79")
@@ -539,11 +548,19 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
         except Exception:
             events_json = "[]"
 
+        action = d.get("action", "")
+        if action:
+            try:
+                from coverity_push import normalize_action
+                action = normalize_action(action)
+            except Exception:
+                pass
         values = [
             d.get("cid", ""),
             d.get("checker", ""),
             d.get("type", ""),
             d.get("severity", ""),
+            action,
             d.get("file", ""),
             d.get("line", 0),
             d.get("function", ""),
@@ -552,7 +569,7 @@ def write_pull_excel(defects: List[Dict[str, Any]], output_path: str) -> None:
         ]
         for col_idx, val in enumerate(values, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            if col_idx == 8:   # Events Summary
+            if col_idx == 9:   # Events Summary
                 cell.alignment = wrap_events
             else:
                 cell.alignment = wrap_all

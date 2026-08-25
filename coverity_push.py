@@ -17,8 +17,10 @@ The pipeline is four small, independently testable steps::
     push_rows(client, rows, store, ...)  -> PushReport
 
 ``client`` is any object exposing ``update_triage(cid_list, triage_store_name,
-classification, comment)`` returning ``(success_count, failed_cids, error)`` —
-i.e. :class:`coverity_soap_client.CoveritySOAPClient`, or a fake in tests.
+classification, comment, action=None)`` returning ``(success_count,
+failed_cids, error)`` — i.e. :class:`coverity_soap_client.CoveritySOAPClient`,
+or a fake in tests. Older clients without an ``action`` argument are still
+called as a fallback, but they cannot write Coverity's Action field.
 """
 from __future__ import annotations
 
@@ -39,6 +41,67 @@ except Exception:  # pragma: no cover - keeps the module importable standalone
 
 # Server-side batch limit for updateTriageForCIDsInTriageStore.
 MAX_BATCH = 100
+
+# Coverity Connect's built-in Action attribute values.  Keep the UI spelling the
+# server normally exposes; accept common case/spacing variants when reading CSVs
+# or older generated files.
+ACTION_UNDECIDED = "Undecided"
+ACTION_FIX_REQUIRED = "Fix Required"
+ACTION_FIX_SUBMITTED = "Fix Submitted"
+ACTION_IGNORE = "Ignore"
+ACTION_MODELING_REQUIRED = "Modeling Required"
+
+ACTION_VALUES = [
+    ACTION_UNDECIDED,
+    ACTION_FIX_REQUIRED,
+    ACTION_FIX_SUBMITTED,
+    ACTION_IGNORE,
+    ACTION_MODELING_REQUIRED,
+]
+
+_ACTION_MAP = {
+    "": "",
+    "undecided": ACTION_UNDECIDED,
+    "fix required": ACTION_FIX_REQUIRED,
+    "fix_required": ACTION_FIX_REQUIRED,
+    "fix-required": ACTION_FIX_REQUIRED,
+    "fix submitted": ACTION_FIX_SUBMITTED,
+    "fix_submitted": ACTION_FIX_SUBMITTED,
+    "fix-submitted": ACTION_FIX_SUBMITTED,
+    "ignore": ACTION_IGNORE,
+    "modeling required": ACTION_MODELING_REQUIRED,
+    "modelling required": ACTION_MODELING_REQUIRED,  # common non-US spelling
+    "modeling_required": ACTION_MODELING_REQUIRED,
+    "modelling_required": ACTION_MODELING_REQUIRED,
+    "modeling-required": ACTION_MODELING_REQUIRED,
+    "modelling-required": ACTION_MODELING_REQUIRED,
+}
+
+# Sensible defaults when the analysis/final-decision file has no Action column.
+# Users can still edit the action in the Push dialog before writing to Connect.
+DEFAULT_ACTION_BY_CLASSIFICATION = {
+    "Bug": ACTION_FIX_REQUIRED,
+    "Accepted": ACTION_FIX_REQUIRED,
+    "False positive": ACTION_IGNORE,
+    "False Positive": ACTION_IGNORE,
+    "Intentional": ACTION_IGNORE,
+    "Needs review": ACTION_UNDECIDED,
+    "Pending": ACTION_UNDECIDED,
+}
+
+
+def normalize_action(action: str | None) -> str:
+    """Return a Coverity Action value, accepting common spellings/cases."""
+    raw = str(action or "").strip()
+    key = " ".join(raw.replace("_", " ").replace("-", " ").split()).lower()
+    return _ACTION_MAP.get(key, raw)
+
+
+def default_action_for_classification(classification: str | None) -> str:
+    """Pick a safe Action default from a tool/server classification."""
+    cls = str(classification or "").strip()
+    return DEFAULT_ACTION_BY_CLASSIFICATION.get(cls, ACTION_UNDECIDED)
+
 
 # Selection modes accepted by :func:`select_defects`.
 MODE_ALL = "all"
@@ -104,6 +167,7 @@ class PushRow:
     cid: int
     classification: str
     comment: str
+    action: str = ACTION_UNDECIDED
     checker: str = ""
     file: str = ""
     line: int = 0
@@ -125,6 +189,11 @@ class PushRow:
         """``classification`` translated to a Connect triage-store value."""
         return CLASSIFICATION_MAP.get(self.classification, self.classification)
 
+    @property
+    def server_action(self):
+        """``action`` normalised to a Connect triage-store value."""
+        return normalize_action(self.action) or default_action_for_classification(self.classification)
+
 
 def build_push_rows(defects, reviewer="", stamp_comment=True, max_comment=4000):
     """Convert analysed defect dicts into :class:`PushRow` objects.
@@ -132,6 +201,11 @@ def build_push_rows(defects, reviewer="", stamp_comment=True, max_comment=4000):
     An accepted defect pushes its *underlying* classification (Bug / False
     positive / ...), not the literal word "Accepted" — "Accepted" is a review
     state in this tool, not a Coverity classification.
+
+    The Coverity Action attribute is carried from ``Action``/``FinalAction``/
+    ``action`` when present. If an older output file lacks that column, a safe
+    default is derived from the classification (Bug → Fix Required, false
+    positive/intentional → Ignore, needs review → Undecided).
 
     When ``stamp_comment`` is set the comment gets a short provenance suffix so
     anyone reading the defect in Connect knows where the triage came from.
@@ -142,10 +216,12 @@ def build_push_rows(defects, reviewer="", stamp_comment=True, max_comment=4000):
         cid = _coerce_cid(d.get("cid"))
         if cid is None:
             continue
-        cls = (d.get("classification") or "").strip() or "Needs review"
+        cls = (d.get("classification") or d.get("FinalClassification") or "").strip() or "Needs review"
         if cls.lower() == "accepted":
             cls = (d.get("base_classification") or "Bug").strip()
-        comment = (d.get("comment") or "").strip()
+        raw_action = (d.get("action") or d.get("Action") or d.get("FinalAction") or "")
+        action = normalize_action(raw_action) or default_action_for_classification(cls)
+        comment = (d.get("comment") or d.get("FinalComment") or "").strip()
         if stamp_comment:
             comment = _stamp(comment, reviewer)
         if max_comment and len(comment) > max_comment:
@@ -153,10 +229,11 @@ def build_push_rows(defects, reviewer="", stamp_comment=True, max_comment=4000):
         by_cid[cid] = PushRow(
             cid=cid,
             classification=cls,
+            action=action,
             comment=comment,
-            checker=str(d.get("checker") or ""),
-            file=str(d.get("file") or ""),
-            line=_coerce_cid(d.get("line")) or 0,
+            checker=str(d.get("checker") or d.get("Checker") or ""),
+            file=str(d.get("file") or d.get("File") or ""),
+            line=_coerce_cid(d.get("line") or d.get("Line")) or 0,
         )
     return list(by_cid.values())
 
@@ -267,20 +344,34 @@ class PushReport:
 
 
 def group_rows(rows):
-    """Group rows into server batches keyed by (classification, comment).
+    """Group rows into server batches keyed by (classification, action, comment).
 
-    ``updateTriageForCIDsInTriageStore`` applies ONE classification+comment to a
-    list of CIDs, so rows can only share a call when both fields are identical.
-    Each group is further split to :data:`MAX_BATCH` CIDs (a server limit).
+    ``updateTriageForCIDsInTriageStore`` applies ONE set of state attributes to
+    a list of CIDs, so rows can only share a call when classification, action and
+    comment are identical. Each group is further split to :data:`MAX_BATCH` CIDs
+    (a server limit).
     """
     groups = {}
     for row in rows or []:
-        groups.setdefault((row.classification, row.comment), []).append(row)
+        groups.setdefault((row.classification, row.server_action, row.comment), []).append(row)
     batches = []
-    for (cls, comment), group in groups.items():
+    for (cls, action, comment), group in groups.items():
         for i in range(0, len(group), MAX_BATCH):
-            batches.append((cls, comment, group[i: i + MAX_BATCH]))
+            batches.append((cls, action, comment, group[i: i + MAX_BATCH]))
     return batches
+
+
+def _update_triage(client, cids, triage_store, classification, action, comment):
+    """Call a client with Action support, falling back to the legacy signature."""
+    try:
+        return client.update_triage(cids, triage_store, classification, comment, action=action)
+    except TypeError as exc:
+        # Some older tests/custom clients implement the pre-Action signature.
+        # Retry only for the common signature mismatch; genuine TypeErrors raised
+        # from inside a modern client will still be surfaced by the fallback call.
+        if "action" not in str(exc) and "positional" not in str(exc) and "argument" not in str(exc):
+            raise
+        return client.update_triage(cids, triage_store, classification, comment)
 
 
 def push_rows(client, rows, triage_store, progress_cb=None,
@@ -318,14 +409,14 @@ def push_rows(client, rows, triage_store, progress_cb=None,
 
     total = len(queue)
     done = 0
-    for cls, comment, batch in group_rows(queue):
+    for cls, action, comment, batch in group_rows(queue):
         cids = [r.target_cid for r in batch]
         if dry_run:
             ok_count, failed_cids, error = len(cids), [], None
         else:
             try:
-                ok_count, failed_cids, error = client.update_triage(
-                    cids, triage_store, cls, comment)
+                ok_count, failed_cids, error = _update_triage(
+                    client, cids, triage_store, cls, action, comment)
             except Exception as exc:  # network/SOAP blow-up mid-run
                 ok_count, failed_cids, error = 0, list(cids), str(exc)
 
@@ -369,5 +460,6 @@ def apply_status_to_results(results, rows):
         r["push_status"] = row.status
         r["push_error"] = row.error
         r["pushed_cid"] = row.target_cid
+        r["pushed_action"] = row.server_action
         touched += 1
     return touched
