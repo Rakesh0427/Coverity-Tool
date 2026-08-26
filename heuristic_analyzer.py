@@ -2669,7 +2669,7 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
 
     # An access that sits inside the `else` of the bounds check executes only
     # when the check FAILED — the guard proves the violation instead of
-    # preventing it (CSV rows #94/#95: else-branch write past the end).
+    # preventing it (the else-branch write past the end).
     if access_line and code and _access_in_else_of_guard(code, guard_line, access_line,
                                                          code_start_line):
         _ub = re.search(rf'\b{re.escape(idx_var)}\b\s*(<=|<)\s*(\w+)', guard_cond)
@@ -2720,7 +2720,7 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
                               or ub_str == arr_name):
             # An inclusive `<=` against the array's own size expression is the
             # classic off-by-one: it admits index == size, one past the last
-            # valid element (CSV rows #93/#100/#101/#122-133).
+            # valid element.
             if ub_op == '<=' and (ub_str == arr_size_expr or ub_str in arr_size_expr
                                   or arr_size_expr in ub_str):
                 _sz = arr_size if arr_size else arr_size_expr
@@ -3786,7 +3786,7 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
             description="Arithmetic operates on unsigned integers — wrap-around is well-defined in C."
         ))
 
-    # Explicit range guard on the flagged operand (CSV #90): a reject-style
+    # Explicit range guard on the flagged operand: a reject-style
     # `if (v < 0 || v >= K) return;` bounds v to [0, K-1]; with a resolved
     # constant operand the whole result range is provably inside the type.
     if op_token in ('+', '-') and lhs_expr and re.match(r'^[A-Za-z_]\w*$', lhs_expr or ''):
@@ -3938,7 +3938,7 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
 
     # STRING_NULL flagged on a string READ (strlen/strcmp/...) of a buffer
     # that is zero-initialized before the read: the buffer always holds a
-    # terminator, so the read cannot run past it (CSV #140).
+    # terminator, so the read cannot run past it.
     _line_text = _line_text_at(code, line, code_start_line)
     _read_m = re.search(r'\b(?:strlen|strcmp|strncmp|strchr|strstr|puts)\s*\(\s*([A-Za-z_]\w*)',
                         _line_text or '')
@@ -4144,8 +4144,8 @@ def _analyze_forward_null(code: str, sub_checker: str, events: List[Dict],
             ))
 
         # The LAST assignment before the deref decides the value on this
-        # path: an address-taking RHS (`ptr = &obj[...]`) cannot be NULL
-        # (CSV #85: the pointer is set to a valid slot address, then used).
+        # path: an address-taking RHS (`ptr = &obj[...]`) cannot be NULL,
+        # because the pointer is set to a valid slot address and then used.
         _last_assign_line, _last_assign_text = 0, ''
         for _i, _raw in enumerate(code.splitlines()):
             _abs = code_start_line + _i
