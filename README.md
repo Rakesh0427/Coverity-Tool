@@ -62,16 +62,13 @@ python -m compileall -q .
 
 Defects are optionally corroborated by a second, independent analyzer: after a
 defect is anchored to a source line, the tool runs **cppcheck** on that file
-and records any finding within ±3 lines as independent confirmation.
-**cppcheck** replaced semgrep (which required the online Semgrep registry and
-could not ship inside the Windows exe); it runs fully offline, its rules are
-compiled into the binary, and `pip install -r requirements.txt` gives you the
-library-form wheel that bundles the official cppcheck binary. See
-[docs/ALTERNATIVES_TO_SEMGREP.md](docs/ALTERNATIVES_TO_SEMGREP.md) for the
-full comparison and migration notes.
+and records any finding within ±3 lines as independent confirmation. cppcheck
+runs fully offline (its rules are compiled into the binary), is native and
+fast, and `pip install -r requirements.txt` gives you the library-form wheel
+that bundles the official cppcheck binary. See
+[docs/CORROBORATION_BACKEND.md](docs/CORROBORATION_BACKEND.md) for details.
 
-- Disable with `COVERITY_DISABLE_CPPCHECK=1` (legacy
-  `COVERITY_DISABLE_SEMGREP=1` still works).
+- Disable with `COVERITY_DISABLE_CPPCHECK=1`.
 - `COVERITY_CPPCHECK_BIN` overrides the binary path; run `python capabilities.py`
   to see whether the backend is live.
 

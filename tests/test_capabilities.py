@@ -107,8 +107,6 @@ def _fake_cppcheck_bin(monkeypatch, path="/usr/bin/cppcheck"):
 def test_cppcheck_is_enabled_by_default(monkeypatch):
     """cppcheck is corroboration-only and ON by default; the per-file cache
     bounds the cost, so no env flag is required to use it."""
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
     monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
     _fake_cppcheck_bin(monkeypatch)
 
@@ -123,8 +121,7 @@ def test_cppcheck_is_enabled_by_default(monkeypatch):
 
 def test_cppcheck_disable_flag_turns_it_off(monkeypatch):
     """COVERITY_DISABLE_CPPCHECK=1 must be able to opt out."""
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
     monkeypatch.setenv("COVERITY_DISABLE_CPPCHECK", "1")
     _fake_cppcheck_bin(monkeypatch)
 
@@ -141,11 +138,8 @@ def test_cppcheck_disable_flag_turns_it_off(monkeypatch):
 def test_cppcheck_timeout_reports_clearly_not_as_a_crash(monkeypatch):
     """A slow cppcheck start is a timeout, not a crash: the detail must read
     'timed out' (with guidance), never 'probe raised'."""
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
     monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
     monkeypatch.delenv("COVERITY_CPPCHECK_PROBE_TIMEOUT", raising=False)
-    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
     _fake_cppcheck_bin(monkeypatch)
 
     def _slow(*_a, **kw):
@@ -161,11 +155,8 @@ def test_cppcheck_timeout_reports_clearly_not_as_a_crash(monkeypatch):
 
 
 def test_cppcheck_nonzero_exit_reports_returncode(monkeypatch):
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
     monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
     monkeypatch.delenv("COVERITY_CPPCHECK_PROBE_TIMEOUT", raising=False)
-    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
     _fake_cppcheck_bin(monkeypatch)
 
     class _R:
@@ -180,8 +171,6 @@ def test_cppcheck_nonzero_exit_reports_returncode(monkeypatch):
 
 def test_cppcheck_missing_binary_reports_install_hint(monkeypatch):
     """No binary anywhere must explain how to get one, not crash."""
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
     monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
     _fake_cppcheck_bin(monkeypatch, path=None)
     cap = capabilities._probe_cppcheck()
@@ -191,7 +180,6 @@ def test_cppcheck_missing_binary_reports_install_hint(monkeypatch):
 
 def test_cppcheck_probe_timeout_default(monkeypatch):
     monkeypatch.delenv("COVERITY_CPPCHECK_PROBE_TIMEOUT", raising=False)
-    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
     assert capabilities.cppcheck_probe_timeout() == \
         capabilities.CPPCHECK_PROBE_TIMEOUT_DEFAULT
 
@@ -201,49 +189,10 @@ def test_cppcheck_probe_timeout_env_override(monkeypatch):
     assert capabilities.cppcheck_probe_timeout() == 12.5
 
 
-def test_cppcheck_probe_timeout_legacy_env_still_works(monkeypatch):
-    """Old COVERITY_SEMGREP_PROBE_TIMEOUT scripts keep working."""
-    monkeypatch.setenv("COVERITY_SEMGREP_PROBE_TIMEOUT", "7.5")
-    assert capabilities.cppcheck_probe_timeout() == 7.5
-
-
 def test_cppcheck_probe_timeout_invalid_env_falls_back(monkeypatch):
     monkeypatch.setenv("COVERITY_CPPCHECK_PROBE_TIMEOUT", "not-a-number")
     assert capabilities.cppcheck_probe_timeout() == \
         capabilities.CPPCHECK_PROBE_TIMEOUT_DEFAULT
-
-
-def test_cppcheck_legacy_semgrep_disable_still_disables(monkeypatch):
-    """COVERITY_DISABLE_SEMGREP=1 keeps working for old scripts."""
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
-    monkeypatch.setenv("COVERITY_DISABLE_SEMGREP", "1")
-    _fake_cppcheck_bin(monkeypatch)
-
-    class _R:
-        returncode = 0
-        stdout = "Cppcheck 2.17.1\n"
-
-    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
-    caps = capabilities.probe(force=True)
-    assert caps["cppcheck"].available is False
-    assert "COVERITY_DISABLE_SEMGREP" in caps["cppcheck"].detail
-
-
-def test_cppcheck_legacy_enable_zero_still_disables(monkeypatch):
-    """COVERITY_ENABLE_SEMGREP=0 keeps working for old scripts."""
-    monkeypatch.setenv("COVERITY_ENABLE_SEMGREP", "0")
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
-    _fake_cppcheck_bin(monkeypatch)
-
-    class _R:
-        returncode = 0
-        stdout = "Cppcheck 2.17.1\n"
-
-    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
-    caps = capabilities.probe(force=True)
-    assert caps["cppcheck"].available is False
 
 
 def test_find_cppcheck_bin_env_override(monkeypatch, tmp_path):

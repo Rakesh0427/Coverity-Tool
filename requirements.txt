@@ -10,13 +10,11 @@ requests==2.32.3
 zeep==4.2.1
 libclang==18.1.1
 z3-solver==4.12.6.0
-# cppcheck: corroboration backend (replaces semgrep==1.45.0).  Semgrep needed
-# the online registry (p/c-and-cpp) and a CLI on PATH, so it failed offline
-# and never worked inside the frozen Windows exe.  cppcheck is fully offline
-# (its rules ship inside the binary), is native and fast, and this wheel
-# bundles the official cppcheck 2.17.1 binary as a Python library
-# (cppcheck.get_cppcheck_dir()).  Install the official cppcheck binary
-# instead if you prefer: the tool also finds `cppcheck` on PATH.
+# cppcheck: corroboration backend — fully offline (its rules ship inside the
+# binary), native and fast.  This wheel bundles the official cppcheck 2.17.1
+# binary as a Python library (cppcheck.get_cppcheck_dir()).  Install the
+# official cppcheck binary instead if you prefer: the tool also finds
+# `cppcheck` on PATH.
 cppcheck==1.5.1
 tree-sitter==0.23.2
 tree-sitter-c==0.23.4

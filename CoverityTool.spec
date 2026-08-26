@@ -37,7 +37,7 @@ a = Analysis(
     binaries=[],
     datas=_tcl_datas + _cppcheck_datas + [
         ('docs/Coverity_Tool_User_Guide.docx', 'docs'),
-        ('docs/ALTERNATIVES_TO_SEMGREP.md', 'docs'),
+        ('docs/CORROBORATION_BACKEND.md', 'docs'),
         ('docs/sample_src', 'docs/sample_src'),
         ('docs/sample_report', 'docs/sample_report'),
         ('COVERITY_TOOL_MANUAL.md', '.'),

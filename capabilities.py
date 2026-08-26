@@ -71,39 +71,25 @@ CPPCHECK_PROBE_TIMEOUT_DEFAULT = 10.0
 def cppcheck_probe_timeout() -> float:
     """Seconds to allow for ``cppcheck --version`` before giving up.
 
-    Override with ``COVERITY_CPPCHECK_PROBE_TIMEOUT`` (seconds, float); the
-    legacy ``COVERITY_SEMGREP_PROBE_TIMEOUT`` name is still honoured so old
-    scripts keep working.  A non-numeric or sub-second value falls back to the
-    default.  Set ``COVERITY_DISABLE_CPPCHECK=1`` (or the legacy
-    ``COVERITY_DISABLE_SEMGREP=1``) to skip the probe entirely.
+    Override with ``COVERITY_CPPCHECK_PROBE_TIMEOUT`` (seconds, float); a
+    non-numeric or sub-second value falls back to the default.  Set
+    ``COVERITY_DISABLE_CPPCHECK=1`` to skip the probe entirely.
     """
-    for var in ("COVERITY_CPPCHECK_PROBE_TIMEOUT",
-                "COVERITY_SEMGREP_PROBE_TIMEOUT"):
-        raw = os.environ.get(var, "").strip()
-        if raw:
-            try:
-                return max(1.0, float(raw))
-            except ValueError:
-                pass
+    raw = os.environ.get("COVERITY_CPPCHECK_PROBE_TIMEOUT", "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            pass
     return CPPCHECK_PROBE_TIMEOUT_DEFAULT
-
-
-def semgrep_probe_timeout() -> float:
-    """Deprecated alias for :func:`cppcheck_probe_timeout`.
-
-    Kept so callers of the old semgrep-backed API do not break; new code
-    should call :func:`cppcheck_probe_timeout` directly.
-    """
-    return cppcheck_probe_timeout()
 
 
 def find_cppcheck_bin() -> Optional[str]:
     """Locate the cppcheck executable used for corroboration.
 
-    cppcheck replaces semgrep as the corroboration backend: it runs fully
-    offline (its rules ship inside the binary — no registry, no network) and
-    is small enough to bundle inside the frozen Windows exe.  Resolution
-    order:
+    cppcheck is the corroboration backend: it runs fully offline (its rules
+    ship inside the binary — no registry, no network) and is small enough to
+    bundle inside the frozen Windows exe.  Resolution order:
 
     1. ``COVERITY_CPPCHECK_BIN`` — explicit path to the binary.
     2. ``cppcheck`` on PATH — the official install (package manager, official
@@ -224,20 +210,11 @@ def _probe_flow() -> Capability:
 
 def _probe_cppcheck() -> Capability:
     """cppcheck is corroborating evidence only, is cached per-file, and is on
-    by default.  Disable with COVERITY_DISABLE_CPPCHECK=1 (or the legacy
-    COVERITY_DISABLE_SEMGREP=1 / COVERITY_ENABLE_SEMGREP=0/false/no/off
-    flags, kept so old scripts keep working)."""
+    by default.  Disable with COVERITY_DISABLE_CPPCHECK=1."""
     truthy = ("1", "true", "yes", "on")
     if os.environ.get("COVERITY_DISABLE_CPPCHECK", "").strip().lower() in truthy:
         return Capability("cppcheck", "cppcheck (corroboration)", False,
                           "disabled by COVERITY_DISABLE_CPPCHECK", False)
-    if os.environ.get("COVERITY_DISABLE_SEMGREP", "").strip().lower() in truthy:
-        return Capability("cppcheck", "cppcheck (corroboration)", False,
-                          "disabled by legacy COVERITY_DISABLE_SEMGREP", False)
-    enable = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower()
-    if enable and enable not in truthy:
-        return Capability("cppcheck", "cppcheck (corroboration)", False,
-                          "disabled by legacy COVERITY_ENABLE_SEMGREP=0", False)
     bin_path = find_cppcheck_bin()
     if bin_path is None:
         return Capability(

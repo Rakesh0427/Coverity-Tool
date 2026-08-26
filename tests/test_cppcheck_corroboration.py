@@ -1,9 +1,9 @@
 """Unit tests for the cppcheck corroboration backend in heuristic_analyzer.
 
-cppcheck replaces semgrep as the local, fully-offline corroboration backend.
-These tests pin the CLI contract (the pipe-separated ``--template`` output
-format), the per-file cache and the +/-3-line proximity window without
-requiring a real cppcheck install — subprocess.run is faked.
+cppcheck is the local, fully-offline corroboration backend.  These tests pin
+the CLI contract (the pipe-separated ``--template`` output format), the
+per-file cache and the +/-3-line proximity window without requiring a real
+cppcheck install — subprocess.run is faked.
 """
 import subprocess
 
@@ -18,8 +18,6 @@ def _clean_state(monkeypatch):
     ha._CPPCHECK_AVAILABLE = None
     ha._CPPCHECK_CACHE.clear()
     monkeypatch.delenv("COVERITY_DISABLE_CPPCHECK", raising=False)
-    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
-    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
     monkeypatch.delenv("COVERITY_CPPCHECK_TIMEOUT", raising=False)
     monkeypatch.delenv("COVERITY_CPPCHECK_ARGS", raising=False)
     yield
@@ -93,17 +91,6 @@ def test_disable_flag_skips_subprocess(monkeypatch, tmp_path):
     src = tmp_path / "sample.c"
     src.write_text("int x;\n")
     monkeypatch.setenv("COVERITY_DISABLE_CPPCHECK", "1")
-    calls = _fake_run(monkeypatch, "1|doubleFree|error|msg\n")
-    assert ha._run_cppcheck_check(str(src), defect_line=1, checker="BUFFER_SIZE") \
-        is None
-    assert calls == []
-
-
-def test_legacy_semgrep_disable_flag_still_works(monkeypatch, tmp_path):
-    """Old scripts setting COVERITY_DISABLE_SEMGREP=1 keep working."""
-    src = tmp_path / "sample.c"
-    src.write_text("int x;\n")
-    monkeypatch.setenv("COVERITY_DISABLE_SEMGREP", "1")
     calls = _fake_run(monkeypatch, "1|doubleFree|error|msg\n")
     assert ha._run_cppcheck_check(str(src), defect_line=1, checker="BUFFER_SIZE") \
         is None

@@ -1274,25 +1274,17 @@ def _extract_array_initializer_values(code: str, arr_name: str,
     return values
 
 
-# cppcheck per-file cache and enable flag — cppcheck replaces semgrep as the
-# corroboration backend: it runs fully offline (rules ship inside the binary,
-# no registry/network), starts in milliseconds, and can ship inside the frozen
+# cppcheck per-file cache and enable flag — cppcheck is the corroboration
+# backend: it runs fully offline (rules ship inside the binary, no
+# registry/network), starts in milliseconds, and can ship inside the frozen
 # Windows exe.  It runs at most once per source file (cached).  Disable via
-# COVERITY_DISABLE_CPPCHECK=1 (the legacy COVERITY_DISABLE_SEMGREP=1 and
-# COVERITY_ENABLE_SEMGREP=0/false/no/off flags are still honoured).
+# COVERITY_DISABLE_CPPCHECK=1.
 _CPPCHECK_CACHE: dict = {}
 _CPPCHECK_AVAILABLE: Optional[bool] = None
 
 def _cppcheck_enabled() -> bool:
     truthy = ("1", "true", "yes", "on")
-    # Explicit opt-out wins; legacy semgrep flags still accepted for
-    # compatibility with old scripts.
     if os.environ.get("COVERITY_DISABLE_CPPCHECK", "").strip().lower() in truthy:
-        return False
-    if os.environ.get("COVERITY_DISABLE_SEMGREP", "").strip().lower() in truthy:
-        return False
-    enable = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower()
-    if enable and enable not in truthy:
         return False
     global _CPPCHECK_AVAILABLE
     if _CPPCHECK_AVAILABLE is None:
@@ -1330,9 +1322,7 @@ def _run_cppcheck_check(file_path: str, defect_line: int, checker: str) -> Optio
     """Run cppcheck on the source file and return the first check id near defect_line.
 
     Fully offline: cppcheck's rules are compiled into the binary, so no
-    registry download or network access is ever needed (semgrep's
-    ``p/c-and-cpp`` pack required the online Semgrep registry, which is why it
-    failed in offline environments and inside the frozen exe).
+    registry download or network access is ever needed.
 
     Cached per-file (first defect in a file pays the cost, rest hit cache).
     Enabled by default — disable with COVERITY_DISABLE_CPPCHECK=1.
