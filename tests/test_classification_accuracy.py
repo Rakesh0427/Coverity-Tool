@@ -54,6 +54,12 @@ CODE_CASES = [
      "    log_msg(name);\n"
      "}\n", 3, 'copy_name', 'Bug'),
 
+    ("string_null_strncpy_struct_field", "STRING_NULL",
+     "struct Rec { char center[8]; };\n"
+     "void set_center(struct Rec *r, const char *src) {\n"
+     "    strncpy(r->center, src, 8);\n"
+     "}\n", 3, 'set_center', 'False positive'),
+
     ("string_null_strncpy_minus_one", "STRING_NULL",
      "void copy_name(const char *src) {\n"
      "    char name[32];\n"
@@ -68,6 +74,23 @@ CODE_CASES = [
      "    strncpy(name, src, sizeof(name));\n"
      "    log_msg(name);\n"
      "}\n", 3, 'copy_name', 'Bug'),
+
+    # Fixed-width struct field copied with strncpy and never used as a C string
+    # (no strlen/printf/%s). Coverity BUFFER_SIZE "not null terminated" is FP:
+    # the copy is a byte-field transfer, not a C-string write.
+    ("buffer_size_strncpy_struct_field", "BUFFER_SIZE",
+     "struct Rec { char center[8]; };\n"
+     "void set_center(struct Rec *r, const char *src) {\n"
+     "    strncpy(r->center, src, 8);\n"
+     "}\n", 3, 'set_center', 'False positive'),
+
+    # Pre-zeroed destination: remaining bytes stay NUL after a bounded strncpy.
+    ("buffer_size_strncpy_prezeroed", "BUFFER_SIZE",
+     "void copy_name(const char *src) {\n"
+     "    char name[32];\n"
+     "    memset(name, 0, sizeof(name));\n"
+     "    strncpy(name, src, sizeof(name));\n"
+     "}\n", 4, 'copy_name', 'False positive'),
 
     ("buffer_size_strcpy_unbounded", "BUFFER_SIZE",
      "void copy_name(const char *src) {\n"
