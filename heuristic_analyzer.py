@@ -285,6 +285,29 @@ def _extract_struct_member_size(code: str, member_path: str) -> Optional[str]:
 # Helper utilities
 # ---------------------------------------------------------------------------
 
+def _balanced_index_expression(line: str, after: int) -> str:
+    """Return the index expression starting at the first ``[`` at/after
+    ``after`` (position just past the array name), with balanced brackets.
+
+    The naive ``[^]]+`` capture truncates nested subscripts:
+    ``tbl[map[i]]`` would capture ``map[i`` — losing the closing bracket and
+    breaking the nested-access analysis. Walk from the opening bracket to the
+    matching close bracket instead.
+    """
+    b = line.find('[', after)
+    if b < 0:
+        return ''
+    depth = 0
+    for i in range(b, len(line)):
+        if line[i] == '[':
+            depth += 1
+        elif line[i] == ']':
+            depth -= 1
+            if depth == 0:
+                return line[b + 1:i]
+    return ''
+
+
 def _extract_array_access_near_line(code: str, target_line: int, code_start_line: int = 1) -> Dict:
     lines = code.splitlines()
     best = None
@@ -308,6 +331,12 @@ def _extract_array_access_near_line(code: str, target_line: int, code_start_line
                 best_dist = dist
                 arr = m.group(1)
                 idx_expr = m.group(2).strip()
+                if pat_type == 'subscript':
+                    # Restore nested brackets the `[^\]]+` capture dropped
+                    # (`tbl[map[i]]` -> `map[i]`, not `map[i`).
+                    balanced = _balanced_index_expression(line, m.end(1))
+                    if balanced:
+                        idx_expr = balanced.strip()
                 idx_clean = re.sub(r'\([^)]+\)', '', idx_expr).strip()
                 idx_var_m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\b', idx_clean)
                 idx_var = idx_var_m.group(1) if idx_var_m else idx_expr
@@ -1778,11 +1807,26 @@ def _build_analysis_context(code: str, checker: str, events: List[Dict],
                    'open': 'close', 'socket': 'close', 'strdup': 'free'}
     for call in calls:
         if call.func in alloc_funcs:
-            ctx['resource'] = call.args[0] if call.args else call.func + "_result"
+            # The resource is the variable *receiving* the allocation
+            # (`p = malloc(...)`), not the allocator's first argument (the
+            # size expression for malloc, the filename for fopen, ...).
+            res = ''
+            abs_alloc_line = call.line_hint + code_start_line - 1
+            _clines = code.splitlines()
+            _rel = abs_alloc_line - code_start_line
+            if 0 <= _rel < len(_clines):
+                m_res = re.search(
+                    rf'\b([A-Za-z_]\w*)\s*(?:\*\s*)?=\s*{re.escape(call.func)}\s*\(',
+                    _clines[_rel])
+                if m_res:
+                    res = m_res.group(1)
+            if not res and call.args and re.match(r'^[A-Za-z_]\w*$', call.args[0]):
+                res = call.args[0]
+            ctx['resource'] = res
             ctx['resource_type'] = 'FILE*' if call.func == 'fopen' else 'void*'
             ctx['release_func'] = release_map.get(call.func, 'release')
             ctx['alloc_expr'] = f"{call.func}({', '.join(call.args)})"
-            ctx['alloc_line'] = call.line_hint + code_start_line - 1
+            ctx['alloc_line'] = abs_alloc_line
             break
 
     for call in calls:
@@ -1951,6 +1995,12 @@ def _analyze_buffer_size(code: str, sub_checker: str, events: List[Dict],
             weight=0.85,
             description=f"{sink}() size equals destination size — leaves string unterminated."
         ))
+        # Refute the generic "bounded sink" FP signal: with the size argument
+        # equal to the destination capacity, boundedness protects against
+        # overflow only — it does NOT null-terminate, which is exactly what
+        # this finding flags. Leaving it in would create a dead-even 0.85/0.85
+        # contest that the tie-break could resolve the wrong way.
+        acc.evidence = [e for e in acc.evidence if e.label != 'bounded_sink_function']
 
     if _has_pattern(code, r'\bstrncpy\b|\bstrncat\b|\bsnprintf\b|\bstrlcpy\b') and \
        (_has_pattern(code, r'sizeof\s*\([^)]*\)\s*-\s*1') or ctx['guard_line'] > 0):
@@ -2371,13 +2421,22 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
         # First upper-bound on var in cond: `var < L` / `var <= L` or
         # `L > var` / `L >= var`. Handles for-headers like `for(i=0;i<5;i++)`
         # where a naive first-match would grab the `i = 0` initializer instead.
-        for pat in (rf"\b{re.escape(var)}\b\s*<=?\s*(\w+)",
-                    rf"(\w+)\s*>=?\s*\b{re.escape(var)}\b"):
+        # Returns (limit_token, limit_int_or_None, op_on_var) — the operator is
+        # taken from the comparison that actually establishes the bound,
+        # normalised to the var side (`5 >= i` reports op '<='). A compound
+        # condition such as `i >= 0 && i < 16` must use the `<` of the
+        # upper-bound comparison, not the first comparison in the text.
+        for pat, orient in (
+                (rf"\b{re.escape(var)}\b\s*(<=|<)\s*(\w+)", 'fwd'),
+                (rf"(\w+)\s*(>=|>)\s*\b{re.escape(var)}\b", 'rev')):
             m = re.search(pat, cond)
             if m:
-                tok = m.group(1)
-                return tok, (int(tok) if tok.isdigit() else None)
-        return None, None
+                if orient == 'fwd':
+                    op, tok = m.group(1), m.group(2).strip()
+                else:
+                    tok, op = m.group(1).strip(), {'>=': '<=', '>': '<'}[m.group(2)]
+                return tok, (int(tok) if tok.isdigit() else None), op
+        return None, None, None
 
     if not guard_cond:
         return "none", ""
@@ -2410,17 +2469,17 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
             f"not prevent the out-of-bounds access.")
 
     # No concrete trace value -- find an upper bound on idx_var in the condition.
-    ub_str, ub_int = _upper_bound(guard_cond, idx_var)
+    ub_str, ub_int, ub_op = _upper_bound(guard_cond, idx_var)
     if ub_str:
         if ub_int is not None and arr_size > 0:
-            max_reachable = ub_int - 1 if guard_op == '<' else ub_int
+            max_reachable = ub_int - 1 if ub_op == '<' else ub_int
             if max_reachable < arr_size:
-                cmp_txt = f"{guard_op} {ub_int}" if guard_op else f"< {ub_int}"
+                cmp_txt = f"{idx_var} {ub_op} {ub_int}"
                 return "safe", (
                     f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` with `{cmp_txt}`; "
                     f"the largest reachable index is {max_reachable}, inside `{arr_name}`'s "
                     f"valid range [0, {arr_size - 1}].")
-            cmp_txt = f"{guard_op} {ub_int}" if guard_op else f"< {ub_int}"
+            cmp_txt = f"{idx_var} {ub_op} {ub_int}"
             return "unsafe", (
                 f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` with `{cmp_txt}`, "
                 f"which still permits index {max_reachable}; `{arr_name}` only has {arr_size} elements, "
@@ -2862,7 +2921,7 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     if nested_match:
         nested_inner_arr = nested_match.group(1).strip()
         nested_inner_idx_expr = nested_match.group(2).strip()
-        nested_inner_idx_var_m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)', nested_inner_idx_expr)
+        nested_inner_idx_var_m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\b', nested_inner_idx_expr)
         nested_inner_idx_var = nested_inner_idx_var_m.group(1) if nested_inner_idx_var_m else nested_inner_idx_expr
         inner_flow = _extract_index_flow(code, nested_inner_idx_var, access_line_actual, code_start_line) \
             if nested_inner_idx_var else {}
@@ -3354,7 +3413,7 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
         code, file, called_function_codes, ctx.get('callers_list', []))
     defect_line_code = _line_text_at(code, line, code_start_line)
     op_info = _extract_binary_operation(defect_line_code or code, ('*', '+', '-'))
-    call_names = set(re.findall(r'(\w+)\s*\(', defect_line_code or code))
+    call_names = set(re.findall(r'\b(\w+)\s*\(', defect_line_code or code))
     all_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
     ctx['var'] = all_vars[0] if all_vars else 'the operand'
 
@@ -3388,7 +3447,7 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
     ctx['integer_max'] = type_bounds.get('max', 2**31 - 1)
     ctx['integer_unsigned'] = type_bounds.get('unsigned', False)
 
-    if _has_pattern(code, r'uint(8|16|32|64)_t|unsigned') and        not _has_pattern(code, r'(signed|int32_t|int64_t)'):
+    if _has_pattern(code, r'\buint(8|16|32|64)_t\b|\bunsigned\b') and        not _has_pattern(code, r'\b(signed|int32_t|int64_t)\b'):
         acc.add(Evidence(
             label="unsigned_wrap_defined_behavior",
             polarity="fp",
@@ -3525,6 +3584,11 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
             weight=0.65,
             description=f"{sink}() used without explicit null terminator afterwards."
         ))
+        # A bounded copy length is not a termination guarantee: for a
+        # STRING_NULL finding on strncpy/strncat the "bounded sink" signal is
+        # part of the defect, not evidence against it.
+        if sink in ('strncpy', 'strncat'):
+            acc.evidence = [e for e in acc.evidence if e.label != 'bounded_sink_function']
 
     decision = DecisionAgent.evaluate(acc, 'STRING_NULL')
 
@@ -3682,6 +3746,22 @@ def _analyze_forward_null(code: str, sub_checker: str, events: List[Dict],
             description=f"Coverity trace confirms `{var}` is NULL on this path."
         ))
 
+    # A pointer that receives a value from an allocation which can fail,
+    # with no null guard dominating the dereference, is the canonical
+    # FORWARD_NULL bug.
+    if re.match(r'^[A-Za-z_]\w*$', var or ''):
+        alloc_m = re.search(
+            rf'\b{re.escape(var)}\s*=\s*(malloc|calloc|realloc|fopen|strdup|strndup|tmpfile|open|socket)\s*\(',
+            code)
+        if alloc_m and not ctx.get('guard_line') and not ctx.get('guard_covers_all_paths'):
+            acc.add(Evidence(
+                label="allocation_not_null_checked",
+                polarity="bug",
+                weight=0.80,
+                description=(f"`{var}` is assigned from {alloc_m.group(1)}(), which can return "
+                             f"NULL, and no null guard was found before the dereference at line {line}.")
+            ))
+
     decision = DecisionAgent.evaluate(acc, 'FORWARD_NULL')
 
     if decision.classification == "Bug":
@@ -3739,9 +3819,17 @@ def _analyze_resource_leak(code: str, sub_checker: str, events: List[Dict],
     ctx = _build_analysis_context(code, 'RESOURCE_LEAK', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = build_evidence(ctx, ctx['ev'], 'RESOURCE_LEAK')
 
+    # build_evidence already ran the path-aware leak scan (leak_exit_without_
+    # release / all_exits_release_resource). A release call that exists
+    # somewhere in the body is only counted as FP evidence when no leaking
+    # exit path was proven — otherwise it directly contradicts the path scan.
+    leak_exit_proven = any(e.label == 'leak_exit_without_release' for e in acc.evidence)
+
     release_funcs = ['fclose', 'close', 'free', 'delete', 'CloseHandle', 'pclose', 'regfree']
     for func in release_funcs:
         if re.search(rf'\b{func}\s*\(', code):
+            if leak_exit_proven:
+                continue
             acc.add(Evidence(
                 label=f"release_function_{func}",
                 polarity="fp",
@@ -3758,20 +3846,12 @@ def _analyze_resource_leak(code: str, sub_checker: str, events: List[Dict],
         ))
 
     if _has_pattern(code, r'\bgoto\s+(cleanup|done|error|exit)'):
-        acc.add(Evidence(
-            label="goto_cleanup_pattern",
-            polarity="fp",
-            weight=0.65,
-            description="goto-cleanup pattern detected — all paths may jump to unified exit."
-        ))
-
-    if _has_pattern(code, r'if\s*\(.*\)\s*\{?\s*return'):
-        if not any(e.label.startswith('release_function_') for e in acc.evidence):
+        if not leak_exit_proven:
             acc.add(Evidence(
-                label="early_return_without_release",
-                polarity="bug",
-                weight=0.70,
-                description="Early return detected without visible resource release."
+                label="goto_cleanup_pattern",
+                polarity="fp",
+                weight=0.65,
+                description="goto-cleanup pattern detected — all paths may jump to unified exit."
             ))
 
     decision = DecisionAgent.evaluate(acc, 'RESOURCE_LEAK')
@@ -3921,7 +4001,7 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
         code, file, called_function_codes, ctx.get('callers_list', []))
     defect_line_code = _line_text_at(code, line, code_start_line)
 
-    call_names = set(re.findall(r'(\w+)\s*\(', defect_line_code or code))
+    call_names = set(re.findall(r'\b(\w+)\s*\(', defect_line_code or code))
     line_vars = [v for v in extract_vars(defect_line_code or code) if v not in call_names]
     suspect_var = line_vars[-1] if line_vars else (ctx.get('var') or 'result')
     ctx['var'] = suspect_var
@@ -3972,7 +4052,7 @@ def _analyze_negative_returns(code: str, sub_checker: str, events: List[Dict],
                 description=f"`{suspect_var}` resolves to non-negative value {concrete_val} on the flagged path."
             ))
 
-    if _has_pattern(code, r'malloc\s*\(|memcpy\s*\(|\[\s*\w+\s*\]'):
+    if _has_pattern(code, r'\bmalloc\s*\(|\bmemcpy\s*\(|\[\s*\w+\s*\]'):
         acc.add(Evidence(
             label="negative_used_as_size",
             polarity="bug",
@@ -4121,11 +4201,14 @@ def _analyze_checked_return(code: str, sub_checker: str, events: List[Dict],
     if sink:
         focused = [c for c in candidates if c[1].lower() == sink.lower()]
         candidates = focused or candidates
-    else:
-        # Excel mode (no events): several discarded calls may share the function.
-        # Prefer the non-benign ones, because the org configures CHECKED_RETURN for
-        # functions whose return value matters — a benign printf() would not be the
-        # flagged call when a critical/unknown one is also present.
+    elif not line:
+        # No events and no flagged line: several discarded calls may share the
+        # function. Prefer the non-benign ones, because the org configures
+        # CHECKED_RETURN for functions whose return value matters — a benign
+        # printf() would not be the flagged call when a critical/unknown one is
+        # also present. When the flagged line IS known, the call nearest it is
+        # the one Coverity flagged — even a benign one carrying an explicit
+        # (void) cast — so the benign filter must not run.
         non_benign = [c for c in candidates if not _CHECKED_RETURN_BENIGN.search(c[1])]
         if non_benign:
             candidates = non_benign
@@ -4291,6 +4374,74 @@ def _extract_uninit_var(code: str, events: List[Dict], line: int,
     return ""
 
 
+def _uninit_initialization_facts(code: str, var: str, line: int,
+                                 code_start_line: int) -> Dict:
+    """Best-effort static check of whether `var` is definitely initialised
+    before the flagged read at `line`.
+
+    Returns a dict with:
+      decl_line          absolute line of the first declaration of `var` (0 if none)
+      decl_init_line     line of a declaration WITH an initialiser, if any
+      prior_line         line of the nearest plain assignment before the read
+      prior_is_straight  True when that assignment is straight-line code at
+                         (or above) the declaration's brace depth, i.e. it is
+                         not nested inside a branch that the flagged path
+                         could skip.
+    """
+    facts = {'decl_line': 0, 'decl_init_line': 0, 'prior_line': 0, 'prior_is_straight': False}
+    lines = (code or '').splitlines()
+    n = len(lines)
+    rel = line - (code_start_line or 1)
+    if not var or not re.match(r'^[A-Za-z_]\w*$', var) or rel < 0 or rel > n:
+        return facts
+
+    # Brace depth and indentation before each line (naive; comment/string
+    # blind on purpose). Brace-less statements (`if (c)\n x = 5;`) sit at the
+    # parent's brace depth, so indentation decides whether an assignment is
+    # nested inside a branch.
+    depths = []
+    indents = []
+    d = 0
+    for l in lines:
+        depths.append(d)
+        indents.append(len(l) - len(l.lstrip()))
+        d += l.count('{') - l.count('}')
+
+    type_re = (r'(?:int|char|short|long|float|double|void|unsigned|signed|bool|'
+               r'uint\w*_t|int\w*_t|size_t|FILE|struct\s+\w+|union\s+\w+|enum\s+\w+)')
+    scan_end = min(rel, n)
+
+    base_depth = None
+    base_indent = None
+    for i in range(scan_end):
+        if not re.search(rf'\b{re.escape(var)}\b', lines[i]):
+            continue
+        m = re.match(rf'^[^=;]*\b(?:{type_re})[^=;]*\b{re.escape(var)}\b[^=;]*(=)?', lines[i])
+        if m:
+            facts['decl_line'] = i + (code_start_line or 1)
+            base_depth = depths[i]
+            base_indent = indents[i]
+            if m.group(1):
+                facts['decl_init_line'] = facts['decl_line']
+        break
+
+    if facts['decl_init_line']:
+        return facts
+
+    if base_depth is None:
+        base_depth = depths[min(rel, n - 1)]
+        base_indent = indents[min(rel, n - 1)]
+
+    for i in range(scan_end):
+        if re.match(rf'^\s*{re.escape(var)}\s*=[^=]', lines[i]):
+            facts['prior_line'] = i + (code_start_line or 1)
+            facts['prior_is_straight'] = (depths[i] <= base_depth
+                                          and indents[i] <= base_indent)
+            break
+
+    return facts
+
+
 def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
                          file: str = "", line: int = 0, function: str = "", cid: int = 0,
                          called_function_codes: Optional[Dict[str, str]] = None,
@@ -4335,22 +4486,47 @@ def _analyze_uninitialized(code: str, sub_checker: str, events: List[Dict],
 
     acc = EvidenceAccumulator()
 
-    if _has_pattern(code, r'\bmemset\s*\(|\bcalloc\s*\(|\b=\s*\{0\}') or \
-       _has_pattern(code, r'struct\s+\w+\s+\w+\s*=\s*\{0\}'):
-        acc.add(Evidence(
-            label="zero_initialization_present",
-            polarity="fp",
-            weight=0.85,
-            description="Variable initialized via memset(), calloc(), or zero-initializer before use."
-        ))
+    # Initialisation evidence must be scoped to the flagged variable: a
+    # memset()/calloc() on a *different* variable in the same function is not
+    # evidence that `var` is initialised.
+    if var:
+        if re.search(rf'\bmemset\s*\(\s*(&|\*)*\s*{re.escape(var)}\s*[,)]', code):
+            acc.add(Evidence(
+                label="zero_initialization_present",
+                polarity="fp",
+                weight=0.85,
+                description=f"`{var}` is zeroed with memset() before the flagged use."
+            ))
+        if re.search(rf'\b{re.escape(var)}\s*=\s*\{{[^}}]*\}}', code):
+            acc.add(Evidence(
+                label="aggregate_initializer",
+                polarity="fp",
+                weight=0.80,
+                description=f"`{var}` uses an aggregate initializer — all fields explicitly initialized."
+            ))
 
-    if _has_pattern(code, r'\b=\s*\{[^}]*\}'):
-        acc.add(Evidence(
-            label="aggregate_initializer",
-            polarity="fp",
-            weight=0.80,
-            description="Variable uses an aggregate initializer — all fields explicitly initialized."
-        ))
+    # Declaration-time initialisation (`int x = 0;`, `struct T s = {0};`) or a
+    # straight-line assignment before the read is proof the value is defined.
+    if var:
+        facts = _uninit_initialization_facts(code, var, line, code_start_line)
+        if facts.get('decl_init_line'):
+            acc.add(Evidence(
+                label="declaration_has_initializer",
+                polarity="fp",
+                weight=0.90,
+                description=(f"`{var}` is initialised at its declaration (line {facts['decl_init_line']}); "
+                             f"the value is defined on every path to line {line}.")
+            ))
+        elif facts.get('prior_line') and facts.get('prior_is_straight'):
+            acc.add(Evidence(
+                label="assigned_before_use_straight_line",
+                polarity="fp",
+                weight=0.85,
+                description=(f"`{var}` is assigned on line {facts['prior_line']} in straight-line code "
+                             f"before the read at line {line}.")
+            ))
+        # A conditional assignment (`if (c) x = ...;`) does not prove
+        # initialisation — the flagged path is precisely the one that skips it.
 
     if not any(e.polarity == "fp" for e in acc.evidence):
         acc.add(Evidence(
@@ -4504,7 +4680,7 @@ def _analyze_use_after_free(code: str, sub_checker: str, events: List[Dict],
         pass
     facts = _use_after_free_facts(code, _ptr, line, code_start_line)
 
-    if facts['null_line'] and facts['guard_line'] and facts['guard_line'] >= facts['null_line'] and        re.search(rf'!\s*{re.escape(_ptr)}|{re.escape(_ptr)}\s*==\s*NULL|{re.escape(_ptr)}\s*!=\s*NULL', facts['guard_cond']):
+    if facts['null_line'] and facts['guard_line'] and facts['guard_line'] >= facts['null_line'] and        re.search(rf'!\s*{re.escape(_ptr)}|\b{re.escape(_ptr)}\b\s*==\s*NULL|\b{re.escape(_ptr)}\b\s*!=\s*NULL', facts['guard_cond']):
         acc.add(Evidence(
             label="null_after_free_with_check",
             polarity="fp",

@@ -1,9 +1,24 @@
-"""Extract full function code using tree-sitter for C/C++."""
+"""Extract full function code using tree-sitter for C/C++.
 
-import tree_sitter
-from tree_sitter import Language, Parser
-import tree_sitter_c
-import tree_sitter_cpp
+tree-sitter is an *optional* backend: when it (or its grammars) is not
+installed the extractor degrades to a fixed line window instead of crashing
+the whole analysis, so defects still get classified by the regex-based
+analyzer rather than erroring out.
+"""
+
+try:
+    import tree_sitter
+    from tree_sitter import Language, Parser
+    import tree_sitter_c
+    import tree_sitter_cpp
+    _TREE_SITTER_AVAILABLE = True
+except ImportError:
+    tree_sitter = None
+    Language = None
+    Parser = None
+    tree_sitter_c = None
+    tree_sitter_cpp = None
+    _TREE_SITTER_AVAILABLE = False
 import os
 from typing import Optional, Any
 
@@ -11,6 +26,8 @@ from typing import Optional, Any
 _PARSERS = {}
 
 def _get_parser(language: str) -> Parser:
+    if not _TREE_SITTER_AVAILABLE:
+        raise RuntimeError("tree-sitter is not installed; AST extraction unavailable")
     lang_key = language.lower()
     if lang_key not in _PARSERS:
         if lang_key in ('c', 'cpp', 'c++'):
@@ -113,8 +130,11 @@ def _parse_file(filepath: str, language: str) -> tuple[Optional[str], Any]:
     source = _read_file(filepath)
     if not source:
         return None, None
-    parser = _get_parser(language)
-    tree = parser.parse(bytes(source, 'utf-8'))
+    try:
+        parser = _get_parser(language)
+        tree = parser.parse(bytes(source, 'utf-8'))
+    except Exception:
+        tree = None  # backend missing/broken — callers fall back to regex
     _PARSE_CACHE[key] = (mtime, source, tree)
     return source, tree
 
@@ -148,6 +168,14 @@ def extract_enclosing_function(filepath: str, line: int, language: str = 'c') ->
     source, tree = _parse_file(filepath, language)
     if not source:
         return ""
+
+    if tree is None:
+        # No AST available (tree-sitter missing or parse failed): fall back to
+        # the fixed line window below instead of crashing the analysis.
+        lines = source.splitlines()
+        start = max(0, line - 25)
+        end = min(len(lines), line + 25)
+        return '\n'.join(lines[start:end]), start + 1, None
 
     root = tree.root_node
 

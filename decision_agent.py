@@ -82,6 +82,7 @@ class DecisionAgent:
         "coverity_confirmed_oob", "coverity_confirmed_null", "coverity_confirmed_null_deref",
         "always_unsafe_sink", "taint_from_untrusted_source", "unsafe_sink",
         "early_return_without_release", "null_deref_confirmed",
+        "leak_exit_without_release", "allocation_not_null_checked",
     }
     CRITICAL_FP_LABELS = {
         "guard_dominates_all_paths", "explicit_null_termination", "raii_smart_pointer",
@@ -91,7 +92,9 @@ class DecisionAgent:
         "unsigned_wrap_defined_behavior", "upcast_to_wider_type",
         "explicit_range_guard", "sizeof_loop_bound", "constant_index_within_bounds",
         "loop_bounds_check_covers_all", "bounded_sink_function",
+        "all_exits_release_resource",
     }
+
 
     @staticmethod
     def evaluate(accumulator: EvidenceAccumulator, checker: str = "") -> AgentDecision:
@@ -195,6 +198,103 @@ class DecisionAgent:
         )
 
 
+# Checkers for which the *provenance* of the flagged value is part of the
+# defect semantics (attacker-controlled data reaching a buffer/memory sink).
+# For value-semantics checkers (INTEGER_OVERFLOW, DIVIDE_BY_ZERO, SHIFT_OVERFLOW,
+# CONSTANT_EXPRESSION_RESULT, UNINIT, ...) a parameter or local origin is NOT
+# evidence of a bug — the value, not the source, decides the verdict.
+_TAINT_RELEVANT_CHECKERS = frozenset({
+    "OVERRUN", "OVERRUN_STATIC", "OVERRUN_DYNAMIC",
+    "BUFFER_SIZE", "BUFFER_SIZE_WARNING", "STRING_OVERFLOW", "STRING_NULL",
+    "TAINTED_STRING", "WRAPPER_OVERRUN",
+})
+# Checkers where an allocation-failure origin (malloc/fopen/...) is a genuine
+# defect signal (the pointer may be NULL on the flagged path).
+_ALLOC_RELEVANT_CHECKERS = frozenset({
+    "FORWARD_NULL", "REVERSE_INULL", "RESOURCE_LEAK",
+})
+# Checkers whose verdict is a leak-path question. Only for these does the
+# generic evidence builder run the path-aware leak scan.
+LEAK_CHECKERS = frozenset({"RESOURCE_LEAK", "UNRELEASED_RESOURCE"})
+
+
+def analyze_leak_exits(code: str, resource: str, release_func: str,
+                       alloc_line: int, code_start_line: int = 1) -> Optional[Dict]:
+    """Path-aware leak scan for one resource.
+
+    Walk the function snippet from the allocation to the end and treat every
+    exit point (``return`` / ``exit()`` / ``abort()`` / ``goto``) as a leak
+    candidate unless the resource is released on the path leading to that
+    exit — the release is on the same line, on one of the up-to-two
+    straight-line statements immediately before it, or sits in a shared
+    cleanup label (``goto cleanup; ... cleanup: free(p);``) that the exit
+    jumps into.
+
+    Returns ``None`` when the inputs are too thin to analyse, otherwise::
+
+        {'has_exit': bool, 'leak_exits': [abs_line, ...],
+         'release_found': bool, 'all_exits_clear': bool}
+    """
+    lines = (code or "").splitlines()
+    n = len(lines)
+    if not resource or not release_func or alloc_line <= 0 or n == 0:
+        return None
+    alloc_rel = alloc_line - (code_start_line or 1)
+    if not (0 <= alloc_rel < n):
+        return None
+
+    resource = resource.strip()
+    rel_pat = re.compile(rf"\b{re.escape(release_func)}\s*\(")
+
+    def _releases(line_idx: int) -> bool:
+        # The release may sit on the exit line itself (``free(p); return;``)
+        # or on the immediately preceding straight-line statements.
+        for j in (line_idx, line_idx - 1, line_idx - 2):
+            if 0 <= j < n and rel_pat.search(lines[j]) and re.search(rf"\b{re.escape(resource)}\b", lines[j]):
+                return True
+        return False
+
+    # Labels that release the resource (goto-cleanup idiom).
+    releasing_labels = set()
+    for i, l in enumerate(lines):
+        lm = re.match(r"\s*([A-Za-z_]\w*)\s*:", l)
+        if not lm or lm.group(1) in ("case", "default"):
+            continue
+        for j in range(i, min(n, i + 10)):
+            if rel_pat.search(lines[j]) and re.search(rf"\b{re.escape(resource)}\b", lines[j]):
+                releasing_labels.add(lm.group(1))
+                break
+
+    has_exit = False
+    leak_exits: List[int] = []
+    release_found = False
+    for i in range(alloc_rel, n):
+        l = lines[i]
+        if rel_pat.search(l) and re.search(rf"\b{re.escape(resource)}\b", l):
+            release_found = True
+        if re.search(r"\breturn\b", l):
+            has_exit = True
+            if not _releases(i):
+                leak_exits.append(i + (code_start_line or 1))
+        elif re.search(r"\b(exit|abort)\s*\(", l):
+            has_exit = True
+            if not _releases(i):
+                leak_exits.append(i + (code_start_line or 1))
+        else:
+            gm = re.search(r"\bgoto\s+([A-Za-z_]\w*)", l)
+            if gm:
+                has_exit = True
+                if gm.group(1) not in releasing_labels:
+                    leak_exits.append(i + (code_start_line or 1))
+
+    return {
+        "has_exit": has_exit,
+        "leak_exits": leak_exits,
+        "release_found": release_found,
+        "all_exits_clear": has_exit and not leak_exits,
+    }
+
+
 def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> EvidenceAccumulator:
     """Translate context and parsed events into weighted Evidence objects."""
     acc = EvidenceAccumulator()
@@ -235,12 +335,15 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
     origin = context.get('origin', '')
     if origin:
         if any(src in origin for src in ['network', 'args', 'env', 'file', 'caller-controlled', 'tainted', 'external']):
-            acc.add(Evidence(
-                label="taint_from_untrusted_source",
-                polarity="bug",
-                weight=0.80,
-                description=f"Variable originates from untrusted source: {origin}."
-            ))
+            if checker in _TAINT_RELEVANT_CHECKERS:
+                acc.add(Evidence(
+                    label="taint_from_untrusted_source",
+                    polarity="bug",
+                    weight=0.80,
+                    description=f"Variable originates from untrusted source: {origin}."
+                ))
+            # For value-semantics checkers the origin is not defect evidence;
+            # the concrete value/width decides. Record it as neutral context.
         elif any(src in origin for src in ['literal', 'local', 'bounded', 'safe']):
             acc.add(Evidence(
                 label="taint_from_safe_source",
@@ -249,12 +352,13 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
                 description=f"Variable originates from safe source: {origin}."
             ))
         elif 'alloc' in origin:
-            acc.add(Evidence(
-                label="taint_from_allocation",
-                polarity="bug",
-                weight=0.65,
-                description="Variable may be NULL from allocation failure."
-            ))
+            if checker in _ALLOC_RELEVANT_CHECKERS:
+                acc.add(Evidence(
+                    label="taint_from_allocation",
+                    polarity="bug",
+                    weight=0.65,
+                    description="Variable may be NULL from allocation failure."
+                ))
 
     guard_line = context.get('guard_line', 0)
     guard_reason = context.get('guard_reason', '')
@@ -306,22 +410,43 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
 
     release_func = context.get('release_func', '')
     alloc_line = context.get('alloc_line', 0)
-    if release_func and alloc_line > 0:
+    release_line = context.get('release_line', 0)
+    resource = (context.get('resource') or '').strip()
+
+    if checker in LEAK_CHECKERS and code and resource and release_func and alloc_line > 0:
+        # Path-aware leak verdict: a release call that exists somewhere in the
+        # function is NOT evidence against a leak unless every exit path
+        # between the allocation and function end actually reaches it.
+        leak_facts = analyze_leak_exits(code, resource, release_func,
+                                        alloc_line, context.get('code_start_line', 1))
+        if leak_facts:
+            if leak_facts['leak_exits']:
+                acc.add(Evidence(
+                    label="leak_exit_without_release",
+                    polarity="bug",
+                    weight=0.80,
+                    description=(f"`{resource}` is acquired at line {alloc_line} but exit path(s) "
+                                 f"at line(s) {leak_facts['leak_exits']} return without releasing it.")
+                ))
+            elif leak_facts['has_exit'] and leak_facts['release_found']:
+                acc.add(Evidence(
+                    label="all_exits_release_resource",
+                    polarity="fp",
+                    weight=0.85,
+                    description=(f"Every exit path after the acquisition at line {alloc_line} "
+                                 f"releases `{resource}` via {release_func}().")
+                ))
+    elif release_func and alloc_line > 0 and release_line > 0:
+        # Non-leak checker: only credit a release that is actually present in
+        # the snippet. `release_func` is the allocator's *expected* releaser —
+        # crediting it without a matching call marked every malloc'd pointer
+        # as "released" (flipping unchecked NULL derefs to false positives).
         acc.add(Evidence(
             label="release_function_found",
             polarity="fp",
-            weight=0.85,
-            description=f"Resource release function {release_func}() found."
+            weight=0.60,
+            description=f"Resource release function {release_func}() present in the function body."
         ))
-
-    if code and re.search(r'\bif\s*\(.*\)\s*\{?\s*return\b', code):
-        if not release_func:
-            acc.add(Evidence(
-                label="early_return_without_release",
-                polarity="bug",
-                weight=0.80,
-                description="Early return detected without visible resource release."
-            ))
 
     if code and re.search(r'\bstd::unique_ptr|\bstd::shared_ptr|\bauto_ptr|\bQScopedPointer|\bg_auto', code):
         acc.add(Evidence(
