@@ -751,9 +751,9 @@ def synthesize_expert_comment(checker_family: str, classification: str, context:
     # CWE/CERT/OWASP footer
     if cwe and f"CWE-{cwe['cwe_id']}" not in base:
         base = base.rstrip() + f"\nReference: CWE-{cwe['cwe_id']} | CERT {cwe['cert']} | {cwe['owasp']} ({cwe['cwe_url']})"
-    sg_rule = context.get('semgrep_rule', '')
-    if sg_rule:
-        base += f" (semgrep `{sg_rule}` confirms.)"
+    cc_rule = context.get('corrob_rule', '')
+    if cc_rule:
+        base += f" (cppcheck `{cc_rule}` confirms.)"
     return base
 
 

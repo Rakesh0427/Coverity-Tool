@@ -12,7 +12,7 @@ v7.0 — Expert CWE Edition (senior review perspective)
 import re
 import ast
 import subprocess
-import json
+import shlex
 import os
 from typing import Dict, List, Tuple, Optional
 from deep_analyzer import (
@@ -1274,93 +1274,128 @@ def _extract_array_initializer_values(code: str, arr_name: str,
     return values
 
 
-# Semgrep per-file cache and enable flag — semgrep is heavy (2-30s per file) and
-# once ran per-defect, which made 1000-defect runs take 30+ minutes. It now runs
-# at most once per source file (cached) and is ENABLED by default; a per-file
-# cache keeps the cost bounded. Disable via COVERITY_DISABLE_SEMGREP=1 (or the
-# legacy COVERITY_ENABLE_SEMGREP=0/false/no/off).
-_SEMGREP_CACHE: dict = {}
-_SEMGREP_AVAILABLE: Optional[bool] = None
+# cppcheck per-file cache and enable flag — cppcheck replaces semgrep as the
+# corroboration backend: it runs fully offline (rules ship inside the binary,
+# no registry/network), starts in milliseconds, and can ship inside the frozen
+# Windows exe.  It runs at most once per source file (cached).  Disable via
+# COVERITY_DISABLE_CPPCHECK=1 (the legacy COVERITY_DISABLE_SEMGREP=1 and
+# COVERITY_ENABLE_SEMGREP=0/false/no/off flags are still honoured).
+_CPPCHECK_CACHE: dict = {}
+_CPPCHECK_AVAILABLE: Optional[bool] = None
 
-def _semgrep_enabled() -> bool:
+def _cppcheck_enabled() -> bool:
     truthy = ("1", "true", "yes", "on")
-    # Explicit opt-out wins; legacy opt-in flag still accepted for compatibility.
+    # Explicit opt-out wins; legacy semgrep flags still accepted for
+    # compatibility with old scripts.
+    if os.environ.get("COVERITY_DISABLE_CPPCHECK", "").strip().lower() in truthy:
+        return False
     if os.environ.get("COVERITY_DISABLE_SEMGREP", "").strip().lower() in truthy:
         return False
     enable = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower()
     if enable and enable not in truthy:
         return False
-    global _SEMGREP_AVAILABLE
-    if _SEMGREP_AVAILABLE is None:
+    global _CPPCHECK_AVAILABLE
+    if _CPPCHECK_AVAILABLE is None:
         try:
-            import shutil
-            if shutil.which("semgrep") is None:
-                _SEMGREP_AVAILABLE = False
+            if _capabilities is not None:
+                _CPPCHECK_AVAILABLE = bool(_capabilities.find_cppcheck_bin())
             else:
-                # Probe: semgrep --version must succeed.  semgrep's Python
-                # startup is slow on a cold cache, so use the same generous,
-                # COVERITY_SEMGREP_PROBE_TIMEOUT-overridable window as the
-                # capabilities banner instead of a hard 3s cutoff that silently
-                # disables an otherwise-usable semgrep.
-                timeout = 30.0
-                if _capabilities is not None:
-                    try:
-                        timeout = _capabilities.semgrep_probe_timeout()
-                    except Exception:
-                        pass
-                env = dict(os.environ)
-                env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
-                env["SEMGREP_SEND_METRICS"] = "off"
-                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=timeout, env=env)
-                _SEMGREP_AVAILABLE = (r.returncode == 0)
+                import capabilities as _cap
+                _CPPCHECK_AVAILABLE = bool(_cap.find_cppcheck_bin())
         except Exception:
-            _SEMGREP_AVAILABLE = False
-    return bool(_SEMGREP_AVAILABLE)
+            _CPPCHECK_AVAILABLE = False
+    return bool(_CPPCHECK_AVAILABLE)
 
-def _run_semgrep_check(file_path: str, defect_line: int, checker: str) -> Optional[str]:
-    """Run semgrep on the source file and return the first matching rule_id near defect_line.
 
-    Cached per-file (first defect in a file pays the cost, rest hit cache),
-    so the per-defect cost from the 30+ minute runs is gone.
-    Enabled by default — disable with COVERITY_DISABLE_SEMGREP=1.
+def _cppcheck_binary() -> Optional[str]:
+    """Path to the cppcheck executable, or None when unavailable."""
+    try:
+        if _capabilities is not None:
+            return _capabilities.find_cppcheck_bin()
+        import capabilities as _cap
+        return _cap.find_cppcheck_bin()
+    except Exception:
+        return None
+
+
+# cppcheck's --template output: one line per finding, pipe-separated.  This
+# format is stable across cppcheck 2.x (unlike --json, which changed shape
+# across releases and was removed in newer ones).  The message field may
+# itself contain '|', so only the first three fields are split.
+_CPPCHECK_TEMPLATE = "{line}|{id}|{severity}|{message}"
+_CPPCHECK_HIT_RE = re.compile(r"^(\d+)\|([^|]+)\|([^|]+)\|(.*)$")
+
+
+def _run_cppcheck_check(file_path: str, defect_line: int, checker: str) -> Optional[str]:
+    """Run cppcheck on the source file and return the first check id near defect_line.
+
+    Fully offline: cppcheck's rules are compiled into the binary, so no
+    registry download or network access is ever needed (semgrep's
+    ``p/c-and-cpp`` pack required the online Semgrep registry, which is why it
+    failed in offline environments and inside the frozen exe).
+
+    Cached per-file (first defect in a file pays the cost, rest hit cache).
+    Enabled by default — disable with COVERITY_DISABLE_CPPCHECK=1.
     """
     if not file_path or not os.path.isfile(file_path):
         return None
-    if not _semgrep_enabled():
+    if not _cppcheck_enabled():
         return None
-    # Check cache: file_path -> list of hits
-    cached = _SEMGREP_CACHE.get(file_path)
+    # Check cache: file_path -> list of (line, check_id) or [] for none/failed
+    cached = _CPPCHECK_CACHE.get(file_path)
     if cached is not None:
-        # cached is list of (line, check_id) or None for no hits / failed
         if not cached:
             return None
         for hit_line, check_id in cached:
             if abs(hit_line - defect_line) <= 3:
                 return check_id
         return None
+    bin_path = _cppcheck_binary()
+    if not bin_path:
+        _CPPCHECK_CACHE[file_path] = []
+        return None
     try:
-        env = dict(os.environ)
-        env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
-        env["SEMGREP_SEND_METRICS"] = "off"
-        result = subprocess.run(
-            ['semgrep', '--json', '--config', 'p/c-and-cpp', '--no-git-ignore', file_path],
-            capture_output=True, text=True, timeout=10, env=env
-        )
-        data = json.loads(result.stdout or '{}')
+        cmd = [bin_path,
+               "--enable=warning,style,performance,portability",
+               "--quiet",
+               "--template=" + _CPPCHECK_TEMPLATE,
+               file_path]
+        extra = os.environ.get("COVERITY_CPPCHECK_ARGS", "").strip()
+        if extra:
+            try:
+                cmd = [bin_path] + shlex.split(extra) + cmd[1:]
+            except Exception:
+                pass
+        timeout = 15.0
+        raw = os.environ.get("COVERITY_CPPCHECK_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = max(1.0, float(raw))
+            except ValueError:
+                pass
+        kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(cmd, **kwargs)
+        # cppcheck writes its findings (including --template output) to
+        # stderr, reserving stdout for informational text; the pip-wheel
+        # console-script wrapper keeps that behaviour.  Parse both streams so
+        # either layout works.
+        raw_out = (result.stdout or "") + "\n" + (result.stderr or "")
         hits = []
-        for hit in data.get('results', []):
-            hl = hit.get('start', {}).get('line', 0)
-            cid = hit.get('check_id', '')
-            if hl and cid:
-                hits.append((hl, cid))
-        _SEMGREP_CACHE[file_path] = hits
+        for line in raw_out.splitlines():
+            m = _CPPCHECK_HIT_RE.match(line.strip())
+            if m:
+                hits.append((int(m.group(1)), m.group(2)))
+        _CPPCHECK_CACHE[file_path] = hits
         for hit_line, check_id in hits:
             if abs(hit_line - defect_line) <= 3:
                 return check_id
     except Exception:
-        _SEMGREP_CACHE[file_path] = []
+        _CPPCHECK_CACHE[file_path] = []
         pass
     return None
+
 
 def _has_pattern(code: str, *patterns) -> bool:
     for pat in patterns:
@@ -2062,7 +2097,7 @@ def _build_analysis_context(code: str, checker: str, events: List[Dict],
         'uncertainty_reason': 'the data flow.',
         'default_comment': 'Manual review required.',
         'callers_list': [],
-        'semgrep_rule': '',
+        'corrob_rule': '',
     }
 
     if called_function_codes:
@@ -2258,11 +2293,11 @@ def _build_analysis_context(code: str, checker: str, events: List[Dict],
         confidence -= 0.2
     ctx['confidence'] = max(0.0, min(1.0, confidence))
 
-    ctx['semgrep_rule'] = ''
+    ctx['corrob_rule'] = ''
     if file:
-        sg_rule = _run_semgrep_check(file, line, checker)
-        if sg_rule:
-            ctx['semgrep_rule'] = sg_rule
+        cc_rule = _run_cppcheck_check(file, line, checker)
+        if cc_rule:
+            ctx['corrob_rule'] = cc_rule
             ctx['confidence'] = min(1.0, ctx['confidence'] + 0.15)
 
     primary_var = (ctx['src_var'] if ctx['src_var'] not in ('the source data',) else '') \
