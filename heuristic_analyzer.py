@@ -224,6 +224,61 @@ def _extract_strncpy_info(code: str, dest_var: str) -> Optional[Dict]:
     return None
 
 
+
+def _dest_base_and_field(dest: str) -> Tuple[str, str]:
+    dest = (dest or '').strip()
+    if not dest:
+        return '', ''
+    norm = dest.replace('->', '.')
+    base = re.split(r'[.\[]', norm)[0]
+    field = re.split(r'[.\[]', norm)[-1]
+    field = re.sub(r'\W+', '', field) or base
+    return base, field
+
+
+def _dest_is_struct_field(dest: str) -> bool:
+    return bool(dest) and ('.' in dest or '->' in dest)
+
+
+def _dest_prezeroed(code: str, dest: str) -> bool:
+    """True when dest (or its enclosing object) is memset to 0 in this snippet."""
+    if not code or not dest:
+        return False
+    base, field = _dest_base_and_field(dest)
+    pats = []
+    for name in {dest, base, field}:
+        if not name:
+            continue
+        pats.append(rf'\bmemset\s*\(\s*&?\s*{re.escape(name)}\b')
+    return any(re.search(p, code) for p in pats)
+
+
+def _consumed_as_cstring(code: str, dest: str) -> bool:
+    """True when dest is later treated as a C string (strlen / strcat / log / printf)."""
+    if not code or not dest:
+        return False
+    _, field = _dest_base_and_field(dest)
+    if not field:
+        return False
+    consumers = (
+        rf'\bstrlen\s*\(\s*&?{re.escape(dest)}\s*\)',
+        rf'\bstrlen\s*\(\s*&?{re.escape(field)}\s*\)',
+        rf'\b(strcat|strncat|strcpy|sprintf|snprintf|printf|puts|log_msg|log)\s*\([^;]*\b{re.escape(field)}\b',
+    )
+    return any(re.search(p, code) for p in consumers)
+
+
+def _strncpy_count_includes_nul(size_arg: str) -> bool:
+    if not size_arg:
+        return False
+    return bool(re.search(r'\bstrlen\s*\(', size_arg) or re.search(r'\+\s*1\b', size_arg))
+
+
+def _copy_length_guarded(code: str) -> bool:
+    return bool(re.search(
+        r'\bif\s*\([^)]{0,120}(strlen|sizeof|MAX_|len\b)[^)]{0,80}(<|<=|>|>=)[^)]{0,80}\)',
+        code or '', re.I))
+
 def _detect_fault_then_proceed(code: str, target_line: int, code_start_line: int = 1) -> Optional[Dict]:
     """
     Detect a fault-report block before target_line that does NOT return/break,
@@ -1983,24 +2038,65 @@ def _analyze_buffer_size(code: str, sub_checker: str, events: List[Dict],
             if not re.search(r'-\s*1\s*$|-\s*sizeof\s*\(', _s3):
                 if re.search(r'\bsizeof\b', _s3) and not re.search(r'-\s*1\s*$', _s3):
                     _size_eq_code = True  # sizeof(dest) without -1 means no room for NUL
+    dest_name = ctx.get('dest_var') or ''
+    _args3 = _extract_call_args_near(code, sink, line, code_start_line) if is_strncpy_sink else []
+    size_arg = _args3[2].strip() if len(_args3) >= 3 else ''
+    nul_safe = False
+    if is_strncpy_sink:
+        if _dest_prezeroed(code, dest_name):
+            acc.add(Evidence(
+                label="memset_prezeroes_destination",
+                polarity="fp",
+                weight=0.90,
+                description=f"`{dest_name or 'destination'}` is memset to 0 before the bounded copy, so remaining bytes stay NUL."
+            ))
+            nul_safe = True
+        if _dest_is_struct_field(dest_name) and not _consumed_as_cstring(code, dest_name):
+            acc.add(Evidence(
+                label="protocol_field_strncpy",
+                polarity="fp",
+                weight=0.88,
+                description=f"`{dest_name}` is a fixed-width struct field copied with a bounded count; it is not consumed as a C string."
+            ))
+            nul_safe = True
+        if _strncpy_count_includes_nul(size_arg):
+            acc.add(Evidence(
+                label="strncpy_count_from_strlen",
+                polarity="fp",
+                weight=0.90,
+                description=f"strncpy size argument `{size_arg}` is derived from strlen/source length and includes the terminator."
+            ))
+            nul_safe = True
+        if dest_sz and copy_sz and copy_sz < dest_sz:
+            acc.add(Evidence(
+                label="dest_larger_than_copy",
+                polarity="fp",
+                weight=0.85,
+                description=f"Copy of {copy_sz} bytes into a {dest_sz}-byte destination leaves room for a terminator."
+            ))
+            nul_safe = True
+        if _copy_length_guarded(code):
+            acc.add(Evidence(
+                label="copy_length_guarded",
+                polarity="fp",
+                weight=0.80,
+                description="A length/overrun guard is present before the bounded copy."
+            ))
+
     if is_strncpy_sink and (_size_eq_event or _size_eq_code or (dest_sz and copy_sz and copy_sz >= dest_sz)):
         if dest_sz and copy_sz:
             ctx['buffer_info'] = ctx['buffer_info'] or (
                 f"`{ctx['dest_var']}` has {dest_sz} bytes and {sink}() copies up to {copy_sz} bytes — "
                 f"no room for the null terminator. "
             )
-        acc.add(Evidence(
-            label="strncpy_no_null_terminator",
-            polarity="bug",
-            weight=0.85,
-            description=f"{sink}() size equals destination size — leaves string unterminated."
-        ))
-        # Refute the generic "bounded sink" FP signal: with the size argument
-        # equal to the destination capacity, boundedness protects against
-        # overflow only — it does NOT null-terminate, which is exactly what
-        # this finding flags. Leaving it in would create a dead-even 0.85/0.85
-        # contest that the tie-break could resolve the wrong way.
-        acc.evidence = [e for e in acc.evidence if e.label != 'bounded_sink_function']
+        if not nul_safe and _consumed_as_cstring(code, dest_name):
+            acc.add(Evidence(
+                label="strncpy_no_null_terminator",
+                polarity="bug",
+                weight=0.85,
+                description=f"{sink}() size equals destination size — leaves string unterminated."
+            ))
+            acc.evidence = [e for e in acc.evidence if e.label != 'bounded_sink_function']
 
     if _has_pattern(code, r'\bstrncpy\b|\bstrncat\b|\bsnprintf\b|\bstrlcpy\b') and \
        (_has_pattern(code, r'sizeof\s*\([^)]*\)\s*-\s*1') or ctx['guard_line'] > 0):
@@ -3577,16 +3673,25 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
     acc = build_evidence(ctx, ctx['ev'], 'STRING_NULL')
 
     sink = ctx['sink_func']
-    if sink in ('memcpy', 'strncpy') and not _has_pattern(code, r'["\']\\0["\']'):
+    dest_name = ctx.get('dest_var') or ''
+    prezeroed = _dest_prezeroed(code, dest_name)
+    used_as_cstr = _consumed_as_cstring(code, dest_name)
+    field_not_cstr = _dest_is_struct_field(dest_name) and not used_as_cstr
+    if prezeroed or field_not_cstr:
+        acc.add(Evidence(
+            label="string_already_terminated_or_not_cstring",
+            polarity="fp",
+            weight=0.88,
+            description=("Destination is pre-zeroed or a fixed-width field not consumed as a C string, "
+                         "so a missing terminator on the bounded copy is not a defect.")
+        ))
+    elif sink in ('memcpy', 'strncpy') and not _has_pattern(code, r'["\']\\0["\']') and used_as_cstr:
         acc.add(Evidence(
             label="copy_without_null_termination",
             polarity="bug",
             weight=0.65,
             description=f"{sink}() used without explicit null terminator afterwards."
         ))
-        # A bounded copy length is not a termination guarantee: for a
-        # STRING_NULL finding on strncpy/strncat the "bounded sink" signal is
-        # part of the defect, not evidence against it.
         if sink in ('strncpy', 'strncat'):
             acc.evidence = [e for e in acc.evidence if e.label != 'bounded_sink_function']
 
@@ -3964,6 +4069,14 @@ def _analyze_array_vs_singleton(code: str, sub_checker: str, events: List[Dict],
             description="sizeof(*ptr) correctly captures pointed-to type size."
         ))
 
+    # In C, &obj and &obj[0] designate the same address.
+    if _has_pattern(code, r'&\s*\w+\s*\[\s*0\s*\]'):
+        acc.add(Evidence(
+            label="pointer_first_element_alias",
+            polarity="fp",
+            weight=0.80,
+            description="&obj and &obj[0] designate the same address."
+        ))
     if not any(e.polarity == "fp" for e in acc.evidence):
         acc.add(Evidence(
             label="singleton_passed_as_array",

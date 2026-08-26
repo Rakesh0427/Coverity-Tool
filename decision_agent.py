@@ -93,6 +93,10 @@ class DecisionAgent:
         "explicit_range_guard", "sizeof_loop_bound", "constant_index_within_bounds",
         "loop_bounds_check_covers_all", "bounded_sink_function",
         "all_exits_release_resource",
+        "memset_prezeroes_destination", "protocol_field_strncpy",
+        "strncpy_count_from_strlen", "dest_larger_than_copy",
+        "string_already_terminated_or_not_cstring",
+        "pointer_first_element_alias",
     }
 
 
