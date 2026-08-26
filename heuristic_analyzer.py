@@ -603,15 +603,56 @@ def _extract_array_access_near_line(code: str, target_line: int, code_start_line
     return best or {}
 
 
-def _extract_array_declaration(code: str, arr_name: str, code_start_line: int = 1) -> Dict:
+def _extract_array_declaration(code: str, arr_name: str, code_start_line: int = 1,
+
+
+
+                               extra_sources: Optional[List[str]] = None) -> Dict:
+
+
+
     """Find array declaration and extract size expression.
-    
-    Only matches actual declarations (e.g., 'char buf[256];'), NOT accesses (e.g., 'buf[i]').
+
+
+
+
+    Only matches actual declarations (e.g., 'char buf[256];'), NOT accesses
+
+
+
+    (e.g., 'buf[i]').
+
+
+
+
+
+
+
+    For a qualified access base such as
+
+
+
+    ``dpDsiPrimitive->m_dpdData.dEndCnf.abyUserDataSegSize``, the *leaf* name
+
+
+
+    (``abyUserDataSegSize``) is also tried, because a declaration only ever
+
+
+
+    names the field.  When the snippet lacks the declaration (the struct is
+
+
+
+    defined in a header), `extra_sources` (the file / caller / callee texts
+
+
+
+    collected for constant resolution) are searched as a fallback.
+
+
+
     """
-    lines = code.splitlines()
-    
-    # Pattern 1: Declaration with a C/C++ type keyword before the array name
-    # This catches:  char arr[10];  static int buf[256];  uint8_t tbl[MAX];  struct Foo bars[4];
     type_keywords = (
         r'char|int|short|long|float|double|void|'
         r'uint8_t|uint16_t|uint32_t|uint64_t|int8_t|int16_t|int32_t|int64_t|size_t|'
@@ -619,67 +660,330 @@ def _extract_array_declaration(code: str, arr_name: str, code_start_line: int = 
         r'static|const|volatile|unsigned|signed|extern|'
         r'struct\s+\w+|union\s+\w+|enum\s+\w+'
     )
-    decl_pat = re.compile(
-        rf'\b(?:{type_keywords})\b'
-        rf'[\w\s\*]*?'               # optional qualifiers/pointers
-        rf'\b{re.escape(arr_name)}\s*\[\s*([^\]]+)\s*\]'
-    )
-    
-    for i, line in enumerate(lines, 1):
-        actual_line = i + code_start_line - 1
-        m = decl_pat.search(line)
-        if m:
-            size_expr = m.group(1).strip()
-            size_num = 0
-            if re.match(r'^\d+$', size_expr):
-                size_num = int(size_expr)
-            return {
-                'size_expr': size_expr,
-                'size': size_num,
-                'line': actual_line,
-                'raw': line.strip()
-            }
-    
-    # Pattern 2: Declaration inside struct/class member list (no type keyword needed if we see ; or = after)
-    # e.g., in a struct:  char  name[32];
-    member_pat = re.compile(
-        rf'^\s*(?:{type_keywords})\b[\w\s\*]*?\b{re.escape(arr_name)}\s*\[\s*([^\]]+)\s*\]\s*(?:;|=)'
-    )
-    for i, line in enumerate(lines, 1):
-        actual_line = i + code_start_line - 1
-        m = member_pat.search(line)
-        if m:
-            size_expr = m.group(1).strip()
-            size_num = 0
-            if re.match(r'^\d+$', size_expr):
-                size_num = int(size_expr)
-            return {
-                'size_expr': size_expr,
-                'size': size_num,
-                'line': actual_line,
-                'raw': line.strip()
-            }
-    
-    # Pattern 3: Macro-defined size on same line
-    # e.g.,  int arr[BUF_SIZE];
-    macro_pat = re.compile(
-        rf'\b(?:{type_keywords})\b[\w\s\*]*?\b{re.escape(arr_name)}\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*;'
-    )
-    for i, line in enumerate(lines, 1):
-        actual_line = i + code_start_line - 1
-        m = macro_pat.search(line)
-        if m:
-            size_expr = m.group(1).strip()
-            # Try to resolve the macro value in the same snippet
-            def_m = re.search(rf'#define\s+{re.escape(size_expr)}\s+(\d+)', code)
-            size_num = int(def_m.group(1)) if def_m else 0
-            return {
-                'size_expr': size_expr,
-                'size': size_num,
-                'line': actual_line,
-                'raw': line.strip()
-            }
-    
+
+
+
+
+    # Candidate names: full path first, then the leaf (what a declaration can
+
+
+
+    # actually contain).
+
+
+
+    names = [arr_name]
+
+
+
+    if arr_name:
+
+
+
+        leaf = re.split(r'[.\[\]]', arr_name.replace('->', '.'))[-1].strip()
+
+
+
+        if leaf and leaf != arr_name:
+
+
+
+            names.append(leaf)
+
+
+
+
+
+
+
+    def _scan(text: str, start_line: int) -> Dict:
+
+
+
+        if not text:
+
+
+
+            return {}
+
+
+
+        text_lines = text.splitlines()
+
+
+
+        for name in names:
+
+
+
+            # Pattern 1: declaration with a C/C++ type keyword before the name
+
+
+
+            decl_pat = re.compile(
+
+
+
+                rf'\b(?:{type_keywords})\b'
+
+
+
+                rf'[\w\s\*]*?'               # optional qualifiers/pointers
+
+
+
+                rf'\b{re.escape(name)}\s*\[\s*([^\]]+)\s*\]'
+
+
+
+            )
+
+
+
+            for i, line in enumerate(text_lines, 1):
+
+
+
+                m = decl_pat.search(line)
+
+
+
+                if m:
+
+
+
+                    size_expr = m.group(1).strip()
+
+
+
+                    size_num = int(size_expr) if re.match(r'^\d+$', size_expr) else 0
+
+
+
+                    return {'size_expr': size_expr, 'size': size_num,
+
+
+
+                            'line': i + start_line - 1, 'raw': line.strip()}
+
+
+
+            # Pattern 2: struct/class member declaration.
+
+
+
+            member_pat = re.compile(
+
+
+
+                rf'^\s*(?:{type_keywords})\b[\w\s\*]*?\b{re.escape(name)}\s*\[\s*([^\]]+)\s*\]\s*(?:;|=)'
+
+
+
+            )
+
+
+
+            for i, line in enumerate(text_lines, 1):
+
+
+
+                m = member_pat.search(line)
+
+
+
+                if m:
+
+
+
+                    size_expr = m.group(1).strip()
+
+
+
+                    size_num = int(size_expr) if re.match(r'^\d+$', size_expr) else 0
+
+
+
+                    return {'size_expr': size_expr, 'size': size_num,
+
+
+
+                            'line': i + start_line - 1, 'raw': line.strip()}
+
+
+
+            # Pattern 3: identifier-sized declaration (`int arr[BUF_SIZE];`).
+
+
+
+            macro_pat = re.compile(
+
+
+
+                rf'\b(?:{type_keywords})\b[\w\s\*]*?\b{re.escape(name)}\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*;'
+
+
+
+            )
+
+
+
+            for i, line in enumerate(text_lines, 1):
+
+
+
+                m = macro_pat.search(line)
+
+
+
+                if m:
+
+
+
+                    size_expr = m.group(1).strip()
+
+
+
+                    # Try to resolve the macro value in the same text
+
+
+
+                    def_m = re.search(rf'#\s*define\s+{re.escape(size_expr)}\s+(\d+)', text)
+
+
+
+                    size_num = int(def_m.group(1)) if def_m else 0
+
+
+
+                    return {'size_expr': size_expr, 'size': size_num,
+
+
+
+                            'line': i + start_line - 1, 'raw': line.strip()}
+
+
+
+            # Pattern 4: typedef'd element type (`s_ec_rpt_t gs_ec_rpt_tbl[8];`).
+
+
+
+            # Any identifier (or qualified type) directly before the array
+
+
+
+            # name, not a C keyword and not the array name itself.
+
+
+
+            typedef_pat = re.compile(
+
+
+
+                rf'^(?!\s*{re.escape(name)}\b)'
+
+
+
+                rf'\s*(?:[A-Za-z_]\w*(?:\s*\*)?\s+)+'
+
+
+
+                rf'\b{re.escape(name)}\s*\[\s*([^\]]+)\s*\]\s*;'
+
+
+
+            )
+
+
+
+            for i, line in enumerate(text_lines, 1):
+
+
+
+                m = typedef_pat.search(line)
+
+
+
+                if not m:
+
+
+
+                    continue
+
+
+
+                if re.search(
+
+
+
+                        r'\b(if|for|while|return|sizeof|switch|case|else|do|'
+
+
+
+                        r'while|goto|break|continue|static_assert|assert)\b',
+
+
+
+                        line):
+
+
+
+                    continue
+
+
+
+                size_expr = m.group(1).strip()
+
+
+
+                size_num = int(size_expr) if re.match(r'^\d+$', size_expr) else 0
+
+
+
+                return {'size_expr': size_expr, 'size': size_num,
+
+
+
+                        'line': i + start_line - 1, 'raw': line.strip()}
+
+
+
+        return {}
+
+
+
+
+
+
+
+    found = _scan(code, code_start_line)
+
+
+
+    if found:
+
+
+
+        return found
+
+
+
+    for src in (extra_sources or []):
+
+
+
+        found = _scan(src, 0)
+
+
+
+        if found:
+
+
+
+            return found
+
+
+
     return {}
 
 
@@ -790,6 +1094,38 @@ _INTEGRAL_TYPE_BOUNDS = {
     'unsigned long': (0, 2**64 - 1, 64, True),
     'long long': (-(2**63), 2**63 - 1, 64, False),
     'unsigned long long': (0, 2**64 - 1, 64, True),
+    # Windows/MSVC integral aliases (all unsigned on every supported target).
+
+
+
+    'DWORD': (0, 2**32 - 1, 32, True),
+
+
+
+    'UINT': (0, 2**32 - 1, 32, True),
+
+
+
+    'WORD': (0, 2**16 - 1, 16, True),
+
+
+
+    'BYTE': (0, 2**8 - 1, 8, True),
+
+
+
+    'ULONGLONG': (0, 2**64 - 1, 64, True),
+
+
+
+    'uint': (0, 2**32 - 1, 32, True),
+
+
+
+    'ushort': (0, 2**16 - 1, 16, True),
+
+
+
 }
 
 
@@ -800,7 +1136,14 @@ def _infer_integral_decl_bounds(var_name: str, sources: List[str]) -> Dict:
         return default
     pat = re.compile(
         rf'\b((?:const\s+|static\s+|volatile\s+|signed\s+|unsigned\s+|long\s+|short\s+|'
-        rf'int\s+|char\s+|size_t\s+|uint\d+_t\s+|int\d+_t\s+)+)\**\s*{re.escape(var_name)}\b')
+        rf'int\s+|char\s+|size_t\s+|uint\d+_t\s+|int\d+_t\s+|'
+
+
+
+        rf'DWORD\s+|UINT\s+|WORD\s+|BYTE\s+|ULONGLONG\s+)+)\**\s*{re.escape(var_name)}\b')
+
+
+
     for source in sources:
         for line in (source or '').splitlines():
             if var_name not in line:
@@ -1316,6 +1659,86 @@ def _cppcheck_binary() -> Optional[str]:
 # itself contain '|', so only the first three fields are split.
 _CPPCHECK_TEMPLATE = "{line}|{id}|{severity}|{message}"
 _CPPCHECK_HIT_RE = re.compile(r"^(\d+)\|([^|]+)\|([^|]+)\|(.*)$")
+
+
+
+
+# cppcheck rules that report a memory-safety defect.  Only these may
+
+
+
+# contradict a false-positive verdict (and demote it to Needs review);
+
+
+
+# style/portability warnings never overturn a proven dismissal.
+
+
+
+_CPPCHECK_MEMORY_RULES = frozenset({
+
+
+
+    'arrayIndexOutOfBounds',
+
+
+
+    'bufferAccessOutOfBounds',
+
+
+
+    'bufferOverflow',
+
+
+
+    'ctufixedArrayOverflow',
+
+
+
+    'ctunegativeindex',
+
+
+
+    'ctuseUnknownArgument',
+
+
+
+    'invalidIterator',
+
+
+
+    'memleak',
+
+
+
+    'nullPointer',
+
+
+
+    'pointerArithmeticOnInteger',
+
+
+
+    'stringIndexError',
+
+
+
+    'uninitvar',
+
+
+
+    'useAfterFree',
+
+
+
+    'useStlIterators',
+
+
+
+})
+
+
+
 
 
 def _run_cppcheck_check(file_path: str, defect_line: int, checker: str) -> Optional[str]:
@@ -1861,6 +2284,78 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
 
         evidence_items = []
 
+        # The decision agent's own justification is the evidence that drove
+
+
+
+        # this verdict — it must appear in the disposition, not be silently
+
+
+
+        # dropped. (The confidence lead sentence is dropped; it is restated
+
+
+
+        # by the closing sentence below.)
+
+
+
+        for _r in (decision.reasoning or []):
+
+
+
+            _rs = (str(_r) if _r else '').strip()
+
+
+
+            if not _rs:
+
+
+
+                continue
+
+
+
+            if re.match(r'^(high|moderate|low)\b.*confidence', _rs, re.I):
+
+
+
+                continue
+
+
+
+            if _rs.lower().startswith('insufficient evidence'):
+
+
+
+                continue
+
+
+
+            if _rs.lower().endswith('confidence.'):
+
+
+
+                continue
+
+
+
+            _rs = _rs.rstrip('.')
+
+
+
+            if not any(_rs.lower() in existing.lower() for existing in evidence_items):
+
+
+
+                evidence_items.append(_rs)
+
+
+
+
+
+
+
         # Checker-local aliases for readable code.
         _guard_line   = guard_line
         _guard_cond   = guard_cond
@@ -1952,8 +2447,106 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
                 evidence_items.append(_joined[:1].upper() + _joined[1:] +
                                       ". No counterexample was found in the extracted snippet (full inter-procedural analysis was not performed).")
             else:
-                evidence_items.append("No concrete path to the defect was found in the extracted snippet; "
-                                      "the finding may not be reachable at this call site.")
+                # No ctx-level fact matched — say exactly what the flagged
+
+
+
+                # statement does and what the snippet cannot see, instead of
+
+
+
+                # a generic "no concrete path" note.
+
+
+
+                _flagged = re.sub(r'\s+', ' ', _line_text_at(code, line,
+
+
+
+                                                            ctx.get('code_start_line', 1))).strip()
+
+
+
+                if len(_flagged) > 140:
+
+
+
+                    _flagged = _flagged[:140].rstrip() + '...'
+
+
+
+                _no_sink = {
+
+
+
+                    'STRING_NULL': "no unbounded string sink (strcpy/sprintf/strcpy_s-less copy) on the flagged statement",
+
+
+
+                    'BUFFER_SIZE': "no unbounded copy sink on the flagged statement",
+
+
+
+                    'OVERRUN': "no unbounded index into the flagged object on the flagged statement",
+
+
+
+                    'FORWARD_NULL': 'no dereference of an unguarded pointer on the flagged statement',
+
+
+
+                    'REVERSE_INULL': 'no dereference of an unguarded pointer on the flagged statement',
+
+
+
+                }.get(checker, "no unsafe operation on the flagged value on the flagged statement")
+
+
+
+                _producer = {
+
+
+
+                    'STRING_NULL': "the code that fills the string must be confirmed to terminate it",
+
+
+
+                    'BUFFER_SIZE': "the code that sizes the copy must be confirmed against the destination capacity",
+
+
+
+                    'OVERRUN': "the code that bounds the index must be confirmed against the object's size",
+
+
+
+                    'FORWARD_NULL': "the code that assigns the pointer must be confirmed to return non-NULL on this path",
+
+
+
+                    'REVERSE_INULL': "the code that assigns the pointer must be confirmed to return non-NULL on this path",
+
+
+
+                }.get(checker, "the producer of the flagged value must be confirmed")
+
+
+
+                evidence_items.append(
+
+
+
+                    f"the flagged statement itself is benign — `{_flagged}` — with "
+
+
+
+                    f"{_no_sink}. The extracted snippet does not cover cross-function "
+
+
+
+                    f"paths, so {_producer} before this dismissal is final.")
+
+
+
 
         if evidence_items:
             # Weave evidence behind "This is because ..." so the paragraph
@@ -2015,8 +2608,19 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
         _subj = f" for `{var or src_var}`" if (var or src_var) else ""
         gaps.append(f"no bounds/null guard{_subj} was found before line {line} (it may be in a caller or macro)")
 
+    _ph = ('the source data', 'the variable', 'the pointer', 'the operand', 'the data')
+
+
+
     if not origin or origin in ('an unknown source',):
-        _osubj = (f"`{var or src_var}`" if (var or src_var) else "the flagged value")
+        _v = var or src_var
+
+
+
+        _osubj = (f"`{_v}`" if (_v and _v not in _ph) else "the flagged value")
+
+
+
         gaps.append(f"the origin of {_osubj} is unresolved — if caller-controlled this may be a real bug")
     elif any(k in origin for k in ('args', 'network', 'env', 'file', 'external', 'caller-controlled')):
         gaps.append(f"the input comes from {origin} (untrusted) and must be validated before line {line}")
@@ -2038,6 +2642,34 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
 
     if not gaps:
         gaps.append("the available signals are conflicting")
+
+
+
+
+    # Quote the flagged statement so the reviewer starts from the real code,
+
+
+
+    # not a blank slate.
+
+
+
+    _nr_txt = _quote_flagged_statement(code, line,
+
+
+
+                                       ctx.get('code_start_line', 1), max_len=140)
+
+
+
+    if _nr_txt:
+
+
+
+        parts.append(f"Flagged code: {_nr_txt}. ")
+
+
+
 
     # Keep it short: state only the main blocker, then hand over to the
     # reviewer. The Proposed Fix panel carries the detailed guidance.
@@ -2808,6 +3440,1902 @@ def _loop_bound_assessment(code: str, idx_var: str, arr_name: str, arr_size: int
     return ('safe', safe_explanation) if safe_explanation else ('', '')
 
 
+# ---------------------------------------------------------------------------
+
+
+
+# Statement completion and derived (outer) access analysis
+
+
+
+#
+
+
+
+# Coverity flags the line where the defect *starts*, which is often only the
+
+
+
+# first line of a multi-line statement:
+
+
+
+#
+
+
+
+#   4024   if ((si_conn_prity[ui_prty_idx] != INVALID_CONN_INDEX) &&
+
+
+
+#   4025       (si_conn_prity[ui_prty_idx] <= MAX_NUM_ADS_CONNECTIONS) &&
+
+
+
+#   4026       (gs_ec_rpt_tbl[si_conn_prity[ui_prty_idx]].b_ec_present == TRUE))
+
+
+
+#
+
+
+
+# A per-line view only sees `si_conn_prity[ui_prty_idx]` on the flagged line.
+
+
+
+# Completing the statement reveals the *derived* access — the outer table
+
+
+
+# indexed by the *value* of the inner array — which is usually the access
+
+
+
+# Coverity actually flagged, and the one whose bound has to be proved.
+
+
+
+# ---------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+def _blank_code(text: str) -> str:
+
+
+
+    """Blank out comments and string/char literals (lengths and newlines kept)
+
+
+
+    so structural scans never match inside them."""
+
+
+
+    text = re.sub(r'/\*.*?\*/', lambda m: ' ' * len(m.group(0)), text, flags=re.S)
+
+
+
+    text = re.sub(r'//[^\n]*', lambda m: ' ' * len(m.group(0)), text)
+
+
+
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', lambda m: ' ' * len(m.group(0)), text)
+
+
+
+    text = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda m: ' ' * len(m.group(0)), text)
+
+
+
+    return text
+
+
+
+
+
+
+
+
+
+
+
+def _line_paren_depth(line_text: str) -> int:
+
+
+
+    """Net unbalanced `(` count at the end of a line (comments/strings blanked)."""
+
+
+
+    depth = 0
+
+
+
+    for ch in _blank_code(line_text):
+
+
+
+        if ch == '(':
+
+
+
+            depth += 1
+
+
+
+        elif ch == ')':
+
+
+
+            depth -= 1
+
+
+
+    return depth
+
+
+
+
+
+
+
+
+
+
+
+def _complete_statement(code: str, target_line: int, code_start_line: int = 1,
+
+
+
+                        max_lines: int = 40) -> Dict:
+
+
+
+    """Return the full statement that contains (or starts at) `target_line`.
+
+
+
+
+
+
+
+    Handles the two shapes that matter for triage:
+
+
+
+
+
+
+
+    * expression statements spanning lines — scanned to the `;` at depth 0;
+
+
+
+    * control statements (`if`/`for`/`while`/`switch`) — scanned to the `)`
+
+
+
+      that closes the keyword's own parenthesised header, plus a following
+
+
+
+      single statement when the header is not followed by a `{` block.
+
+
+
+
+
+
+
+    When `target_line` is a continuation line (the statement began earlier),
+
+
+
+    the start is walked backwards to the line whose preceding line is at
+
+
+
+    paren depth 0.  Returns ``{'text', 'start_line', 'end_line'}`` with
+
+
+
+    ``text`` whitespace-collapsed but line breaks preserved.
+
+
+
+    """
+
+
+
+    lines = (code or '').splitlines()
+
+
+
+    if not lines:
+
+
+
+        return {'text': '', 'start_line': target_line, 'end_line': target_line}
+
+
+
+    n = len(lines)
+
+
+
+    target_rel = (target_line or 0) - code_start_line
+
+
+
+    if target_rel < 0 or target_rel >= n:
+
+
+
+        return {'text': '', 'start_line': target_line, 'end_line': target_line}
+
+
+
+
+
+
+
+    # --- walk back to the true statement start -----------------------------
+
+
+
+    # The statement starts at the nearest line whose preceding line ends at
+
+
+
+    # paren depth 0 (the snippet is a balanced function body, so a depth-0
+
+
+
+    # line boundary is a statement boundary).
+
+
+
+    d_profile = []
+
+
+
+    d = 0
+
+
+
+    for k in range(target_rel + 1):
+
+
+
+        d = max(0, d + _line_paren_depth(lines[k]))
+
+
+
+        d_profile.append(d)
+
+
+
+    start_rel = target_rel
+
+
+
+    for s in range(target_rel, max(-1, target_rel - 13), -1):
+
+
+
+        if (d_profile[s - 1] if s > 0 else 0) == 0:
+
+
+
+            start_rel = s
+
+
+
+            break
+
+
+
+    end_rel = min(start_rel + max_lines - 1, n - 1)
+
+
+
+
+
+
+
+    head = ' '.join(_blank_code(lines[start_rel]).split())
+
+
+
+    is_control = bool(re.match(r'\s*(if|for|while|switch)\b', head))
+
+
+
+
+
+
+
+    # --- scan forward for the statement end --------------------------------
+
+
+
+    blanked = _blank_code('\n'.join(lines[start_rel:end_rel + 1]))
+
+
+
+    stop = len(blanked)
+
+
+
+    depth = 0
+
+
+
+    in_header = False
+
+
+
+    header_closed = False
+
+
+
+    i = 0
+
+
+
+    while i < len(blanked):
+
+
+
+        ch = blanked[i]
+
+
+
+        if ch == '(':
+
+
+
+            depth += 1
+
+
+
+            if depth == 1 and is_control and not in_header:
+
+
+
+                in_header = True
+
+
+
+        elif ch == ')':
+
+
+
+            if depth > 0:
+
+
+
+                depth -= 1
+
+
+
+                if depth == 0 and in_header:
+
+
+
+                    header_closed = True
+
+
+
+                    # Control header complete: include one trailing statement
+
+
+
+                    # only when the header is not followed by a `{` block.
+
+
+
+                    k = i + 1
+
+
+
+                    while k < len(blanked) and blanked[k] in ' \t\n':
+
+
+
+                        k += 1
+
+
+
+                    if k < len(blanked) and blanked[k] == '{':
+
+
+
+                        stop = i + 1
+
+
+
+                        break
+
+
+
+                    # scan the single following statement to its ';'
+
+
+
+                    d2 = 0
+
+
+
+                    while k < len(blanked) and k < i + 1 + 400:
+
+
+
+                        if blanked[k] == '(':
+
+
+
+                            d2 += 1
+
+
+
+                        elif blanked[k] == ')':
+
+
+
+                            d2 = max(0, d2 - 1)
+
+
+
+                        elif blanked[k] == ';' and d2 == 0:
+
+
+
+                            k += 1
+
+
+
+                            break
+
+
+
+                        elif blanked[k] == '{' and d2 == 0:
+
+
+
+                            k -= 1
+
+
+
+                            break
+
+
+
+                        k += 1
+
+
+
+                    stop = k
+
+
+
+                    break
+
+
+
+        elif ch == '[' or ch == '{':
+
+
+
+            depth += 1
+
+
+
+        elif ch == ']' or ch == '}':
+
+
+
+            depth = max(0, depth - 1)
+
+
+
+        elif ch == ';' and depth == 0 and not is_control:
+
+
+
+            stop = i + 1
+
+
+
+            break
+
+
+
+        elif ch == '{' and depth == 0 and is_control and header_closed:
+
+
+
+            stop = i
+
+
+
+            break
+
+
+
+        i += 1
+
+
+
+    if header_closed:
+
+
+
+        stop = min(stop, len(blanked))
+
+
+
+
+
+
+
+    text = '\n'.join(' '.join(ln.split()) for ln in blanked[:stop].splitlines())
+
+
+
+    end_line = code_start_line + start_rel + blanked[:stop].count('\n')
+
+
+
+    return {'text': text, 'start_line': code_start_line + start_rel,
+
+
+
+            'end_line': end_line}
+
+
+
+
+
+
+
+
+
+
+
+def _as_sentence(text: str) -> str:
+
+    """Normalize an analysis fragment into a standalone sentence.
+
+
+
+    Guard/derived explanations are built as sentence fragments (lowercase
+
+    lead, sometimes no terminal period) for weaving into other sentences;
+
+    when one is appended as a *standalone* comment sentence, capitalize the
+
+    lead and guarantee a terminal period so two facts never run together.
+
+    """
+
+    t = (text or '').strip()
+
+    if not t:
+
+        return t
+
+    if t[0].islower():
+
+        t = t[0].upper() + t[1:]
+
+    if t[-1] not in '.!?':
+
+        t += '.'
+
+    return t
+
+
+
+
+
+def _quote_flagged_statement(code: str, line: int,
+
+
+
+                             code_start_line: int = 1,
+
+
+
+                             max_len: int = 140) -> str:
+
+
+
+    """The flagged line as a single whitespace-collapsed string.
+
+
+
+
+
+
+
+    When the flagged line is only the first line of a multi-line statement
+
+
+
+    (a wrapped call or expression), the completed statement is quoted
+
+
+
+    instead, so the reviewer sees the real code under review rather than a
+
+
+
+    dangling fragment.  Returns '' when nothing quotable is available.
+
+
+
+    """
+
+
+
+    text = ''
+
+
+
+    if code and line:
+
+
+
+        _rel = line - code_start_line + 1
+
+
+
+        _lines = (code or '').splitlines()
+
+
+
+        if 1 <= _rel <= len(_lines):
+
+
+
+            text = _lines[_rel - 1].strip()
+
+
+
+            if text:
+
+
+
+                try:
+
+
+
+                    _stmt = _complete_statement(code, line, code_start_line)
+
+
+
+                    _collapsed = re.sub(r'\s+', ' ', _stmt['text']).strip()
+
+
+
+                    if len(_collapsed) > len(text):
+
+
+
+                        text = _collapsed
+
+
+
+                except Exception:
+
+
+
+                    pass
+
+
+
+    text = re.sub(r'\s+', ' ', text).strip()
+
+
+
+    if len(text) > max_len:
+
+
+
+        text = text[:max_len].rstrip() + ' …'
+
+
+
+    return text
+
+
+
+
+
+
+
+
+
+
+
+def _subscripts_in_text(text: str) -> List[Dict]:
+
+
+
+    """Enumerate every balanced `base[index]` subscript in `text`.
+
+
+
+
+
+
+
+    Returns ``[{'base', 'idx', 'pos', 'line'}, ...]`` in source order.  The
+
+
+
+    base is the longest dotted/arrow/colon-qualified identifier chain before
+
+
+
+    the `[` (so `a->b.c[0]` reports base `a->b.c`); `pos` is the character
+
+
+
+    offset of the `[` in `text` and `line` is the 1-based line within `text`.
+
+
+
+    """
+
+
+
+    out: List[Dict] = []
+
+
+
+    if not text:
+
+
+
+        return out
+
+
+
+    blanked = _blank_code(text)
+
+
+
+    for m in re.finditer(r'\[', blanked):
+
+
+
+        b = m.start()
+
+
+
+        # walk back over the base chain (identifiers, `.` and `:` qualifiers,
+
+
+
+        # and `->` arrows as a unit)
+
+
+
+        j = b - 1
+
+
+
+        while j >= 0:
+
+
+
+            ch = blanked[j]
+
+
+
+            if ch.isalnum() or ch in '_:.':
+
+
+
+                j -= 1
+
+
+
+            elif ch == '>' and j >= 1 and blanked[j - 1] == '-':
+
+
+
+                j -= 2
+
+
+
+            else:
+
+
+
+                break
+
+
+
+        base = blanked[j + 1:b]
+
+
+
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*', base):
+
+
+
+            continue
+
+
+
+        # balanced forward walk for the index expression
+
+
+
+        d = 0
+
+
+
+        k = m.start()
+
+
+
+        while k < len(blanked):
+
+
+
+            if blanked[k] == '[':
+
+
+
+                d += 1
+
+
+
+            elif blanked[k] == ']':
+
+
+
+                d -= 1
+
+
+
+                if d == 0:
+
+
+
+                    k += 1
+
+
+
+                    break
+
+
+
+            k += 1
+
+
+
+        idx = blanked[m.start() + 1:k - 1].strip()
+
+
+
+        out.append({
+
+
+
+            'base': base,
+
+
+
+            'idx': re.sub(r'\s+', ' ', idx),
+
+
+
+            'pos': m.start(),
+
+
+
+            'line': text.count('\n', 0, m.start()) + 1,
+
+
+
+        })
+
+
+
+    return out
+
+
+
+
+
+
+
+
+
+
+
+def _find_comparison_on(expr: str, text: str):
+
+
+
+    """Find `expr OP limit` (or `limit OP expr`) inside `text`.
+
+
+
+
+
+
+
+    `expr` may be a subscripted expression (whitespace-insensitive).  Returns
+
+
+
+    ``(op, limit, pos)`` for the first *upper* bound (`<` / `<=`), else the
+
+
+
+    first comparison found; ``None`` when no comparison references `expr`.
+
+
+
+    """
+
+
+
+    if not expr or not text:
+
+
+
+        return None
+
+
+
+    esc = re.sub(r'\s+', r'\\s*', re.escape(expr.strip()))
+
+
+
+    cast = r'(?:\(\s*[A-Za-z_][A-Za-z0-9_\s]*\)\s*)?'
+
+
+
+    limit = r'([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*|\d+)'
+
+
+
+    pats = (
+
+
+
+        (re.compile(cast + esc + r'\s*(<=|<|>=|>|==|!=)\s*' + limit), 'fwd'),
+
+
+
+        (re.compile(limit + r'\s*(>=|>|<=|<)\s*' + cast + esc), 'rev'),
+
+
+
+    )
+
+
+
+    best = None
+
+
+
+    for pat, orient in pats:
+
+
+
+        for m in pat.finditer(text):
+
+
+
+            if orient == 'fwd':
+
+
+
+                op, lim, pos = m.group(1), m.group(2), m.start()
+
+
+
+            else:
+
+
+
+                lim, op, pos = m.group(1), {'>=': '<=', '>': '<'}[m.group(2)], m.start()
+
+
+
+            if op in ('<', '<='):
+
+
+
+                return op, lim, pos
+
+
+
+            if best is None:
+
+
+
+                best = (op, lim, pos)
+
+
+
+    return best
+
+
+
+
+
+
+
+
+
+
+
+def _derived_outer_access(code: str, line: int, code_start_line: int,
+
+
+
+                          primary_arr: str, idx_var: str,
+
+
+
+                          resolution_sources: List[str],
+
+
+
+                          ev: Optional[Dict] = None) -> Dict:
+
+
+
+    """Analyse the *derived* outer access in the flagged statement.
+
+
+
+
+
+
+
+    A statement such as
+
+
+
+
+
+
+
+        if (si_conn_prity[i] != INVALID &&
+
+
+
+            si_conn_prity[i] <= MAX_NUM_ADS_CONNECTIONS &&
+
+
+
+            gs_ec_rpt_tbl[si_conn_prity[i]].b_ec_present)
+
+
+
+
+
+
+
+    contains two independent bounds: the loop bound on `i` (which only makes
+
+
+
+    `si_conn_prity[i]` itself in range) and the bound on the *value* of
+
+
+
+    `si_conn_prity[i]`, which is what indexes `gs_ec_rpt_tbl`.  Proving the
+
+
+
+    first one must never close the finding when the second is unproved — and
+
+
+
+    an inclusive `<= MAX` against a table that holds exactly `MAX` elements is
+
+
+
+    the classic off-by-one.
+
+
+
+
+
+
+
+    Returns a dict with ``status`` in ``('', 'safe', 'off_by_one', 'oob',
+
+
+
+    'unproven')`` plus the facts and the expert explanation.
+
+
+
+    """
+
+
+
+    empty = {'status': '', 'explanation': '', 'fix': '', 'outer_arr': '',
+
+
+
+             'inner_expr': '', 'outer_size': 0, 'outer_size_expr': '',
+
+
+
+             'bound_op': '', 'bound_limit': '', 'bound_limit_val': None,
+
+
+
+             'outer_line': 0, 'bound_line': 0}
+
+
+
+    if not code or not line:
+
+
+
+        return empty
+
+
+
+    stmt = _complete_statement(code, line, code_start_line)
+
+
+
+    text = stmt.get('text', '')
+
+
+
+    if not text:
+
+
+
+        return empty
+
+
+
+    subs = _subscripts_in_text(text)
+
+
+
+    candidates = [s for s in subs if '[' in s['idx']]
+
+
+
+    if not candidates:
+
+
+
+        return empty
+
+
+
+    # Prefer the candidate related to the primary access: outer == primary
+
+
+
+    # (classic `table[map[i]]`) or inner base == primary (flagged line held
+
+
+
+    # the inner subscript, the outer table is the rest of the statement).
+
+
+
+    def _inner_base(sub):
+
+
+
+        m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_.>:-]*)\s*\[', sub['idx'])
+
+
+
+        return m.group(1) if m else ''
+
+
+
+    def _relevance(sub):
+
+
+
+        if primary_arr and sub['base'] == primary_arr:
+
+
+
+            return 0
+
+
+
+        if primary_arr and _inner_base(sub) == primary_arr:
+
+
+
+            return 1
+
+
+
+        return 2
+
+
+
+    candidates.sort(key=_relevance)
+
+
+
+    sub = candidates[0]
+
+
+
+    outer_arr = sub['base']
+
+
+
+    inner_expr = sub['idx'].strip()
+
+
+
+    inner_base = _inner_base(sub)
+
+
+
+
+
+
+
+    # --- outer table size ---------------------------------------------------
+
+
+
+    outer_size = 0
+
+
+
+    outer_size_expr = ''
+
+
+
+    decl = _extract_array_declaration(code, outer_arr, code_start_line,
+
+
+
+                                      extra_sources=resolution_sources)
+
+
+
+    if decl:
+
+
+
+        outer_size_expr = decl.get('size_expr', '')
+
+
+
+        outer_size = decl.get('size', 0)
+
+
+
+    if outer_size == 0 and outer_size_expr:
+
+
+
+        resolved = _resolve_integer_constant(outer_size_expr, resolution_sources)
+
+
+
+        if resolved is not None and resolved >= 0:
+
+
+
+            outer_size = resolved
+
+
+
+    if outer_size == 0 and ev and ev.get('array_size'):
+
+
+
+        # Only trust Coverity's size when the event names this exact array.
+
+
+
+        desc_blob = ' '.join(ev.get('all_descriptions', []))
+
+
+
+        if outer_arr in desc_blob or _inner_base(sub) in desc_blob:
+
+
+
+            outer_size = int(ev['array_size'])
+
+
+
+            outer_size_expr = outer_size_expr or str(outer_size)
+
+
+
+
+
+
+
+    # --- bound on the inner value inside the statement ----------------------
+
+
+
+    cmp_info = _find_comparison_on(inner_expr, text)
+
+
+
+    bound_op, bound_limit, bound_line = '', '', 0
+
+
+
+    bound_limit_val = None
+
+
+
+    if cmp_info:
+
+
+
+        bound_op, bound_limit, pos = cmp_info
+
+
+
+        bound_line = stmt.get('start_line', line) + text.count('\n', 0, pos)
+
+
+
+        bound_limit_val = _resolve_integer_constant(bound_limit, resolution_sources)
+
+
+
+
+
+
+
+    result = dict(empty)
+
+
+
+    result.update({'outer_arr': outer_arr, 'inner_expr': inner_expr,
+
+
+
+                   'outer_size': outer_size, 'outer_size_expr': outer_size_expr,
+
+
+
+                   'bound_op': bound_op, 'bound_limit': bound_limit,
+
+
+
+                   'bound_limit_val': bound_limit_val,
+
+
+
+                   'outer_line': stmt.get('start_line', line) + sub['line'] - 1,
+
+
+
+                   'bound_line': bound_line})
+
+
+
+
+
+
+
+    def _size_phrase():
+
+
+
+        if outer_size > 0:
+
+
+
+            return (f"has only {outer_size} elements (valid indices 0..{outer_size - 1})")
+
+
+
+        return ("whose size could not be resolved from the available sources "
+
+
+
+                "(declaration is outside the extracted context)")
+
+
+
+
+
+
+
+    # `!= INVALID_X` style checks are a lower/inequality check, not an upper
+
+
+
+    # bound — name them when they are all the statement offers.
+
+
+
+    only_ineq = ''
+
+
+
+    if bound_op == '!=':
+
+
+
+        ineq_m = re.search(
+
+
+
+            re.escape(re.sub(r'\s+', r'\s*', inner_expr)) + r'\s*!=\s*(\S+)', text)
+
+
+
+        if ineq_m:
+
+
+
+            only_ineq = (f" The statement only checks `{inner_expr} != {ineq_m.group(1)}`, "
+
+
+
+                         f"which is not an upper bound.")
+
+
+
+
+
+
+
+    if bound_op in ('<', '<=') and bound_limit_val is not None and outer_size > 0:
+
+
+
+        max_val = bound_limit_val - 1 if bound_op == '<' else bound_limit_val
+
+
+
+        if max_val >= outer_size:
+
+
+
+            status = 'off_by_one' if max_val == outer_size else 'oob'
+
+
+
+            over = (f"one element past the end" if max_val == outer_size
+
+
+
+                    else f"{max_val - (outer_size - 1)} elements past the end")
+
+
+
+            result['status'] = status
+
+
+
+            result['explanation'] = (
+
+
+
+                f"the same statement also indexes `{outer_arr}` with the *value* of "
+
+
+
+                f"`{inner_expr}`; `{outer_arr}` has only {outer_size} elements "
+
+
+
+                f"(valid indices 0..{outer_size - 1}), but the check "
+
+
+
+                f"`{inner_expr} {bound_op} {bound_limit}` at line {bound_line} admits "
+
+
+
+                f"that value up to {max_val}, which is {over} of the table. The "
+
+
+
+                f"comparison must be `< {bound_limit}` (or the table must hold at "
+
+
+
+                f"least {max_val + 1} entries).")
+
+
+
+            result['fix'] = (
+
+
+
+                f"Change the check at line {bound_line} from "
+
+
+
+                f"`{inner_expr} {bound_op} {bound_limit}` to "
+
+
+
+                f"`{inner_expr} < {bound_limit}` — `{outer_arr}` has {outer_size} "
+
+
+
+                f"elements, so index {max_val} is out of bounds. // CWE-125/787")
+
+
+
+            return result
+
+
+
+        result['status'] = 'safe'
+
+
+
+        result['explanation'] = (
+
+
+
+            f"the derived index into `{outer_arr}` is verified: the check "
+
+
+
+            f"`{inner_expr} {bound_op} {bound_limit}` at line {bound_line} keeps it at "
+
+
+
+            f"most {max_val}, inside the {outer_size}-element `{outer_arr}` "
+
+
+
+            f"(valid indices 0..{outer_size - 1})")
+
+
+
+        return result
+
+
+
+    if bound_op in ('<', '<='):
+
+
+
+        if bound_limit_val is None:
+
+
+
+            result['status'] = 'unproven'
+
+
+
+            result['explanation'] = (
+
+
+
+                f"the value of `{inner_expr}` is used to index `{outer_arr}`, and the "
+
+
+
+                f"check `{inner_expr} {bound_op} {bound_limit}` at line {bound_line} is "
+
+
+
+                f"its only upper bound — but `{bound_limit}` could not be resolved to a "
+
+
+
+                f"numeric value from the available sources, so the bound of `{outer_arr}` "
+
+
+
+                f"({(_size_phrase() if outer_size <= 0 else 'see declaration')}) is not "
+
+
+
+                f"proved. An inclusive `<=` against the table's own count constant is "
+
+
+
+                f"off-by-one; confirm the constant's value before closing.")
+
+
+
+            return result
+
+
+
+        # bound smaller than needed is safe (max_val < outer_size already returned above
+
+
+
+        # only when size known); size unknown:
+
+
+
+        result['status'] = 'unproven'
+
+
+
+        result['explanation'] = (
+
+
+
+            f"the value of `{inner_expr}` is used to index `{outer_arr}`, bounded by "
+
+
+
+            f"`{inner_expr} {bound_op} {bound_limit}` (line {bound_line}, value "
+
+
+
+            f"{bound_limit_val}) — but `{outer_arr}` {_size_phrase()}, so the check's "
+
+
+
+            f"limit cannot be verified against it. Confirm `{outer_arr}` holds at least "
+
+
+
+            f"{bound_limit_val + 1} entries before closing.")
+
+
+
+        return result
+
+
+
+    result['status'] = 'unproven'
+
+
+
+    result['explanation'] = (
+
+
+
+        f"the value of `{inner_expr}` is used to index `{outer_arr}` at line "
+
+
+
+        f"{result['outer_line']}, but no upper bound on `{inner_expr}` against "
+
+
+
+        f"`{outer_arr}`'s size is visible in the flagged statement"
+
+
+
+        + only_ineq +
+
+
+
+        (f" `{outer_arr}` {_size_phrase()}." if outer_size > 0 else
+
+
+
+         f" `{outer_arr}` {_size_phrase()}; the inner index being in range does not "
+
+
+
+         f"make this outer access safe."))
+
+
+
+    return result
+
+
+
+
+
+
+
+
+
+
+
+def _top_level_char(text: str, ch: str):
+
+
+
+    """Index of the first top-level `ch` (outside ()/[]), skipping `::`."""
+
+
+
+    d_p = d_b = 0
+
+
+
+    for i, c in enumerate(text):
+
+
+
+        if c == '(':
+
+
+
+            d_p += 1
+
+
+
+        elif c == ')':
+
+
+
+            d_p = max(0, d_p - 1)
+
+
+
+        elif c == '[':
+
+
+
+            d_b += 1
+
+
+
+        elif c == ']':
+
+
+
+            d_b = max(0, d_b - 1)
+
+
+
+        elif c == ch and d_p == 0 and d_b == 0:
+
+
+
+            if ch == ':' and i + 1 < len(text) and text[i + 1] == ':':
+
+
+
+                continue
+
+
+
+            return i
+
+
+
+    return None
+
+
+
+
+
+
+
+
+
+
+
+def _possible_index_values(expr: str, sources: List[str], _depth: int = 0) -> Optional[List[int]]:
+
+
+
+    """Enumerate the constant values `expr` can take.
+
+
+
+
+
+
+
+    Handles plain constants/macros/enums and top-level ternaries
+
+
+
+    (`cond ? a : b`, nested to depth 3).  Returns the sorted list of values,
+
+
+
+    or None when any branch is not a resolvable constant.
+
+
+
+    """
+
+
+
+    expr = (expr or '').strip().rstrip(';').strip()
+
+
+
+    if not expr or _depth > 3:
+
+
+
+        return None
+
+
+
+    val = _resolve_integer_constant(expr, sources)
+
+
+
+    if val is not None:
+
+
+
+        return [val]
+
+
+
+    q = _top_level_char(expr, '?')
+
+
+
+    if q is not None:
+
+
+
+        rest = expr[q + 1:].strip()
+
+
+
+        c = _top_level_char(rest, ':')
+
+
+
+        if c is not None:
+
+
+
+            a = _possible_index_values(rest[:c], sources, _depth + 1)
+
+
+
+            b = _possible_index_values(rest[c + 1:], sources, _depth + 1)
+
+
+
+            if a is not None and b is not None:
+
+
+
+                return sorted(set(a) | set(b))
+
+
+
+    return None
+
+
+
+
+
+
+
+
+
+
+
 def _else_block_intervals(code: str, code_start_line: int = 1) -> List[Tuple[int, int]]:
     """Return (start_line, end_line) intervals (absolute) of `else { ... }`
     blocks.  A closing `}` on the same line as the opening counts, so
@@ -3208,6 +5736,30 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     acc = build_evidence(ctx, ev, 'OVERRUN')
     decision = DecisionAgent.evaluate(acc, 'OVERRUN')
 
+    # Resolution sources (defect function, its file, callers/callees) are used
+
+
+
+    # by every extraction step below — macro/enum/typedef constants may live
+
+
+
+    # outside the extracted function snippet.
+
+
+
+    resolution_sources = _gather_resolution_sources(
+
+
+
+        code, file, called_function_codes, ctx.get('callers_list', []))
+
+
+
+
+
+
+
 
     # --- Extract precise array access details ---
     # Initialize with safe defaults
@@ -3287,7 +5839,14 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             access_line_actual = access_info.get('line', line)
             access_type = access_info.get('access_type', 'access')
 
-            decl_info = _extract_array_declaration(code, arr_name, code_start_line)
+            decl_info = _extract_array_declaration(code, arr_name, code_start_line,
+
+
+
+                                                   extra_sources=resolution_sources)
+
+
+
             arr_size_expr = decl_info.get('size_expr', '')
             arr_size = decl_info.get('size', 0)
 
@@ -3304,7 +5863,14 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     # same line as initializers. Re-run the lightweight regex extractor before
     # giving up on the local size / assignment facts.
     if arr_name and not arr_size_expr:
-        decl_info = _extract_array_declaration(code, arr_name, code_start_line)
+        decl_info = _extract_array_declaration(code, arr_name, code_start_line,
+
+
+
+                                               extra_sources=resolution_sources)
+
+
+
         if decl_info:
             arr_size_expr = decl_info.get('size_expr', '')
             arr_size = decl_info.get('size', 0)
@@ -3328,6 +5894,150 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             idx_var = idx_var_m.group(1) if idx_var_m else idx_expr
             access_type = 'read'
 
+    # 3.5 Statement completion: the flagged line may be only the FIRST line of
+
+
+
+    # a multi-line statement whose sole subscript sits a line or two further
+
+
+
+    # down (a wrapped `return f(a, &obj->field.arr[idx]);`).  The ±1-line
+
+
+
+    # anchoring rule above intentionally rejects such subscripts as
+
+
+
+    # "elsewhere in the function"; completing the flagged statement recovers
+
+
+
+    # the real base and index instead of giving up.
+
+
+
+    if not arr_name and line and code:
+
+
+
+        stmt = _complete_statement(code, line, code_start_line)
+
+
+
+        for sub in _subscripts_in_text(stmt['text']):
+
+
+
+            if not sub['idx'] or re.match(r'^\d+$', sub['idx']):
+
+
+
+                continue
+
+
+
+            arr_name = sub['base']
+
+
+
+            idx_expr = sub['idx']
+
+
+
+            idx_clean = re.sub(r'\([^)]+\)', '', sub['idx']).strip()
+
+
+
+            m2 = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\b', idx_clean)
+
+
+
+            idx_var = m2.group(1) if m2 else sub['idx']
+
+
+
+            access_line_actual = stmt['start_line'] + sub['line'] - 1
+
+
+
+            access_type = 'read'
+
+
+
+            decl_info = _extract_array_declaration(code, arr_name, code_start_line,
+
+
+
+                                                   extra_sources=resolution_sources)
+
+
+
+            arr_size_expr = decl_info.get('size_expr', '')
+
+
+
+            arr_size = decl_info.get('size', 0)
+
+
+
+            if arr_size == 0 and arr_size_expr:
+
+
+
+                _rs = _resolve_integer_constant(arr_size_expr, resolution_sources)
+
+
+
+                if _rs is not None and _rs >= 0:
+
+
+
+                    arr_size = _rs
+
+
+
+            if idx_var and idx_var != 'the index':
+
+
+
+                flow = _extract_index_flow(code, idx_var, access_line_actual, code_start_line)
+
+
+
+                assign_line = assign_line or flow.get('assign_line', 0)
+
+
+
+                assign_expr = assign_expr or flow.get('assign_expr', '')
+
+
+
+                guard_line = guard_line or flow.get('guard_line', 0)
+
+
+
+                guard_cond = guard_cond or flow.get('guard_cond', '')
+
+
+
+                guard_op = guard_op or flow.get('guard_op', '')
+
+
+
+                guard_limit = guard_limit or flow.get('guard_limit', '')
+
+
+
+            break
+
+
+
+
+
+
+
     # 4. Absolute last resort — generic but honest
     if not arr_name:
         arr_name = 'the buffer'
@@ -3343,12 +6053,30 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         if not arr_size_expr:
             arr_size_expr = str(arr_size)
 
-    # Resolve local or cross-file constants (enum members, #defines, constexprs)
-    # before defaulting to "Needs review". This is especially important for
-    # patterns like `idx = (unsigned)E_HIGH_PRIORITY; table[idx]` where the
-    # surrounding function snippet alone does not show the enum values.
-    resolution_sources = _gather_resolution_sources(
-        code, file, called_function_codes, ctx.get('callers_list', []))
+    # (resolution_sources was gathered at the top of this function.)
+
+
+
+    # Resolve local or cross-file constants (enum members, #defines,
+
+
+
+    # constexprs) before defaulting to "Needs review". This is especially
+
+
+
+    # important for patterns like `idx = (unsigned)E_HIGH_PRIORITY;
+
+
+
+    # table[idx]` where the surrounding function snippet alone does not
+
+
+
+    # show the enum values.
+
+
+
     if arr_size == 0 and arr_size_expr:
         resolved_arr_size = _resolve_integer_constant(arr_size_expr, resolution_sources)
         if resolved_arr_size is not None and resolved_arr_size >= 0:
@@ -3453,6 +6181,154 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
     else:
         inner_index_proven_safe = bool(
             concrete_idx is not None and arr_size > 0 and 0 <= concrete_idx < arr_size)
+
+
+
+
+    # ------------------------------------------------------------------
+
+
+
+    # Derived (outer) access. When the flagged statement also indexes a
+
+
+
+    # second array with the *value* of the first (`tbl[map[i]]`), the inner
+
+
+
+    # access being in range proves nothing about the outer one: the outer
+
+
+
+    # table is indexed by `map[i]`, whose bound is a different comparison
+
+
+
+    # with a different constant. An inclusive `<= MAX` against a table that
+
+
+
+    # holds exactly MAX elements is the canonical off-by-one — and it is
+
+
+
+    # invisible to any per-line analysis.
+
+
+
+    # ------------------------------------------------------------------
+
+
+
+    _real_names_now = (arr_name not in ('', 'the buffer', 'the array', 'array')
+
+
+
+                       and idx_var not in ('', 'the offset', 'the index', 'index'))
+
+
+
+    derived = _derived_outer_access(
+
+
+
+        code, line, code_start_line,
+
+
+
+        arr_name if _real_names_now else '', idx_var,
+
+
+
+        resolution_sources, ev)
+
+
+
+
+
+
+
+    # A constant ternary assignment (`idx = cond ? A : B`) pins the index to
+
+
+
+    # a small value set. Enumerate it: every value in range proves FP, any
+
+
+
+    # value at/past the end proves Bug with the exact offending value.
+
+
+
+    ternary_values = None
+
+
+
+    oob_ternary_vals = []
+
+
+
+    if (assign_expr and arr_size > 0 and '?' in assign_expr
+
+
+
+            and re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', idx_var or '')
+
+
+
+            and not _index_mutated_in_function(code, idx_var)):
+
+
+
+        tv = _possible_index_values(assign_expr, resolution_sources)
+
+
+
+        if tv:
+
+
+
+            ternary_values = tv
+
+
+
+            oob_ternary_vals = [v for v in tv if v < 0 or v >= arr_size]
+
+
+
+            if concrete_idx is None:
+
+
+
+                vals_txt = ', '.join(map(str, sorted(tv)))
+
+
+
+                if oob_ternary_vals:
+
+
+
+                    concrete_idx = max(oob_ternary_vals)
+
+
+
+                else:
+
+
+
+                    concrete_idx = max(tv)
+
+
+
+                concrete_idx_source = (f"the assignment `{idx_var} = {assign_expr}` "
+
+
+
+                                       f"(possible values: {vals_txt})")
+
+
+
 
     # --- path_prover: off-by-one / guard safety proof ---
     prover_result: Dict = {}
@@ -3593,6 +6469,162 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 confidence=max(decision.confidence, extra_decision.confidence - 0.05),
                 reasoning=decision.reasoning + extra_decision.reasoning)
 
+    # ------------------------------------------------------------------
+
+
+
+    # Final verdict net for facts no earlier step saw: the derived
+
+
+
+    # outer-table bound and the enumerated values of a constant ternary
+
+
+
+    # assignment. These decide the access Coverity actually flagged and
+
+
+
+    # override whatever the inner-subscript analysis concluded.
+
+
+
+    # ------------------------------------------------------------------
+
+
+
+    if ternary_values is not None and arr_size > 0:
+
+
+
+        if oob_ternary_vals:
+
+
+
+            if decision.classification != 'Bug':
+
+
+
+                vals_txt = ', '.join(map(str, sorted(ternary_values)))
+
+
+
+                decision = type(decision)(
+
+
+
+                    classification='Bug',
+
+
+
+                    confidence=max(decision.confidence, 0.82),
+
+
+
+                    reasoning=decision.reasoning +
+
+
+
+                    [f"`{idx_var}` can take the values {vals_txt} from the assignment "
+
+
+
+                     f"`{idx_var} = {assign_expr}`; {max(oob_ternary_vals)} is out of "
+
+
+
+                     f"range of the {arr_size}-element `{arr_name}` (valid indices "
+
+
+
+                     f"0..{arr_size - 1})."])
+
+
+
+        else:
+
+
+
+            if decision.classification != 'False positive':
+
+
+
+                vals_txt = ', '.join(map(str, sorted(ternary_values)))
+
+
+
+                decision = type(decision)(
+
+
+
+                    classification='False positive',
+
+
+
+                    confidence=max(decision.confidence, 0.72),
+
+
+
+                    reasoning=decision.reasoning +
+
+
+
+                    [f"every possible value of `{idx_var}` from the assignment "
+
+
+
+                     f"`{idx_var} = {assign_expr}` ({vals_txt}) is within "
+
+
+
+                     f"[0, {arr_size - 1}] of the {arr_size}-element `{arr_name}`."])
+
+
+
+    if derived.get('status') in ('off_by_one', 'oob'):
+
+
+
+        if decision.classification != 'Bug':
+
+
+
+            decision = type(decision)(
+
+
+
+                classification='Bug',
+
+
+
+                confidence=max(decision.confidence, 0.82),
+
+
+
+                reasoning=decision.reasoning + [derived['explanation']])
+
+
+
+    elif derived.get('status') == 'unproven' and decision.classification == 'False positive':
+
+
+
+        decision = type(decision)(
+
+
+
+            classification='Needs review', confidence=0.55,
+
+
+
+            reasoning=decision.reasoning + [derived['explanation']])
+
+
+
+
+
+
+
     # Bug — precise, example-style comment
     # ------------------------------------------------------------------
     if decision.classification == "Bug":
@@ -3681,6 +6713,26 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             elif guard_line > 0 and guard_cond:
                 if guard_limit:
                     parts.append(f"Condition at line {guard_line} (`{guard_cond}`) allows `{idx_var}` to reach `{guard_limit}`.")
+                elif guard_explanation and idx_var in guard_explanation:
+
+
+
+                    # The effective bound on the index is already narrated by
+
+
+
+                    # the guard/loop assessment below — do not also print a
+
+
+
+                    # bare "condition found" sentence for the same check.
+
+
+
+                    pass
+
+
+
                 else:
                     parts.append(f"Condition at line {guard_line} (`{guard_cond}`) was found, but its limit could not be extracted.")
                 
@@ -3715,7 +6767,8 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
 
             # path_prover off-by-one explanation
             if prover_result.get('is_off_by_one') and prover_result.get('off_by_one_explanation'):
-                parts.append(prover_result['off_by_one_explanation'])
+                parts.append(_as_sentence(prover_result['off_by_one_explanation']))
+
 
             # Guard assessment (senior-reviewer view): does the nearby guard
             # actually bound the flagged index, or merely look protective?
@@ -3725,15 +6778,61 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 _narration = "".join(parts)
                 if not ('reach index' in guard_explanation and 'reach index' in _narration
                         and idx_var in guard_explanation and f"`{idx_var}`" in _narration):
-                    parts.append(guard_explanation)
+                    parts.append(_as_sentence(guard_explanation))
 
-            # A nested subscript has two independent bounds: for example,
-            # ``table[index_map[i]]``.  The simple extractor can identify the
-            # inner ``index_map[i]`` but cannot prove the size/semantics of the
-            # outer table or whether a named MAX constant is a count or a last
-            # valid index.  Never offer a patch for the inner index in that
-            # case: it would be unrelated to the defect Coverity reported.
-            if _has_nested_subscript_at_line(code, access_line_actual, code_start_line):
+
+            # A nested/derived subscript has two independent bounds: for
+
+
+
+            # example ``table[index_map[i]]``.  The derived-access analysis
+
+
+
+            # above settles the outer table's bound when it can resolve both
+
+
+
+            # sides — quote that conclusion and, when proven, patch the outer
+
+
+
+            # bound (never the inner index: it is unrelated to the defect
+
+
+
+            # Coverity reported).
+
+
+
+            if derived.get('status') in ('off_by_one', 'oob'):
+
+
+
+                parts.append(_as_sentence(derived['explanation']))
+
+
+
+                fix = derived['fix'] or "Manual review required."
+
+
+
+            elif derived.get('status') == 'unproven':
+
+
+
+                parts.append(_as_sentence(derived['explanation']))
+
+
+
+                fix = "Manual review required."
+
+
+
+            elif _has_nested_subscript_at_line(code, access_line_actual, code_start_line):
+
+
+
                 parts.append(
                     "The flagged expression contains a derived/nested index. "
                     "Verify the bound for the value used to index the outer "
@@ -3741,9 +6840,46 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                     "changing this condition; no automatic patch is safe.")
                 fix = "Manual review required."
             else:
-                fix = (f"Suggestion: if ({idx_var} < 0 || {idx_var} >= "
-                       f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) "
-                       "<<ERROR_RETURN>> // CWE-125/787")
+                _idx_unsigned = _infer_integral_decl_bounds(
+
+
+
+                    idx_var, resolution_sources).get('unsigned', False)
+
+
+
+                if _idx_unsigned:
+
+
+
+                    fix = (f"Suggestion: if ({idx_var} >= "
+
+
+
+                           f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) "
+
+
+
+                           "<<ERROR_RETURN>> // CWE-125/787")
+
+
+
+                else:
+
+
+
+                    fix = (f"Suggestion: if ({idx_var} < 0 || {idx_var} >= "
+
+
+
+                           f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))) "
+
+
+
+                           "<<ERROR_RETURN>> // CWE-125/787")
+
+
+
         
         else:
             # ---- Generic fallback: extract the actual source line to name the expression ----
@@ -3785,15 +6921,46 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 parts.append(f"If `{_sz}` exceeds the destination field size, this overwrites adjacent memory and corrupts neighboring data. Enforce the bound before the copy.")
                 fix = f"Verify `{_sz}` <= sizeof destination before copying:\n  if ({_sz} > sizeof({_dst})) <<ERROR_RETURN>>\n  {_fn}({', '.join(_args)});"
             elif src_line_text:
-                parts.append(f"Out-of-bounds {verb} at line {access_line_actual}: `{src_line_text[:140].rstrip()}`")
-                parts.append("Review the pointer/array bounds for this access; if the index or length exceeds the object's allocated size, it reads/writes adjacent memory, corrupts data and can crash or be exploited.")
+                # The flagged line may be only the first line of a multi-line
+
+
+
+                # statement; quote the completed statement so the reviewer
+
+
+
+                # sees the exact access under review, not an isolated fragment.
+
+
+
+                _quoted = (_quote_flagged_statement(code, access_line_actual,
+
+
+
+                                                    code_start_line, max_len=220)
+
+
+
+                           or src_line_text)
+
+
+
+                parts.append(f"Out-of-bounds {verb} at line {access_line_actual}: `{_quoted}`")
+
+
+
+                parts.append("Verify the index/length controlling this access against the object's declared size in the statement above; if it can exceed the allocation, the access touches adjacent memory, corrupts data and can crash or be exploited.")
+
+
+
                 fix = "Add explicit bounds checking before all array and pointer dereferences: verify the index/length stays within the object's allocated size."
             else:
                 parts.append(f"An out-of-bounds memory access is {verb} at line {access_line_actual}. Manual review is required to confirm the bound and its impact.")
                 fix = "Add explicit bounds checking before all array and pointer dereferences: verify the index/length stays within the object's allocated size."
 
             if guard_explanation:
-                parts.append(guard_explanation)
+                parts.append(_as_sentence(guard_explanation))
+
             elif guard_line > 0 and guard_cond:
                 parts.append(f"A guard condition was detected at line {guard_line}, but its effectiveness could not be fully determined.")
 
@@ -3827,6 +6994,30 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                         break
             if not dup:
                 reasons.append(g_txt)
+        if derived.get('status') == 'safe':
+
+
+
+            # The derived outer-table bound was verified — the dismissal only
+
+
+
+            # stands on that proof, so it must be stated in the comment.
+
+
+
+            d_txt = derived['explanation'].rstrip('.')
+
+
+
+            if not any(derived.get('outer_arr', '') in r for r in reasons):
+
+
+
+                reasons.append(d_txt)
+
+
+
         if not reasons and arr_size_expr and arr_name not in ('the buffer',):
             reasons.append(f"`{arr_name}` is declared with size `{arr_size_expr}`")
         if ctx.get('safe_api_note'):
@@ -3865,6 +7056,14 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         parts.append(f"The {function}() access at line {access_line_actual} needs manual review — the extracted context is inconclusive.")
 
         gaps = []
+        if derived.get('status') in ('unproven', 'off_by_one', 'oob'):
+
+
+
+            gaps.append(derived['explanation'])
+
+
+
         if not guard_line:
             gaps.append("no definitive bounds guard is visible")
         if not arr_size_expr:
@@ -3914,7 +7113,30 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             # Bound the guard with the array's real limit: its declared size
             # expression when known, otherwise a sizeof() computed from the
             # array itself. Never emit an invented ARRAY_SIZE macro.
-            if arr_size_expr:
+            # A derived outer access whose bound is unproved also withholds
+
+
+
+            # the patch: the inner-index guard would not fix the flagged
+
+
+
+            # access.
+
+
+
+            if derived.get('status') in ('unproven',):
+
+
+
+                _bound = ''
+
+
+
+            elif arr_size_expr:
+
+
+
                 _bound = arr_size_expr
             elif arr_name and arr_name not in ('the buffer', 'the array', ''):
                 _bound = f"(int)(sizeof({arr_name}) / sizeof({arr_name}[0]))"
@@ -4189,12 +7411,98 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
         ))
 
     if prezeroed or field_not_cstr:
+        # Name the buffer and the exact memset that proves it, so the
+
+
+
+        # disposition states the fact a reviewer would verify by hand.
+
+
+
+        _ms = _extract_memset_info(code, dest_name)
+
+
+
+        if not _ms and dest_name:
+
+
+
+            _base = _dest_base_and_field(dest_name)[0]
+
+
+
+            if _base:
+
+
+
+                for _i, _ln in enumerate(code.splitlines(), 1):
+
+
+
+                    if re.search(rf'\bmemset\s*\(\s*&?\s*{re.escape(_base)}\s*,\s*0\b', _ln):
+
+
+
+                        _ms = {'line': _i, 'size_expr': '', 'raw': _ln.strip()}
+
+
+
+                        break
+
+
+
+        if prezeroed:
+
+
+
+            if _ms:
+
+
+
+                _ms_txt = f"at line {_ms['line']} (`{_ms['raw'].rstrip(';')}`)"
+
+
+
+            else:
+
+
+
+                _ms_txt = "before the flagged use"
+
+
+
+            desc = (f"`{dest_name or 'the destination'}` is zero-initialised {_ms_txt}, so the "
+
+
+
+                    f"buffer always contains a null terminator and a bounded copy into it "
+
+
+
+                    f"cannot leave it unterminated.")
+
+
+
+        else:
+
+
+
+            desc = (f"`{dest_name or 'the destination'}` is a fixed-width field not consumed as a "
+
+
+
+                    f"C string, so a missing terminator on the bounded copy is not a defect.")
+
+
+
         acc.add(Evidence(
             label="string_already_terminated_or_not_cstring",
             polarity="fp",
             weight=0.88,
-            description=("Destination is pre-zeroed or a fixed-width field not consumed as a C string, "
-                         "so a missing terminator on the bounded copy is not a defect.")
+            description=desc
+
+
+
         ))
     elif sink in ('memcpy', 'strncpy') and not _has_pattern(code, r'["\']\\0["\']') and used_as_cstr:
         acc.add(Evidence(
@@ -5849,6 +9157,110 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
             confidence = min(float(confidence), 0.70)
         if notes:
             comment = (comment + "\n\n" + " ".join(notes)).strip()
+        # ------------------------------------------------------------------
+
+
+
+        # cppcheck corroboration (independent static-analysis backend).
+
+
+
+        #  * A memory-safety rule that hits (near) the flagged line while we
+
+
+
+        #    call the finding a false positive is a direct contradiction:
+
+
+
+        #    the verdict is demoted to Needs review and the disagreement is
+
+
+
+        #    stated.
+
+
+
+        #  * A hit on a Bug / Needs review is cited as corroboration.
+
+
+
+        # The per-file cache makes this free after the first defect in a
+
+
+
+        # file; COVERITY_DISABLE_CPPCHECK=1 disables it entirely.
+
+
+
+        # ------------------------------------------------------------------
+
+
+
+        cc_rule = _run_cppcheck_check(file, line, checker) if file else None
+
+
+
+        if cc_rule:
+
+
+
+            if (classification == 'False positive'
+
+
+
+                    and cc_rule in _CPPCHECK_MEMORY_RULES
+
+
+
+                    and confidence < 0.8):
+
+
+
+                classification = 'Needs review'
+
+
+
+                confidence = min(float(confidence), 0.55)
+
+
+
+                fix = 'Manual review required.'
+
+
+
+                comment = comment.rstrip() + (
+
+
+
+                    f"\n\nIndependent corroboration: cppcheck's `{cc_rule}` rule also "
+
+
+
+                    f"flags line {line} of this file, which contradicts the "
+
+
+
+                    f"false-positive verdict above — review manually before closing.")
+
+
+
+            elif classification in ('Bug', 'Needs review'):
+
+
+
+                comment = comment.rstrip() + (
+
+
+
+                    f"\n\nIndependent corroboration: cppcheck's `{cc_rule}` rule also "
+
+
+
+                    f"flags line {line} of this file.")
+
+
+
         # A "Needs review" verdict means the tool could not prove a code-specific
         # remediation. Do not present a placeholder guard as if it were a valid
         # patch; keep the analysis open and explain why.
