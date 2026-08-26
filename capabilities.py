@@ -128,15 +128,20 @@ def _probe_flow() -> Capability:
 
 
 def _probe_semgrep() -> Capability:
-    """semgrep is corroborating evidence only, and is opt-in."""
-    enabled = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower() \
-        in ("1", "true", "yes", "on")
-    if not enabled:
+    """semgrep is corroborating evidence only, is cached per-file, and is on
+    by default.  Disable with COVERITY_DISABLE_SEMGREP=1 or the legacy
+    COVERITY_ENABLE_SEMGREP=0/false/no/off."""
+    truthy = ("1", "true", "yes", "on")
+    if os.environ.get("COVERITY_DISABLE_SEMGREP", "").strip().lower() in truthy:
         return Capability("semgrep", "semgrep (corroboration)", False,
-                          "off by default — set COVERITY_ENABLE_SEMGREP=1", False)
+                          "disabled by COVERITY_DISABLE_SEMGREP", False)
+    enable = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower()
+    if enable and enable not in truthy:
+        return Capability("semgrep", "semgrep (corroboration)", False,
+                          "disabled by COVERITY_ENABLE_SEMGREP=0", False)
     if shutil.which("semgrep") is None:
         return Capability("semgrep", "semgrep (corroboration)", False,
-                          "enabled but executable not on PATH", False)
+                          "semgrep not on PATH — install or add it to PATH", False)
     try:
         r = subprocess.run(["semgrep", "--version"],
                            capture_output=True, text=True, timeout=5)

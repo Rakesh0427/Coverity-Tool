@@ -92,9 +92,63 @@ def test_semgrep_absence_does_not_reduce_depth(monkeypatch):
         for k, c in capabilities.probe().items()
     }
     fake["semgrep"] = capabilities.Capability(
-        "semgrep", "semgrep (corroboration)", False, "off by default", False)
+        "semgrep", "semgrep (corroboration)", False, "disabled by env", False)
     monkeypatch.setattr(capabilities, "_CACHE", fake)
     assert capabilities.analysis_depth() == capabilities.DEPTH_FULL
+
+
+def _fake_semgrep_path(monkeypatch):
+    """Make shutil.which find semgrep without needing it installed."""
+    monkeypatch.setattr(
+        capabilities.shutil, "which",
+        lambda name: "/usr/bin/semgrep" if name == "semgrep" else None)
+
+
+def test_semgrep_is_enabled_by_default(monkeypatch):
+    """semgrep is corroboration-only and now ON by default; the per-file cache
+    bounds the cost, so no env flag is required to use it."""
+    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
+    _fake_semgrep_path(monkeypatch)
+
+    class _R:
+        returncode = 0
+        stdout = "1.45.0\n"
+
+    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
+    caps = capabilities.probe(force=True)
+    assert caps["semgrep"].available is True
+
+
+def test_semgrep_disable_flag_turns_it_off(monkeypatch):
+    """COVERITY_DISABLE_SEMGREP=1 must be able to opt out."""
+    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
+    monkeypatch.setenv("COVERITY_DISABLE_SEMGREP", "1")
+    _fake_semgrep_path(monkeypatch)
+
+    class _R:
+        returncode = 0
+        stdout = "1.45.0\n"
+
+    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
+    caps = capabilities.probe(force=True)
+    assert caps["semgrep"].available is False
+    assert "COVERITY_DISABLE_SEMGREP" in caps["semgrep"].detail
+
+
+def test_semgrep_legacy_enable_zero_still_disables(monkeypatch):
+    """COVERITY_ENABLE_SEMGREP=0 keeps working for old scripts."""
+    monkeypatch.setenv("COVERITY_ENABLE_SEMGREP", "0")
+    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
+    _fake_semgrep_path(monkeypatch)
+
+    class _R:
+        returncode = 0
+        stdout = "1.45.0\n"
+
+    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
+    caps = capabilities.probe(force=True)
+    assert caps["semgrep"].available is False
 
 
 def test_a_crashing_probe_does_not_break_the_run(monkeypatch):

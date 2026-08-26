@@ -1275,12 +1275,20 @@ def _extract_array_initializer_values(code: str, arr_name: str,
 
 
 # Semgrep per-file cache and enable flag — semgrep is heavy (2-30s per file) and
-# caused the tool to appear stuck. Default OFF; enable via COVERITY_ENABLE_SEMGREP=1.
+# once ran per-defect, which made 1000-defect runs take 30+ minutes. It now runs
+# at most once per source file (cached) and is ENABLED by default; a per-file
+# cache keeps the cost bounded. Disable via COVERITY_DISABLE_SEMGREP=1 (or the
+# legacy COVERITY_ENABLE_SEMGREP=0/false/no/off).
 _SEMGREP_CACHE: dict = {}
 _SEMGREP_AVAILABLE: Optional[bool] = None
 
 def _semgrep_enabled() -> bool:
-    if os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip() not in ("1", "true", "yes", "on"):
+    truthy = ("1", "true", "yes", "on")
+    # Explicit opt-out wins; legacy opt-in flag still accepted for compatibility.
+    if os.environ.get("COVERITY_DISABLE_SEMGREP", "").strip().lower() in truthy:
+        return False
+    enable = os.environ.get("COVERITY_ENABLE_SEMGREP", "").strip().lower()
+    if enable and enable not in truthy:
         return False
     global _SEMGREP_AVAILABLE
     if _SEMGREP_AVAILABLE is None:
@@ -1299,9 +1307,9 @@ def _semgrep_enabled() -> bool:
 def _run_semgrep_check(file_path: str, defect_line: int, checker: str) -> Optional[str]:
     """Run semgrep on the source file and return the first matching rule_id near defect_line.
 
-    Cached per-file (first defect in a file pays the cost, rest hit cache).
-    Disabled by default — set COVERITY_ENABLE_SEMGREP=1 to enable. Previously
-    this ran per-defect and made 1000-defect runs take 30+ minutes.
+    Cached per-file (first defect in a file pays the cost, rest hit cache),
+    so the per-defect cost from the 30+ minute runs is gone.
+    Enabled by default — disable with COVERITY_DISABLE_SEMGREP=1.
     """
     if not file_path or not os.path.isfile(file_path):
         return None
