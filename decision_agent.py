@@ -180,9 +180,11 @@ class DecisionAgent:
 
         for ev in dominant:
             if ev.description:
-                reasoning.append(f"{ev.label}: {ev.description}")
+                # Reviewer-facing text: use the human sentence, not the
+                # machine label ("explicit_null_termination: ...").
+                reasoning.append(ev.description)
             else:
-                reasoning.append(ev.label)
+                reasoning.append(ev.label.replace('_', ' '))
 
         if not reasoning:
             reasoning = ["Insufficient evidence for automatic classification."]
@@ -340,12 +342,31 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
     if origin:
         if any(src in origin for src in ['network', 'args', 'env', 'file', 'caller-controlled', 'tainted', 'external']):
             if checker in _TAINT_RELEVANT_CHECKERS:
-                acc.add(Evidence(
-                    label="taint_from_untrusted_source",
-                    polarity="bug",
-                    weight=0.80,
-                    description=f"Variable originates from untrusted source: {origin}."
-                ))
+                # For the null-termination checkers the source being
+                # caller-controlled is only a contributing factor: the copy
+                # count already caps how many bytes are written, and the
+                # dedicated analyzer weighs terminator facts (pre-zeroing,
+                # sizeof-1, struct-field use). Record taint at a modest,
+                # non-critical weight so it cannot veto those facts.
+                if checker in ("BUFFER_SIZE", "BUFFER_SIZE_WARNING", "STRING_NULL") and \
+                        context.get('sink_func', '') in ('strncpy', 'strncat', 'strlcpy',
+                                                         'snprintf', 'memcpy', 'memmove',
+                                                         'memcpy_s', 'strcpy_s'):
+                    acc.add(Evidence(
+                        label="taint_context_untrusted_source",
+                        polarity="bug",
+                        weight=0.35,
+                        description=(f"The copied data originates from {origin}; a long "
+                                     f"source is what makes a full-capacity copy leave "
+                                     f"the destination unterminated.")
+                    ))
+                else:
+                    acc.add(Evidence(
+                        label="taint_from_untrusted_source",
+                        polarity="bug",
+                        weight=0.80,
+                        description=f"Variable originates from untrusted source: {origin}."
+                    ))
             # For value-semantics checkers the origin is not defect evidence;
             # the concrete value/width decides. Record it as neutral context.
         elif any(src in origin for src in ['literal', 'local', 'bounded', 'safe']):
@@ -398,12 +419,29 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
             description=f"Always-unsafe sink function {sink}() detected."
         ))
     elif sink in ('strncpy', 'strncat', 'snprintf', 'strlcpy', 'strlcat', 'memcpy_s', 'strcpy_s'):
-        acc.add(Evidence(
-            label="bounded_sink_function",
-            polarity="fp",
-            weight=0.85,
-            description=f"Bounded/safe sink function {sink}() detected."
-        ))
+        _bounded_is_fp = True
+        if checker in ('BUFFER_SIZE', 'STRING_NULL') and sink in ('strncpy', 'strncat', 'strlcpy'):
+            # For the null-termination checkers, "the API is bounded" does NOT
+            # answer the flagged question: strncpy(dst, src, sizeof(dst)) is
+            # exactly the pattern that fills the buffer and leaves it
+            # unterminated. Only treat the bounded API as FP evidence when the
+            # code shows a terminator guarantee.
+            code = context.get('code', '') or ''
+            _has_nul_guarantee = (
+                re.search(r'\bmemset\s*\(\s*\w+\s*,\s*0', code)
+                or re.search(r"\[\s*[^\]]+\]\s*=\s*['\"]\\0['\"]", code)
+                or re.search(r'sizeof\s*\([^)]*\)\s*-\s*1', code)
+                or re.search(r'strlen\s*\([^)]*\)\s*\+\s*1', code)
+            )
+            if not _has_nul_guarantee:
+                _bounded_is_fp = False
+        if _bounded_is_fp:
+            acc.add(Evidence(
+                label="bounded_sink_function",
+                polarity="fp",
+                weight=0.85,
+                description=f"Bounded/safe sink function {sink}() detected."
+            ))
     elif sink == 'memcpy':
         acc.add(Evidence(
             label="memcpy_sink",

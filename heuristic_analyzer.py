@@ -1289,10 +1289,47 @@ def _bounded_api_note(api: str, code: str, target_line: int = 0,
     if api == 'strncpy' and len(args) >= 3:
         # strncpy(dst, src, n): writes at most n bytes to dst — never more.
         dst, n = args[0], args[2]
-        return (f"{call_desc} is a bounded copy: it writes no more than its size "
-                f"argument ({n}) into `{dst}`. Because {n} is capped at the "
-                f"destination's declared capacity (a sizeof/size constant), the write is "
-                f"confined to the buffer's extent and cannot overrun past `{dst}`")
+        _dst_base = re.split(r'[.\->\[\s]', dst)[0] if dst else ''
+        _dst_leaf = re.split(r'[.\->\[\s]', dst)[-1] if dst else ''
+        _n_tied_to_dst = bool(_dst_base and (
+            re.search(rf'sizeof\s*\(\s*{re.escape(_dst_base)}', n)
+            or n.strip() == _dst_base
+        ))
+        # A constant count that matches the destination's declared size is a
+        # fixed-width field transfer (e.g. strncpy(r->center, src, 8) into
+        # `char center[8]`) — name the declaration instead of hedging.
+        if n.strip().isdigit() and _dst_leaf:
+            _decl_m = re.search(rf'\b{re.escape(_dst_leaf)}\s*\[\s*(\d+)\s*\]', code)
+            if _decl_m and _decl_m.group(1) == n.strip():
+                return (f"{call_desc} copies exactly {n.strip()} bytes into `{dst}`, which is "
+                        f"declared with size {_decl_m.group(1)} — the copy fills the field "
+                        f"exactly and is a fixed-width transfer, not an open-ended C-string write")
+        _strlen_m = re.search(r'strlen\s*\(\s*([^)]+)\s*\)', n)
+        if _strlen_m and not re.search(r'-\s*1\s*$', n) and re.search(r'\+\s*1\s*$', n):
+            return (f"{call_desc} copies strlen({_strlen_m.group(1)}) + 1 bytes, i.e. exactly "
+                    f"the source length including its own null terminator, so the copy stops "
+                    f"at the source's NUL and the destination receives a terminated string "
+                    f"(provided `{dst}` is at least as large as the source)")
+        if _strlen_m:
+            return (f"{call_desc} uses strlen() as the copy count, and strncpy stops at the "
+                    f"source's NUL if it fits — but when the source is at least that long no "
+                    f"terminator is written, so `{dst}` may end up unterminated")
+        if _n_tied_to_dst and not re.search(r'-\s*1\s*$', n):
+            # Count equals the destination capacity: bounded, but fills the
+            # buffer completely — state both facts, do not claim NUL safety.
+            return (f"{call_desc} is a bounded copy: it writes no more than {n} bytes "
+                    f"into `{dst}`, so it cannot write past the buffer. Note that a "
+                    f"count equal to the full capacity fills `{dst}` completely and "
+                    f"leaves no byte for a null terminator when the source is that long")
+        if _n_tied_to_dst and re.search(r'-\s*1\s*$', n):
+            return (f"{call_desc} is a bounded copy: it writes no more than {n} bytes "
+                    f"into `{dst}`, reserving the last byte for the null terminator, "
+                    f"so the write stays in bounds and the result can always be terminated")
+        # Count is independent of the destination: bounded by n, but n itself
+        # is not proven <= capacity — do not claim the copy is safe.
+        return (f"{call_desc} writes no more than {n} bytes into `{dst}`. The write is "
+                f"bounded by the size argument alone; nothing in this call ties {n} to "
+                f"`{dst}`'s capacity, so the bound must be verified separately")
 
     if api == 'strncat' and len(args) >= 3:
         # strncat(dst, src, n): appends at most n bytes to dst — the total can never
@@ -1827,10 +1864,14 @@ def _build_analysis_context(code: str, checker: str, events: List[Dict],
     if ctx['dest_var']:
         buf = infer_buffer_info(code, ctx['dest_var'])
         if buf:
+            # Only add "(size_expr)" when it is not just the same number again
+            # (avoids "a stack buffer of 8 bytes (8)").
+            _se = (buf.size_expr or '').strip()
+            _paren = f" ({_se})" if _se and _se != str(buf.size_bytes) else ""
             if buf.alloc_type == 'stack':
-                ctx['buffer_info'] = f"`{buf.var}` is a stack buffer of {buf.size_bytes} bytes ({buf.size_expr}). "
+                ctx['buffer_info'] = f"`{buf.var}` is a stack buffer of {buf.size_bytes} bytes{_paren}. "
             elif buf.alloc_type in ('malloc', 'calloc'):
-                ctx['buffer_info'] = f"`{buf.var}` is heap-allocated with size {buf.size_expr} ({buf.size_bytes} bytes). "
+                ctx['buffer_info'] = f"`{buf.var}` is heap-allocated with size {buf.size_bytes} bytes{_paren}. "
             elif buf.alloc_type == 'literal':
                 ctx['buffer_info'] = f"`{buf.var}` points to a string literal of {buf.size_bytes} chars. "
 
@@ -3231,28 +3272,44 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             # Guard / loop analysis
             is_for_loop = False
             loop_limit = ''
+            loop_leq = False   # True when the loop condition uses <= (inclusive bound)
             if guard_line > 0 and guard_cond:
                 if re.search(rf'\b{re.escape(idx_var)}\s*\+\+|\+\+\s*{re.escape(idx_var)}', guard_cond):
                     is_for_loop = True
-                    m = re.search(rf'{re.escape(idx_var)}\s*<\s*([^;,\s]+)', guard_cond)
+                    m = re.search(rf'{re.escape(idx_var)}\s*(<=?)\s*([^;,\s]+)', guard_cond)
                     if m:
-                        loop_limit = m.group(1).strip()
+                        loop_leq = (m.group(1) == '<=')
+                        loop_limit = m.group(2).strip()
 
             if is_for_loop:
+                _op = '<=' if loop_leq else '<'
                 if loop_limit:
-                    parts.append(f"This is inside a loop that iterates while `{idx_var} < {loop_limit}`.")
+                    parts.append(f"This is inside a loop that iterates while `{idx_var} {_op} {loop_limit}`.")
                 else:
                     parts.append(f"This is inside a loop controlled by `{guard_cond}`.")
                 
                 if arr_size > 0:
                     parts.append(f"`{arr_name}` has {arr_size} elements (declared size: `{arr_size_expr}`).")
                     if loop_limit.isdigit():
-                        if int(loop_limit) > arr_size:
-                            parts.append(f"The loop bound ({loop_limit}) exceeds the array size ({arr_size}), causing an out-of-bounds {verb}.")
-                        elif int(loop_limit) == arr_size:
-                            parts.append(f"The loop bound equals the array size; if the loop runs to completion, the final access at index {arr_size} will be out of bounds.")
+                        _lim = int(loop_limit)
+                        if loop_leq:
+                            # inclusive bound: the final iteration reaches index _lim
+                            if _lim >= arr_size:
+                                parts.append(f"The inclusive bound (`<=`) lets `{idx_var}` reach index {_lim}, "
+                                             f"past the end of the {arr_size}-element `{arr_name}` "
+                                             f"(valid indices 0 to {arr_size - 1}) — the final access is out of bounds.")
+                            else:
+                                parts.append(f"The inclusive bound (`<=`) keeps `{idx_var}` at or below {_lim}, "
+                                             f"inside `{arr_name}`'s valid range 0 to {arr_size - 1}.")
+                        else:
+                            if _lim > arr_size:
+                                parts.append(f"The loop bound ({loop_limit}) exceeds the array size ({arr_size}), causing an out-of-bounds {verb} "
+                                             f"at index {arr_size}..{_lim - 1}.")
+                            elif _lim == arr_size:
+                                parts.append(f"The loop bound equals the array size; if the loop runs to completion, the final access at index {arr_size} will be out of bounds.")
                     else:
-                        parts.append(f"If `{loop_limit}` is ever >= {arr_size}, the loop will {verb} past the end of the buffer.")
+                        parts.append(f"If `{loop_limit}` allows `{idx_var}` to reach a value >= {arr_size}, "
+                                     f"the loop will {'write' if access_type == 'write' else 'read'} past the end of the buffer.")
                 elif arr_size_expr:
                     parts.append(f"`{arr_name}` is declared with size `{arr_size_expr}`. The loop may exceed this bound.")
                 else:
@@ -3300,7 +3357,12 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
             # Guard assessment (senior-reviewer view): does the nearby guard
             # actually bound the flagged index, or merely look protective?
             if guard_explanation:
-                parts.append(guard_explanation)
+                # The loop narration above may already state the same
+                # bound fact — do not repeat it twice in one comment.
+                _narration = "".join(parts)
+                if not ('reach index' in guard_explanation and 'reach index' in _narration
+                        and idx_var in guard_explanation and f"`{idx_var}`" in _narration):
+                    parts.append(guard_explanation)
 
             # A nested subscript has two independent bounds: for example,
             # ``table[index_map[i]]``.  The simple extractor can identify the
@@ -3630,12 +3692,13 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
             has_bounded = any(e.label == 'guarded_arithmetic_in_range' for e in acc.evidence)
             op_label = ctx['operation'] if ctx['operation'] != 'arithmetic' else 'arithmetic operation'
             if has_unsigned:
-                comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
-                           f"The {op_label} operates on unsigned integer type(s) — wrap-around is defined behavior in C. "
-                           f"Coverity raised this because it applies overflow heuristics broadly to arithmetic.")
+                comment = (f"The INTEGER_OVERFLOW at line {line} in {function}() is not a real defect. "
+                           f"The {op_label} operates on unsigned integer type(s), where wrap-around is "
+                           f"defined behavior in C, so the flagged result cannot cause the undefined "
+                           f"signed-overflow behavior this checker reports.")
                 fix = "No fix required. Optionally silence with a range assertion for clarity."
             elif has_bounded:
-                comment = (f"[FALSE POSITIVE] INTEGER_OVERFLOW in {function}() at line {line} is not a real defect. "
+                comment = (f"The INTEGER_OVERFLOW at line {line} in {function}() is not a real defect. "
                            f"The {op_label} is bounded by an explicit guard visible in the extracted code; "
                            f"the operand(s) cannot reach values large enough to overflow.")
                 fix = "No fix required. Keep the guard and consider documenting it as a Coverity suppression."
@@ -4053,6 +4116,46 @@ def _analyze_array_vs_singleton(code: str, sub_checker: str, events: List[Dict],
     ctx = _build_analysis_context(code, 'ARRAY_VS_SINGLETON', events, file, line, function, cid, called_function_codes, code_start_line)
     acc = EvidenceAccumulator()
 
+    # Anchor on the flagged statement first — a whole-function scan can quote
+    # an unrelated `&x[0]` elsewhere in the body.
+    anchored_idx0 = False
+    flagged = _line_text_at(code, line, code_start_line) if line else ""
+    is_decl = bool(re.search(r'\b(?:char|int|unsigned|signed|long|short|u?int\d*_t|BYTE|WORD|struct|static)\b[^;=\[]*\w+\s*\[', flagged))
+    _am = re.search(r'([A-Za-z_]\w*)\s*\[\s*([^\]{;=]+?)\s*\]', flagged) if (flagged and not is_decl) else None
+    if _am:
+        _arr, _idx = _am.group(1), _am.group(2).strip()
+        try:
+            _k = int(_idx, 0)
+        except (TypeError, ValueError):
+            _k = None
+        if _k == 0:
+            anchored_idx0 = True
+            acc.add(Evidence(
+                label="flagged_index_is_zero",
+                polarity="fp",
+                weight=0.92,
+                description=(f"the flagged access `{_arr}[0]` addresses element 0, which is the "
+                             f"single `{_arr}` object itself — `&{_arr}[0]` is the same address "
+                             f"as `&{_arr}`, so no memory beyond the object can be touched.")
+            ))
+        elif _k is not None:
+            acc.add(Evidence(
+                label="flagged_constant_index",
+                polarity="bug",
+                weight=0.92,
+                description=(f"the flagged access `{_arr}[{_k}]` indexes {_k} element(s) past "
+                             f"the single `{_arr}` object — out of bounds by construction.")
+            ))
+        else:
+            acc.add(Evidence(
+                label="flagged_unbounded_index",
+                polarity="bug",
+                weight=0.60,
+                description=(f"the flagged access `{_arr}[{_idx}]` uses an index that is not "
+                             f"bounded to 0 at this site; any value > 0 walks past the single "
+                             f"`{_arr}` object.")
+            ))
+
     if _has_pattern(code, r'numocts\s*==\s*0|len\s*==\s*0|size\s*==\s*0|count\s*==\s*0'):
         acc.add(Evidence(
             label="zero_length_guard",
@@ -4070,7 +4173,7 @@ def _analyze_array_vs_singleton(code: str, sub_checker: str, events: List[Dict],
         ))
 
     # In C, &obj and &obj[0] designate the same address.
-    if _has_pattern(code, r'&\s*\w+\s*\[\s*0\s*\]'):
+    if not anchored_idx0 and _has_pattern(code, r'&\s*\w+\s*\[\s*0\s*\]'):
         acc.add(Evidence(
             label="pointer_first_element_alias",
             polarity="fp",
@@ -4087,7 +4190,13 @@ def _analyze_array_vs_singleton(code: str, sub_checker: str, events: List[Dict],
 
     decision = DecisionAgent.evaluate(acc, 'ARRAY_VS_SINGLETON')
 
-    if decision.classification == "False positive" or decision.classification == "Intentional":
+    if decision.classification == "False positive":
+        comment = _build_comment_from_evidence(decision, ctx)
+        comment = _apply_example_style('False positive', 'ARRAY_VS_SINGLETON', ctx, code,
+                                       code_start_line, line, function, comment)
+        return "False positive", comment, "No fix required if caller contract guarantees single-element access. Document the contract.", decision.confidence
+
+    if decision.classification == "Intentional":
         comment = _build_comment_from_evidence(decision, ctx)
         return "Intentional", comment, "No fix required if caller contract guarantees single-element access. Document the contract.", decision.confidence
 
@@ -5143,8 +5252,6 @@ def _generic_evidence_classify(checker: str, events: List[Dict], context: Dict,
 
         classification = decision.classification
         confidence = float(decision.confidence)
-        reasoning = (" ".join(decision.reasoning) if decision.reasoning
-                     else "Insufficient evidence.")
 
         err_note = ""
         if analyzer_error:
@@ -5154,19 +5261,26 @@ def _generic_evidence_classify(checker: str, events: List[Dict], context: Dict,
         loc = (f" at line {line}" if line else "")
         loc_s = f"{checker} finding{loc}{where}"
 
+        # Turn the decision's evidence lines into one readable sentence so the
+        # comment carries code facts, never raw machine labels.
+        ev_reasoning = "; ".join(
+            r.strip().rstrip('.') for r in decision.reasoning
+            if r and not r.endswith('confidence.') and 'manual review required' not in r.lower()
+        ) or "the extracted code did not contain enough facts for a detailed write-up"
+
         if classification == "Bug":
             # Try to produce code-like fix with actual var if available
             _gv = ctx.get('var') or ctx.get('dest_var') or 'var'
-            comment = (f"The {loc_s} is classified as a Bug. {reasoning}{err_note}")
+            comment = (f"The {loc_s} is classified as a Bug: {ev_reasoning}.{err_note}")
             fix = f"Fix at {loc_s}: validate {_gv} before use // {checker} CWE"
         elif classification == "False positive":
-            comment = (f"The {loc_s} is a false positive. {reasoning}{err_note}")
+            comment = (f"The {loc_s} is a false positive: {ev_reasoning}.{err_note}")
             fix = "No fix required."
         elif classification == "Intentional":
-            comment = (f"The {loc_s} is intentional / by design. {reasoning}{err_note}")
+            comment = (f"The {loc_s} is intentional / by design: {ev_reasoning}.{err_note}")
             fix = "No fix required; consider documenting or suppressing if appropriate."
         else:
-            comment = (f"The {loc_s} requires manual review. {reasoning}{err_note}")
+            comment = (f"The {loc_s} requires manual review: {ev_reasoning}.{err_note}")
             fix = "Manual review required to determine classification and remediation."
         code_start_line = context.get('code_start_line', 1)
         comment = _apply_example_style(classification, checker, ctx, code,
