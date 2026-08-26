@@ -49,8 +49,11 @@ def parse_function_tree(filepath: str, line: int, language: str = "c") -> Tuple[
     if not source:
         return "", 0, None
 
-    parser = _get_parser(language)
-    tree = parser.parse(bytes(source, "utf-8"))
+    try:
+        parser = _get_parser(language)
+        tree = parser.parse(bytes(source, "utf-8"))
+    except Exception:
+        return "", 0, None  # tree-sitter unavailable — callers use regex paths
     try:
         _TREE_SOURCE_MAP[tree] = source
     except TypeError:
