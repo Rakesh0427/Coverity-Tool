@@ -19,12 +19,25 @@ try:
 except Exception:
     pass
 
+# --- Bundle cppcheck (offline corroboration backend) from the pip wheel ---
+# capabilities.find_cppcheck_bin() finds it at runtime under
+# _MEIPASS/cppcheck/Cppcheck/ (or next to the exe, copied by build_exe.bat).
+_cppcheck_datas = []
+try:
+    import cppcheck as _cppcheck_wheel
+    _cc_dir = os.path.join(os.path.dirname(_cppcheck_wheel.__file__), "Cppcheck")
+    if os.path.isdir(_cc_dir):
+        _cppcheck_datas.append((_cc_dir, os.path.join("cppcheck", "Cppcheck")))
+except Exception:
+    pass
+
 a = Analysis(
     ['local_gui.py'],
     pathex=[],
     binaries=[],
-    datas=_tcl_datas + [
+    datas=_tcl_datas + _cppcheck_datas + [
         ('docs/Coverity_Tool_User_Guide.docx', 'docs'),
+        ('docs/CORROBORATION_BACKEND.md', 'docs'),
         ('docs/sample_src', 'docs/sample_src'),
         ('docs/sample_report', 'docs/sample_report'),
         ('COVERITY_TOOL_MANUAL.md', '.'),

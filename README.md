@@ -58,6 +58,20 @@ Compile the Python modules:
 python -m compileall -q .
 ```
 
+## Static-analysis corroboration (cppcheck)
+
+Defects are optionally corroborated by a second, independent analyzer: after a
+defect is anchored to a source line, the tool runs **cppcheck** on that file
+and records any finding within ±3 lines as independent confirmation. cppcheck
+runs fully offline (its rules are compiled into the binary), is native and
+fast, and `pip install -r requirements.txt` gives you the library-form wheel
+that bundles the official cppcheck binary. See
+[docs/CORROBORATION_BACKEND.md](docs/CORROBORATION_BACKEND.md) for details.
+
+- Disable with `COVERITY_DISABLE_CPPCHECK=1`.
+- `COVERITY_CPPCHECK_BIN` overrides the binary path; run `python capabilities.py`
+  to see whether the backend is live.
+
 ## Security note
 
 The Coverity Connect integration accepts credentials in the desktop UI. The current SOAP client permits disabled certificate verification for self-signed corporate certificates; do not use that setting for production connections unless you explicitly trust the certificate chain.

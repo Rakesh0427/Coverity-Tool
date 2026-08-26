@@ -49,4 +49,21 @@ if exist docs\Coverity_Tool_User_Guide.docx (
   copy /Y docs\Coverity_Tool_User_Guide.docx dist\CoverityTool\docs\ >nul
   echo Copied User Guide to dist\CoverityTool\docs\
 )
+REM Bundle the cppcheck corroboration backend (from the pip wheel) next to the exe
+set "CPPCHECK_DIR="
+for /f "delims=" %%D in ('python -c "import cppcheck;print(cppcheck.get_cppcheck_dir())" 2^>nul') do set "CPPCHECK_DIR=%%D"
+if defined CPPCHECK_DIR (
+  if exist "%CPPCHECK_DIR%\cppcheck.exe" (
+    copy /Y "%CPPCHECK_DIR%\cppcheck.exe" dist\CoverityTool\ >nul
+    echo Copied cppcheck.exe (offline corroboration backend) next to CoverityTool.exe
+  ) else if exist "%CPPCHECK_DIR%\cppcheck" (
+    copy /Y "%CPPCHECK_DIR%\cppcheck" dist\CoverityTool\cppcheck.exe >nul
+    echo Copied cppcheck.exe (offline corroboration backend) next to CoverityTool.exe
+  ) else (
+    echo [WARN] cppcheck binary not found in the pip wheel directory
+  )
+) else (
+  echo [WARN] cppcheck pip package not installed - corroboration will be disabled in the exe
+  echo        Fix: pip install cppcheck (bundles the official cppcheck binary)
+)
 pause

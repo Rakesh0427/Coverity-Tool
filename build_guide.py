@@ -352,7 +352,7 @@ def create_doc():
         "2) warm_workspace_index() — one-time call-site index (scan once, not per defect) + tree-sitter parse cache by mtime",
         "3) For each defect: extract_enclosing_function() → build_defect_context() (callees/callers via workspace_indexer) → analyze_defect() dispatch per checker → DecisionAgent weighted evidence (Bug vs FP) + Z3/path_prover/flow_analysis where available → render_example_comment() → CWE/CERT/OWASP footer",
         "4) Confidence: dominance + margin + strongest-signal tie-break; caps for Various / fallback code",
-        "5) Performance: indexing shows Elapsed/ETC separately; per-file semgrep cached & enabled by default (COVERITY_DISABLE_SEMGREP=1 to turn off); concurrent REST discovery (8 workers, 3s) vs old 200s sequential",
+        "5) Performance: indexing shows Elapsed/ETC separately; per-file cppcheck cached & enabled by default (COVERITY_DISABLE_CPPCHECK=1 to turn off); concurrent REST discovery (8 workers, 3s) vs old 200s sequential",
     ]
     for b in bullets:
         doc.add_paragraph(b, style='List Bullet').runs[0].font.size = Pt(7.5)
@@ -437,7 +437,7 @@ def create_doc():
             ("2", "Progress bar + 0% (0/42 defects)", "Switches from indeterminate (indexing) to determinate (per-defect) after ready."),
             ("3", "Elapsed 0:00:12  ETC 0:00:45 (blue, top-right)", "Fixed: Elapsed includes indexing (not reset to 0). ETC is per-defect only (realistic). If >50ms/defect warning → source not loading."),
             ("4", "Log console (black)", "Live: Indexing source tree once (cached)... → Workspace indexed in 1.2s → ID 12345 [BUFFER_SIZE] Bug ... . Watch [Source] Loading: lines to see which file/checker is slow."),
-            ("5", "Cancel", "Sets stop_evt; current defect finishes (semgrep up to 10s) then returns to Setup without saving."),
+            ("5", "Cancel", "Sets stop_evt; current defect finishes (cppcheck scan, ~1s) then returns to Setup without saving."),
         ])
     # Performance notes
     p = doc.add_heading("Performance notes (what makes it fast now)", level=2)
@@ -445,7 +445,7 @@ def create_doc():
     bullets = [
         "One-time workspace index (call-site + tree-sitter parse cache by mtime) — not per defect. Second run is fast.",
         "Skips build folders (.git, build, node_modules, .venv) and files >500 KB.",
-        "Per-file semgrep cached & ON by default — at most one semgrep run per source file (COVERITY_DISABLE_SEMGREP=1 to turn off). Previously 1000 defects ×10s per defect = stuck.",
+        "Per-file cppcheck cached & ON by default — at most one cppcheck run per source file (COVERITY_DISABLE_CPPCHECK=1 to turn off). Previously 1000 defects ×10s per defect = stuck.",
         "REST discovery concurrent (8 workers, 3s) vs old 40×5s = 200s stall.",
     ]
     for b in bullets:
@@ -671,7 +671,7 @@ def create_doc():
             for r in p.runs: r.bold=True; r.font.size=Pt(8); r.font.color.rgb=RGBColor(255,255,255)
         shading = OxmlElement('w:shd'); shading.set(qn('w:fill'),'DC2626'); c._tc.get_or_add_tcPr().append(shading)
     issues = [
-        ("Tool feels slow / stuck at 0 / N analysing...", "Indexing source tree once (cached) — wait for 'Workspace indexed in Xs — starting per-defect analysis.' ETA is per-defect only (indexing excluded) so it is realistic. Second run is fast. Per-file semgrep is ON by default but cached (COVERITY_DISABLE_SEMGREP=1 to turn off)."),
+        ("Tool feels slow / stuck at 0 / N analysing...", "Indexing source tree once (cached) — wait for 'Workspace indexed in Xs — starting per-defect analysis.' ETA is per-defect only (indexing excluded) so it is realistic. Second run is fast. Per-file cppcheck is ON by default but cached (COVERITY_DISABLE_CPPCHECK=1 to turn off)."),
         ("No table found in index.html", "HTML layout differs. Open index.html, find <table>, adjust html_report_parser.py or provide sample."),
         ("File not found for source files", "Coverity report paths must match on-disk layout. Set Source Code Root correctly; tool also searches by suffix-score and basename."),
         ("Tree-sitter fails to parse my C++ code", "Use C++ (.cpp/.c) language option. For mixed projects run twice."),

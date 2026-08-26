@@ -660,12 +660,12 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
             description=f"Extracted context is only {line_count} lines — insufficient for reliable analysis."
         ))
 
-    if context.get('semgrep_rule'):
+    if context.get('corrob_rule'):
         acc.add(Evidence(
-            label="semgrep_confirms",
+            label="corrob_confirms",
             polarity="bug",
             weight=0.45,
-            description=f"Semgrep rule {context['semgrep_rule']} independently confirms finding."
+            description=f"Cppcheck rule {context['corrob_rule']} independently confirms finding."
         ))
 
     return acc
