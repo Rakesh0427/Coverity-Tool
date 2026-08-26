@@ -50,6 +50,47 @@ __all__ = [
 #: :func:`gate_fix` replaces it with the convention inferred from the source.
 ERROR_RETURN_SENTINEL = "<<ERROR_RETURN>>"
 
+
+def _extract_guard_condition(fix: str) -> str:
+    """Return the first ``if (...)`` condition from a guard-shaped fix.
+
+    Used when the module's error convention is unknown so the proposed
+    remediation can keep the *real* guard while describing the error path in
+    prose instead of leaving an uncompilable placeholder.
+    """
+    if not fix:
+        return ""
+    m = re.search(r'\bif\s*\(', fix)
+    if not m:
+        return ""
+    i = m.end()
+    depth = 1
+    j = i
+    while j < len(fix) and depth:
+        if fix[j] == '(':
+            depth += 1
+        elif fix[j] == ')':
+            depth -= 1
+        j += 1
+    cond = fix[i:j - 1].strip()
+    return re.sub(r'\s+', ' ', cond)
+
+
+def _senior_error_path_fix(fix: str) -> str:
+    """Turn an unresolved ``<<ERROR_RETURN>>`` patch into a concise, actionable
+    senior-reviewer remediation instead of invalid code with a placeholder
+    branch."""
+    cond = _extract_guard_condition(fix)
+    if cond:
+        return (f"Add the guard `if ({cond})` and reject the invalid value "
+                f"using this module's error convention (early return, goto "
+                f"cleanup, or an error callback). Reviewers should confirm "
+                f"the failure action before applying.")
+    return ("Add the bounds/null/range guard shown and reject the invalid "
+            "value using this module's error convention (early return, goto "
+            "cleanup, or an error callback). Reviewers should confirm the "
+            "failure action before applying.")
+
 # Stock error returns that older templates hardcode.  These are *normalised*
 # to the sentinel, not treated as evidence of a bad patch.
 _STOCK_ERROR_RETURN = re.compile(
@@ -414,19 +455,12 @@ def gate_fix(fix: str, code: str, line: int, code_start_line: int, checker: str,
             False, False, convention)
 
     # The guard is anchored and placeholder-free, but the module's failure
-    # convention could not be read.  Show the patch with the branch marked,
-    # rather than discarding a correct bounds check over its last line.
+    # convention could not be read.  Do not leave an uncompilable placeholder
+    # branch: restate the guard as a concrete, reviewable remediation with the
+    # error action left for the reviewer to match to this file's convention.
     if unresolved_error_path:
-        readable = candidate.replace(ERROR_RETURN_SENTINEL,
-                                     '/* report failure here */')
         return GateResult(
-            readable,
-            'The proposed guard is anchored to this function, but its error '
-            f'path could not be matched to the module\'s convention: '
-            f'{convention.evidence}. Replace the marked branch with whatever '
-            'this file uses to report failure (error return code, goto '
-            'cleanup, or an error callback) before applying.',
-            True, False, convention)
+            _senior_error_path_fix(candidate), '', True, False, convention)
 
     reason = ''
     if adjusted:

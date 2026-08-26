@@ -93,37 +93,45 @@ def _gate_fix_on_source_evidence(fix: str, code: str, line: int,
 
 
 def _expert_fix_suggestion(checker: str, ctx: dict, default_fix: str) -> str:
-    """Make Proposed Fix a *just suggestion*: one concise code-oriented line.
-    Senior reviewers want the exact change, not a paragraph.
-    """ 
-    info = _cwe_info(checker)
-    cwe_tag = f" // CWE-{info['cwe_id']}" if info else ""
-    fix = (default_fix or "").strip()
-    # Keep fix concise and code-anchored; avoid adding duplicate CWE if already present
-    if cwe_tag and cwe_tag in fix:
+    """Present Proposed Fix the way a senior reviewer would.
+
+    * Removes ``Suggestion:``/``Fix:`` prefixes and CWE/CERT code trailers.
+    * Keeps the real, source-anchored change or a concise concrete instruction.
+    * Never decorates a prose recommendation as if it were a code patch.
+    """
+    fix = _clean_proposed_fix(default_fix)
+    if not fix:
+        return "Manual review required."
+    low = fix.lower().strip()
+    if low.startswith(_DISPOSITION_FIX_PREFIX):
         return fix.strip()
-    if len(fix) > 400:
-        lines = [l for l in fix.splitlines() if l.strip()]
-        code_lines = [l for l in lines if any(k in l for k in ('if (', 'sizeof', 'strncpy', 'snprintf', 'free(', 'return', 'memcpy'))]
-        if code_lines:
-            fix = code_lines[0].strip() + cwe_tag
-        else:
-            fix = lines[0][:220] + cwe_tag
-        return fix.strip()
-    # Never decorate terminal disposition text as if it were a code patch.
-    if fix.lower().startswith("no fix") or fix.lower().startswith("manual review required"):
-        return fix.strip()
-    if cwe_tag and len(fix) < 300:
-        # append tag as code comment, not sentence
-        if fix.endswith(";"):
-            fix = fix + cwe_tag
-        elif fix:
-            fix = fix + cwe_tag
+    # A terminal/unknown-convention guard can still hold the error-path
+    # placeholder if it was produced outside the gate.  Convert it rather than
+    # showing invalid code.
+    if '<<ERROR_RETURN>>' in fix or '/* report failure here */' in fix:
+        try:
+            from fix_gate import _senior_error_path_fix
+            return _senior_error_path_fix(fix)
+        except Exception:
+            pass
+    # Keep the proposal compact: a code patch stays a code patch; a
+    # long prose suggestion is trimmed to its actionable sentence.
+    if len(fix) > 420:
+        lines = [l.strip() for l in fix.splitlines() if l.strip()]
+        code_lines = [l for l in lines if any(k in l for k in
+                     ('if (', 'sizeof', 'strncpy', 'snprintf', 'free(',
+                      'return', 'memcpy', ' = '))]
+        fix = '\n'.join(code_lines[:3]) if code_lines else lines[0][:220]
     return fix.strip()
 
-def _append_cwe_footer(comment: str, checker: str) -> str:
+def _append_cwe_footer(comment: str, checker: str, classification: str = "") -> str:
     info = _cwe_info(checker)
     if not info:
+        return comment
+    # A senior disposition comment does not carry a CWE/CERT "reference line"
+    # when the finding is dismissed or intentional.  Keep it only where the
+    # taxonomy helps explain a confirmed defect or an unresolved review item.
+    if classification.lower() in ('false positive', 'intentional'):
         return comment
     # Deduplicate: header already contains CWE-{id} {name} ... — don't repeat full Reference line
     if f"CWE-{info['cwe_id']}" in comment:
@@ -132,6 +140,182 @@ def _append_cwe_footer(comment: str, checker: str) -> str:
     if ref and ref not in comment:
         return comment.rstrip() + f"\n\n{ref}"
     return comment
+
+
+# ---------------------------------------------------------------------------
+# Senior-reviewer output polish.  The per-checker analyzers build the factual
+# content; these helpers make sure the *final* disposition reads the way an
+# experienced reviewer would phrase it: concrete code facts, no machine
+# placeholders, no repeated boilerplate, no meta-notes about the tool itself.
+# ---------------------------------------------------------------------------
+
+# Phrases that describe the tool's own process rather than the code under
+# review.  Senior reviewers do not put these in a disposition comment.
+_NOISE_PATTERNS = (
+    r'High confidence;\s*no code changes are needed\.?\s*',
+    r'Reasonably confident this is safe;\s*a quick sanity-check is worthwhile\.?\s*',
+    r'(?:Moderate-high|Moderate)\s+confidence;[^.]*\.?\s*',
+    r'Analyst confidence:\s*\d+%[^.]*\.?\s*',
+    r'Proposed fix uses this module.{0,220}\.',
+    r'The proposed guard is anchored to this function.{0,260}\.',
+    r'Replace the marked branch with whatever this file uses.{0,180}\.',
+    r'Confirm it matches the surrounding code before applying\.?\s*',
+    r'No code-specific fix was generated because the suggested change could not be anchored[^.]*\.',
+)
+
+
+def _clean_noise_lines(text: str) -> str:
+    """Remove tool-meta sentences while preserving every code fact around them."""
+    for pat in _NOISE_PATTERNS:
+        text = re.sub(pat, '', text, flags=re.I | re.S)
+    return text
+
+
+def _normalize_opening_verdict(text: str) -> str:
+    """``After reviewing f(), the CHECKER at line N is a false positive.``
+    → ``The CHECKER at line N in f() is a false positive.``"""
+    text = re.sub(
+        r'After reviewing\s+([A-Za-z_]\w*)\(\),\s+the\s+([A-Z0-9_]+)\s+at\s+line\s+(\d+)\s+is\s+'
+        r'((?:a\s+)?false positive|intentional)',
+        lambda m: (f"The {m.group(2)} at line {m.group(3)} in {m.group(1)}() is "
+                   f"{m.group(4)}"),
+        text, flags=re.I)
+    text = re.sub(
+        r'After reviewing\s+([A-Za-z_]\w*)\(\),\s+the\s+([A-Z0-9_]+)\s+at\s+line\s+(\d+)\s+'
+        r'needs\s+a\s+manual\s+look',
+        r'The \2 at line \3 in \1() needs manual review', text, flags=re.I)
+    return text
+
+
+def _dedupe_sentences(paragraph: str) -> str:
+    """Remove repeated sentences (case-insensitive) from one paragraph,
+    preserving the order of the first occurrence."""
+    if not paragraph:
+        return paragraph
+    parts = re.split(r'(?<=[.!?])\s+', paragraph.strip())
+    seen, keep = set(), []
+    sentence_re = re.compile(r'[A-Za-z0-9_]')
+    for sent in parts:
+        norm = re.sub(r'\s+', ' ', sent).strip()
+        if not norm:
+            continue
+        key = norm
+        if sentence_re.search(key) and key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        keep.append(norm)
+    return ' '.join(keep)
+
+
+def _polish_comment(comment: str, classification: str = "") -> str:
+    """Apply the final senior-reviewer read to a disposition comment.
+
+    Preserves every concrete code fact (line numbers, variables, guard
+    conditions, numeric values) while removing:
+      * gate/engine meta-notes, confidence boilerplate, and repeated wording;
+      * the artificial CWE footer on dismissed/intentional findings;
+      * machine-y opening phrases such as ``After reviewing ...``.
+    """
+    if not comment:
+        return comment
+    comment = comment.replace('\r\n', '\n')
+    comment = _clean_noise_lines(comment)
+    if classification.lower() in ('false positive', 'intentional'):
+        # FP/intentional comments do not need the CWE/CERT taxonomy line.
+        comment = re.sub(r'\n\s*\n?\s*Reference:\s*CWE-\S+.*$', '',
+                         comment, flags=re.I | re.S).strip()
+    comment = _normalize_opening_verdict(comment)
+    # Remove inline "CWE-190 ... — https://..." phrases; the cwe footer (added
+    # for Bugs/Needs reviews) carries the taxonomy cleanly at the end.
+    comment = re.sub(
+        r'CWE-\d+.*?https?://\S+\.\s*',
+        '', comment, flags=re.I | re.S)
+    # Rewrite the generic fallback's awkward first-person uncertainty notes.
+    comment = re.sub(
+        r'I could not fully verify this because the snippet is too small\s*'
+        r'to trace the data flow\.',
+        'The extracted snippet is too small to trace the data flow, so the '
+        'finding needs manual confirmation.', comment, flags=re.I)
+    if classification.lower() == 'intentional':
+        # A checker whose result maps to "Intentional" must read that way,
+        # even when the per-checker builder phrased the underlying decision
+        # as a false positive.
+        comment = re.sub(r'\bis\s+a?\s*false positive\b',
+                         'is intentional / by design', comment, flags=re.I)
+        comment = re.sub(r'is not a real defect',
+                         'is intentional / by design', comment, flags=re.I)
+        comment = re.sub(r'\.\s*False positive\.?$',
+                         '.', comment, flags=re.I)
+        comment = re.sub(r'\bFalse positive\.',
+                         '.', comment, flags=re.I)
+    paragraphs = re.split(r'\n\s*\n', comment)
+    polished = '\n\n'.join(_dedupe_sentences(p) for p in paragraphs if p.strip())
+    polished = re.sub(r'[ \t]+\n', '\n', polished)
+    polished = re.sub(r'\n{3,}', '\n\n', polished)
+    return polished.strip()
+
+
+def _strip_fix_trailer(fix: str) -> str:
+    """Remove CWE/CERT/provenance trailers that are not part of the patch."""
+    fix = re.sub(r'\s*//\s*(?:[^;\n]*\b(?:CWE|CERT|OWASP)\b[^;\n]*|ensure NUL.*)',
+                 '', fix, flags=re.I | re.M)
+    fix = re.sub(r'\s*//\s*(?:\b(?:or|also|consider|recommended)\b.*)$',
+                 '', fix, flags=re.I | re.M)
+    fix = re.sub(r'/\*\s*(?:[^;]*?\b(?:CWE|CERT|OWASP)\b[^;]*?)\s*\*/', '', fix,
+                 flags=re.I | re.S)
+    return fix
+
+
+def _clean_proposed_fix(fix: str) -> str:
+    """Turn a generated remediation into a concise, senior-level proposal.
+
+    Removes ``Suggestion:``/``Fix:`` prefixes, CWE/CERT code trailers, and any
+    leftover error-path placeholder so the Proposed Fix panel shows a real
+    change (or a clear instruction), never machine noise.
+    """
+    if not fix:
+        return fix or ''
+    fix = (fix or '').strip()
+    fix = re.sub(r'^\s*Fix\s+at\s+[^:]+:\s*', '', fix, flags=re.I)
+    fix = re.sub(r'^\s*(?:Suggestion|Suggested fix|Fix|Recommendation|Recommended pattern)\s*[:]?\s*',
+                 '', fix, flags=re.I)
+    fix = _strip_fix_trailer(fix)
+    # Collapse multi-line code candidates to a compact, readable block.
+    lines = [ln.strip() for ln in fix.splitlines() if ln.strip()]
+    fix = '\n'.join(lines)
+    fix = re.sub(r'^\s*//\s*safe to use\b.*$', '', fix, flags=re.I | re.M).strip()
+    return fix
+
+
+def _senior_gate_note(reason: str) -> str:
+    """Convert a fix-gate reason into one concise reviewer-facing sentence.
+
+    Only used when the gate withheld a patch entirely (``Manual review
+    required.``).  When a patch is accepted the gate reason is intentionally
+    *not* appended to the comment.
+    """
+    r = (reason or '').strip()
+    if not r:
+        return ''
+    low = r.lower()
+    if 'could not be anchored' in low:
+        return ('A code-specific fix is not offered: no identifier from the '
+                'analysed function could be matched to the proposed change.')
+    if 'unresolved placeholder' in low:
+        return ('A code-specific fix is not offered until the unresolved '
+                'placeholder is defined in the analysed source.')
+    if 'nested index' in low:
+        return ('No automatic patch is offered because the flagged expression '
+                'uses a nested index; the inner and outer bounds must be '
+                'verified independently.')
+    if 'source' in low and 'unavailable' in low:
+        return ('No code-specific fix is offered because the source for this '
+                'Coverity event path is unavailable.')
+    return 'Manual review required.'
+
+
+# Fix strings that are naturally terminal dispositions begin with these words.
+_DISPOSITION_FIX_PREFIX = ('no fix required', 'manual review required')
 
 # ---------------------------------------------------------------------------
 # New helpers for precise comment generation
@@ -1622,7 +1806,9 @@ def _build_comment_from_evidence(decision: AgentDecision, ctx: Dict) -> str:
     if decision.classification in ("False positive", "Intentional"):
         # Natural review-trials style paragraph (img-2 format).
         disp_word = "a false positive" if decision.classification == "False positive" else "intentional"
-        parts = [f"After reviewing {func}(), the {checker} at line {line} is {disp_word}.{cwe_sentence} "]
+        # FP/intentional dispositions are about *why the code is safe*; a CWE
+        # taxonomy line belongs on a confirmed defect, not here.
+        parts = [f"After reviewing {func}(), the {checker} at line {line} is {disp_word}. "]
 
         evidence_items = []
 
@@ -2669,7 +2855,7 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
 
     # An access that sits inside the `else` of the bounds check executes only
     # when the check FAILED — the guard proves the violation instead of
-    # preventing it (CSV rows #94/#95: else-branch write past the end).
+    # preventing it (the else-branch write past the end).
     if access_line and code and _access_in_else_of_guard(code, guard_line, access_line,
                                                          code_start_line):
         _ub = re.search(rf'\b{re.escape(idx_var)}\b\s*(<=|<)\s*(\w+)', guard_cond)
@@ -2720,7 +2906,7 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
                               or ub_str == arr_name):
             # An inclusive `<=` against the array's own size expression is the
             # classic off-by-one: it admits index == size, one past the last
-            # valid element (CSV rows #93/#100/#101/#122-133).
+            # valid element.
             if ub_op == '<=' and (ub_str == arr_size_expr or ub_str in arr_size_expr
                                   or arr_size_expr in ub_str):
                 _sz = arr_size if arr_size else arr_size_expr
@@ -3786,7 +3972,7 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
             description="Arithmetic operates on unsigned integers — wrap-around is well-defined in C."
         ))
 
-    # Explicit range guard on the flagged operand (CSV #90): a reject-style
+    # Explicit range guard on the flagged operand: a reject-style
     # `if (v < 0 || v >= K) return;` bounds v to [0, K-1]; with a resolved
     # constant operand the whole result range is provably inside the type.
     if op_token in ('+', '-') and lhs_expr and re.match(r'^[A-Za-z_]\w*$', lhs_expr or ''):
@@ -3938,7 +4124,7 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
 
     # STRING_NULL flagged on a string READ (strlen/strcmp/...) of a buffer
     # that is zero-initialized before the read: the buffer always holds a
-    # terminator, so the read cannot run past it (CSV #140).
+    # terminator, so the read cannot run past it.
     _line_text = _line_text_at(code, line, code_start_line)
     _read_m = re.search(r'\b(?:strlen|strcmp|strncmp|strchr|strstr|puts)\s*\(\s*([A-Za-z_]\w*)',
                         _line_text or '')
@@ -4144,8 +4330,8 @@ def _analyze_forward_null(code: str, sub_checker: str, events: List[Dict],
             ))
 
         # The LAST assignment before the deref decides the value on this
-        # path: an address-taking RHS (`ptr = &obj[...]`) cannot be NULL
-        # (CSV #85: the pointer is set to a valid slot address, then used).
+        # path: an address-taking RHS (`ptr = &obj[...]`) cannot be NULL,
+        # because the pointer is set to a valid slot address and then used.
         _last_assign_line, _last_assign_text = 0, ''
         for _i, _raw in enumerate(code.splitlines()):
             _abs = code_start_line + _i
@@ -5625,15 +5811,23 @@ def analyze_defect(context: Dict, checker: str, events: List[Dict],
         fix, withheld_reason = _gate_fix_on_source_evidence(
             fix, code, line, code_start_line, checker,
             extra_sources=_extra_sources)
-        if withheld_reason:
-            comment = comment.rstrip() + "\n\n" + withheld_reason
+        # When a patch is accepted, the gate's "adjusted error path" note is a
+        # tool-internal detail and must not leak into the disposition comment.
+        # Only keep a concise note when no patch was offered at all.
+        if withheld_reason and str(fix or '').strip().lower().startswith('manual review'):
+            _note = _senior_gate_note(withheld_reason)
+            if _note and _note not in comment:
+                comment = comment.rstrip() + "\n\n" + _note
         # When a backend was missing, say so rather than letting a degraded
         # verdict read like a confident one.
         if _capabilities is not None and classification == 'Needs review':
             _dnote = _capabilities.depth_note()
             if _dnote and _dnote not in comment:
                 comment = comment.rstrip() + "\n\n" + _dnote
-        comment = _append_cwe_footer(comment, checker)
+        # Polish first, then attach the taxonomy footer.  This keeps the CWE
+        # footer from being rewritten by the inline reference strip.
+        comment = _polish_comment(comment, classification)
+        comment = _append_cwe_footer(comment, checker, classification)
         fix = _expert_fix_suggestion(checker, context, fix)
         return classification, comment, fix, confidence
 

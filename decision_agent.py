@@ -368,7 +368,7 @@ def _memcpy_bounded_by_dest_sizeof(code: str, flagged_line: int,
                                    code_start_line: int = 1) -> bool:
     """True when the flagged line copies with an explicit length of
     ``sizeof(<destination>)`` — the copy is bounded by the destination's own
-    size and cannot overrun it (CSV #96/#111/#112: matching fixed fields)."""
+    size and cannot overrun it (matching fixed-width fields)."""
     if not code or not flagged_line:
         return False
     lines = code.splitlines()

@@ -175,14 +175,20 @@ cleanup:
 
 
 def test_unknown_convention_keeps_the_guard_and_flags_the_branch():
-    """An unreadable error path must not discard a valid bounds check."""
+    """An unreadable error path must not discard a valid bounds check.
+
+    Instead of leaving an uncompilable ``/* report failure here */`` marker,
+    the proposal restates the real guard and leaves the failure action to the
+    reviewer to match to the module's convention.
+    """
     code = "int compute(int a, int b) { return a * b; }"
     result = gate_fix("if (a > INT_MAX / b) return ERROR;", code, 1, 1,
                       "INTEGER_OVERFLOW")
     assert result.accepted
     assert "if (a > INT_MAX / b)" in result.fix
-    assert "report failure here" in result.fix
-    assert "could not be matched" in result.reason
+    assert "report failure here" not in result.fix
+    assert ERROR_RETURN_SENTINEL not in result.fix
+    assert "error convention" in result.fix
 
 
 def test_explicit_sentinel_is_resolved():
