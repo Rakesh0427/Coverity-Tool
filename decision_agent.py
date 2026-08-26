@@ -97,6 +97,8 @@ class DecisionAgent:
         "strncpy_count_from_strlen", "dest_larger_than_copy",
         "string_already_terminated_or_not_cstring",
         "pointer_first_element_alias",
+        "assigned_nonnull_address",
+        "memcpy_size_equals_dest_sizeof",
     }
 
 
@@ -334,6 +336,61 @@ def _line_inside_disabled_ifdef(code: str, target_line: int,
     return ''
 
 
+def _split_call_args(text: str, open_paren: int):
+    """Top-level comma-split arguments of the call whose '(' is at open_paren.
+    Handles nested parens so ``sizeof(a->f)`` is not cut at its ')'."""
+    depth, i, args, cur, bracket = 1, open_paren + 1, [], [], 0
+    while i < len(text) and depth > 0:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        if depth == 1 and ch == ',' and bracket == 0:
+            args.append(''.join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        if ch in '[{':
+            bracket += 1
+        elif ch in ']}':
+            bracket -= 1
+        cur.append(ch)
+        i += 1
+    if cur:
+        args.append(''.join(cur).strip())
+    return [a for a in args if a]
+
+
+def _memcpy_bounded_by_dest_sizeof(code: str, flagged_line: int,
+                                   code_start_line: int = 1) -> bool:
+    """True when the flagged line copies with an explicit length of
+    ``sizeof(<destination>)`` — the copy is bounded by the destination's own
+    size and cannot overrun it (CSV #96/#111/#112: matching fixed fields)."""
+    if not code or not flagged_line:
+        return False
+    lines = code.splitlines()
+    rel = flagged_line - code_start_line
+    if not (0 <= rel < len(lines)):
+        return False
+    text = lines[rel]
+    m = re.search(r'\b(?:memcpy|memmove)\s*\(', text)
+    if not m:
+        return False
+    args = _split_call_args(text, m.end() - 1)
+    if len(args) < 3:
+        return False
+    dst, size_arg = args[0].strip(), args[-1].strip()
+    sz_m = re.fullmatch(r'sizeof\s*\(\s*(.+?)\s*\)', size_arg)
+    if not sz_m:
+        return False
+    sz_obj = sz_m.group(1).strip()
+    # Exact match (a->field == a->field), or both are the same array name.
+    return sz_obj == dst.strip()
+
+
 def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> EvidenceAccumulator:
     """Translate context and parsed events into weighted Evidence objects."""
     acc = EvidenceAccumulator()
@@ -476,12 +533,22 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
                 description=f"Bounded/safe sink function {sink}() detected."
             ))
     elif sink == 'memcpy':
-        acc.add(Evidence(
-            label="memcpy_sink",
-            polarity="bug",
-            weight=0.60,
-            description="memcpy() requires manual size validation."
-        ))
+        if _memcpy_bounded_by_dest_sizeof(code, context.get('line', 0),
+                                          context.get('code_start_line', 1)):
+            acc.add(Evidence(
+                label="memcpy_size_equals_dest_sizeof",
+                polarity="fp",
+                weight=0.92,
+                description=("The memcpy length argument is sizeof(destination) — the copy "
+                             "is bounded by the destination's own size and cannot overrun it.")
+            ))
+        else:
+            acc.add(Evidence(
+                label="memcpy_sink",
+                polarity="bug",
+                weight=0.60,
+                description="memcpy() requires manual size validation."
+            ))
 
     release_func = context.get('release_func', '')
     alloc_line = context.get('alloc_line', 0)

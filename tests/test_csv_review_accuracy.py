@@ -220,6 +220,114 @@ CASES = [
      "void pe_OpenType(obj_t *ptr) {\n"
      "    consume(&ptr[0]);\n"
      "}\n", 2, 'pe_OpenType', 'False positive'),
+
+    # ------------------------------------------------------------------
+    # Second wave - remaining clusters from the same CSV
+    # ------------------------------------------------------------------
+    # CSV #85: pointer assigned a valid address on the guarded path.
+    ("fp_forward_null_assigned_in_guard", "FORWARD_NULL",
+     "static node_t gs_slots[8];\n"
+     "void fnadsc_qm_enqueue_in_session_queue(unsigned int idx) {\n"
+     "    node_t *st_new_node_ptr = NULL;\n"
+     "    if (queue_space_available()) {\n"
+     "        st_new_node_ptr = &gs_slots[idx];\n"
+     "        st_new_node_ptr->next = NULL;\n"
+     "    }\n"
+     "}\n", 6, 'fnadsc_qm_enqueue_in_session_queue', 'False positive'),
+
+    # CSV #87/#89: counter bounded by `< waypoint_num` with a constant ceiling.
+    ("fp_integer_overflow_counter_bounded_by_field", "INTEGER_OVERFLOW",
+     "#define MAX_WAYPOINTS 128\n"
+     "void fn(epp_t *st_epp_ptr) {\n"
+     "    unsigned int ui_next = 0;\n"
+     "    if (st_epp_ptr->waypoint_num <= MAX_WAYPOINTS) {\n"
+     "        for (unsigned int start_idx = 0; start_idx < st_epp_ptr->waypoint_num; start_idx++) {\n"
+     "            ui_next = start_idx + 1;\n"
+     "        }\n"
+     "    }\n"
+     "    use(ui_next);\n"
+     "}\n", 6, 'fn', 'False positive'),
+
+    # CSV #88: value checked non-negative before the arithmetic.
+    ("fp_integer_overflow_value_nonneg_checked", "INTEGER_OVERFLOW",
+     "void pd_DynBitString(int nocts) {\n"
+     "    if (nocts < 0) {\n"
+     "        return;\n"
+     "    }\n"
+     "    unsigned int total = nocts + 4;\n"
+     "    use(total);\n"
+     "}\n", 6, 'pd_DynBitString', 'False positive'),
+
+    # CSV #90: index range-validated before the flagged subtraction.
+    ("fp_integer_overflow_validated_index_arith", "INTEGER_OVERFLOW",
+     "#define MAX_CONNECTIONS 16\n"
+     "#define DSI_PORT_ID_IDX_OFFSET 1\n"
+     "void fnADSC_conn_mgr_process_cntrt_req(int si_conn_index) {\n"
+     "    if (si_conn_index < 0 || si_conn_index >= MAX_CONNECTIONS) {\n"
+     "        return;\n"
+     "    }\n"
+    "    fnadsc_qm_session_established(si_conn_index - DSI_PORT_ID_IDX_OFFSET);\n"
+    "}\n", 7, 'fnADSC_conn_mgr_process_cntrt_req', 'False positive'),
+
+    # CSV #138: dereference only inside the `if (ptr != NULL)` block.
+    ("fp_reverse_inull_deref_inside_if_block", "REVERSE_INULL",
+     "void fnBuildDDataReq(struct_t *dpDsiPrimitive) {\n"
+     "    if (dpDsiPrimitive != NULL) {\n"
+     "        dpDsiPrimitive->field = 1;\n"
+     "    }\n"
+     "}\n", 3, 'fnBuildDDataReq', 'False positive'),
+
+    # CSV #140: strlen on a pre-zeroed buffer, guarded by a validity flag.
+    ("fp_string_null_guarded_strlen_prezeroed", "STRING_NULL",
+     "#define FLIGHT_ID_LEN 12\n"
+     "void build_flight_id_group(int flight_id_valid) {\n"
+     "    char flight_id[FLIGHT_ID_LEN + 1];\n"
+     "    memset(flight_id, 0, sizeof(flight_id));\n"
+     "    if (flight_id_valid) {\n"
+     "        size_t len = strlen(flight_id);\n"
+     "        use_len(len);\n"
+     "    }\n"
+     "}\n", 6, 'build_flight_id_group', 'False positive'),
+
+    # CSV #142: bounded copy guarded by a length check with an explicit NUL.
+    ("fp_string_null_guarded_copy_with_explicit_nul", "STRING_NULL",
+     "void format_dl_degrees_minutes(const char *src) {\n"
+     "    char uc_minutes[8];\n"
+     "    char uc_temp[8];\n"
+     "    substring(uc_temp, sizeof(uc_temp), src);\n"
+     "    size_t len = strlen(uc_temp);\n"
+     "    if (len + 1 <= sizeof(uc_minutes)) {\n"
+     "        strncpy(uc_minutes, uc_temp, len);\n"
+     "        uc_minutes[len] = '\\0';\n"
+     "    }\n"
+     "}\n", 8, 'format_dl_degrees_minutes', 'False positive'),
+
+    # CSV #91: index found in a loop, checked non-negative before use.
+    ("fp_negative_returns_index_checked_before_use", "NEGATIVE_RETURNS",
+     "#define MAX_SIZE_CNTR_TRANS_TBL 32\n"
+     "static tbl_t gs_trans_tbl[MAX_SIZE_CNTR_TRANS_TBL];\n"
+     "void SM_Add_To_Center_Trans_Tbl(unsigned int ui_current_size) {\n"
+     "    int si_newIndex = -1;\n"
+     "    if (ui_current_size < MAX_SIZE_CNTR_TRANS_TBL) {\n"
+     "        for (int i = 0; i < MAX_SIZE_CNTR_TRANS_TBL; i++) {\n"
+     "            if (gs_trans_tbl[i].free) {\n"
+     "                si_newIndex = i;\n"
+     "                break;\n"
+     "            }\n"
+     "        }\n"
+     "    }\n"
+    "    if (si_newIndex >= 0) {\n"
+    "        SM_Add_a_Node_To_Head(si_newIndex);\n"
+    "    }\n"
+    "}\n", 14, 'SM_Add_To_Center_Trans_Tbl', 'False positive'),
+
+    # CSV #96/#111/#112: fixed-length struct fields of matching size.
+    ("fp_overrun_memcpy_matching_fixed_fields", "OVERRUN",
+     "typedef struct { char procedure[16]; } fans_proc_t;\n"
+     "typedef struct { char procedure[16]; } atn_proc_t;\n"
+     "void fn(fans_proc_t *fans, atn_proc_t *atn) {\n"
+     "    memcpy(atn->procedure, fans->procedure, sizeof(atn->procedure));\n"
+     "}\n", 4, 'fn', 'False positive'),
 ]
 
 

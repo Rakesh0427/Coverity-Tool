@@ -24,7 +24,7 @@ from deep_analyzer import (
 )
 from decision_agent import (
     Evidence, EvidenceAccumulator, DecisionAgent,
-    build_evidence, AgentDecision
+    build_evidence, AgentDecision, _split_call_args
 )
 from ast_analyzer import (
     find_array_access, find_declaration, find_assignment,
@@ -3539,7 +3539,11 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 fix = f"Validate `{_found_idx}` before indexing `{_found_arr}`:\n  if ({_found_idx} < 0 || {_found_idx} >= (int)(sizeof({_found_arr}) / sizeof({_found_arr}[0]))) <<ERROR_RETURN>>"
             elif _sink_m:
                 _fn = _sink_m.group(1)
-                _args = [a.strip() for a in _sink_m.group(2).split(',')]
+                # Balanced extraction: `sizeof(a->f)` must not be cut at its
+                # own ')'.
+                _args = _split_call_args(src_line_text, _sink_m.end() - 1)
+                if not _args:
+                    _args = [a.strip() for a in _sink_m.group(2).split(',')]
                 _dst = _args[0] if _args else '?'
                 _sz = _args[-1] if len(_args) > 1 else '?'
                 parts.append(f"`{_fn}({', '.join(_args)})` at line {access_line_actual} — `{_sz}` controls the copy length but no visible check confirms it does not exceed `sizeof({_dst})`.")
@@ -3688,6 +3692,40 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
                 fix = "Manual review required."
         return "Needs review", comment, fix, decision.confidence
 
+def _extract_reject_range_guard(code: str, var: str, access_line: int,
+                                code_start_line: int,
+                                resolution_sources: List[str]) -> Optional[Tuple[int, int]]:
+    """Find a reject-style range guard on `var` before `access_line`:
+    ``if (var < 0 || var >= K) { return/... }`` bounds var to [0, K-1].
+
+    Returns (K, guard_line_absolute) or None.  Only the reject style with an
+    exiting body proves the bound on the continuation path."""
+    if not var or not re.match(r'^[A-Za-z_]\w*$', var):
+        return None
+    lines = code.splitlines()
+    rel = access_line - code_start_line + 1
+    if rel < 1 or rel > len(lines):
+        return None
+    esc = re.escape(var)
+    pats = (
+        rf'\b{esc}\s*<\s*0\s*\|\|\s*{esc}\s*>=\s*([A-Za-z_]\w*|\d+[uUlL]*)',
+        rf'\b{esc}\s*>=\s*([A-Za-z_]\w*|\d+[uUlL]*)\s*\|\|\s*{esc}\s*<\s*0',
+    )
+    for i in range(0, min(rel - 1, len(lines))):
+        m = None
+        for p in pats:
+            m = m or re.search(p, lines[i])
+        if not m:
+            continue
+        k = _resolve_integer_constant(m.group(1), resolution_sources)
+        if k is None:
+            continue
+        window = ' '.join(lines[i:min(i + 4, len(lines))])
+        if re.search(r'\b(?:return|goto|continue|break)\b', window):
+            return k, i + 1 + code_start_line - 1
+    return None
+
+
 def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
                          file: str = "", line: int = 0, function: str = "", cid: int = 0,
                          called_function_codes: Optional[Dict[str, str]] = None,
@@ -3707,6 +3745,13 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
     lhs_val = rhs_val = None
     if op_info:
         lhs_expr, op_token, rhs_expr = op_info
+        # `f(x - C)`: the extractor can return the call prefix as the LHS
+        # (`f(x`); use the trailing identifier so the flagged operand
+        # variable is the one analysed.
+        if lhs_expr and not re.match(r'^[A-Za-z_]\w*$', lhs_expr):
+            _lhs_m = re.search(r'([A-Za-z_]\w*)\s*$', lhs_expr)
+            if _lhs_m:
+                lhs_expr = _lhs_m.group(1)
         ctx['lhs_expr'] = lhs_expr
         ctx['rhs_expr'] = rhs_expr
         ctx['op_token'] = op_token
@@ -3740,6 +3785,28 @@ def _analyze_integer_overflow(code: str, sub_checker: str, events: List[Dict],
             weight=0.60,
             description="Arithmetic operates on unsigned integers — wrap-around is well-defined in C."
         ))
+
+    # Explicit range guard on the flagged operand (CSV #90): a reject-style
+    # `if (v < 0 || v >= K) return;` bounds v to [0, K-1]; with a resolved
+    # constant operand the whole result range is provably inside the type.
+    if op_token in ('+', '-') and lhs_expr and re.match(r'^[A-Za-z_]\w*$', lhs_expr or ''):
+        _rng = _extract_reject_range_guard(code, lhs_expr, line, code_start_line,
+                                           resolution_sources)
+        if _rng is not None and rhs_val is not None:
+            _k, _gline = _rng
+            _lo, _hi = ((-rhs_val, _k - 1 - rhs_val) if op_token == '-'
+                        else (rhs_val, _k - 1 + rhs_val))
+            if ctx['integer_min'] <= _lo and _hi <= ctx['integer_max']:
+                acc.add(Evidence(
+                    label="explicit_range_guard",
+                    polarity="fp",
+                    weight=0.90,
+                    description=(f"`{lhs_expr}` is validated to [0, {_k - 1}] by the guard at "
+                                 f"line {_gline}, so `{lhs_expr} {op_token} {rhs_expr}` is "
+                                 f"bounded to [{_lo}, {_hi}] — within `{ctx['integer_type']}` "
+                                 f"[{ctx['integer_min']}, {ctx['integer_max']}]; no overflow "
+                                 f"is possible on the continuation path.")
+                ))
 
     if lhs_val is not None and rhs_val is not None and op_token:
         if op_token == '*':
@@ -3868,6 +3935,24 @@ def _analyze_string_null(code: str, sub_checker: str, events: List[Dict],
     prezeroed = _dest_prezeroed(code, dest_name)
     used_as_cstr = _consumed_as_cstring(code, dest_name)
     field_not_cstr = _dest_is_struct_field(dest_name) and not used_as_cstr
+
+    # STRING_NULL flagged on a string READ (strlen/strcmp/...) of a buffer
+    # that is zero-initialized before the read: the buffer always holds a
+    # terminator, so the read cannot run past it (CSV #140).
+    _line_text = _line_text_at(code, line, code_start_line)
+    _read_m = re.search(r'\b(?:strlen|strcmp|strncmp|strchr|strstr|puts)\s*\(\s*([A-Za-z_]\w*)',
+                        _line_text or '')
+    if _read_m and not prezeroed and _dest_prezeroed(code, _read_m.group(1)):
+        prezeroed = True
+        acc.add(Evidence(
+            label="string_already_terminated_or_not_cstring",
+            polarity="fp",
+            weight=0.88,
+            description=(f"`{_read_m.group(1)}` is zero-initialized with memset before the "
+                         f"string read at line {line}, so the buffer always contains a null "
+                         f"terminator and the read cannot run past it.")
+        ))
+
     if prezeroed or field_not_cstr:
         acc.add(Evidence(
             label="string_already_terminated_or_not_cstring",
@@ -4056,6 +4141,28 @@ def _analyze_forward_null(code: str, sub_checker: str, events: List[Dict],
                 weight=0.80,
                 description=(f"`{var}` is assigned from {alloc_m.group(1)}(), which can return "
                              f"NULL, and no null guard was found before the dereference at line {line}.")
+            ))
+
+        # The LAST assignment before the deref decides the value on this
+        # path: an address-taking RHS (`ptr = &obj[...]`) cannot be NULL
+        # (CSV #85: the pointer is set to a valid slot address, then used).
+        _last_assign_line, _last_assign_text = 0, ''
+        for _i, _raw in enumerate(code.splitlines()):
+            _abs = code_start_line + _i
+            if _abs >= line:
+                break
+            if re.search(rf'\b{re.escape(var)}\s*=(?!=)', _raw):
+                _last_assign_line, _last_assign_text = _abs, _raw.strip()
+        if _last_assign_line and re.search(
+                rf'\b{re.escape(var)}\s*=\s*(?:&\s*[A-Za-z_(]|")', _last_assign_text):
+            acc.add(Evidence(
+                label="assigned_nonnull_address",
+                polarity="fp",
+                weight=0.90,
+                description=(f"`{var}` is assigned the address of an object at line "
+                             f"{_last_assign_line} (`{_last_assign_text}`) immediately before "
+                             f"the dereference at line {line}; an address-taking assignment "
+                             f"cannot yield NULL on this path.")
             ))
 
     decision = DecisionAgent.evaluate(acc, 'FORWARD_NULL')
