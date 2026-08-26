@@ -136,6 +136,59 @@ def test_semgrep_disable_flag_turns_it_off(monkeypatch):
     assert "COVERITY_DISABLE_SEMGREP" in caps["semgrep"].detail
 
 
+def test_semgrep_timeout_reports_clearly_not_as_a_crash(monkeypatch):
+    """A slow semgrep start is a timeout, not a crash: the detail must read
+    'timed out' (with guidance), never 'probe raised'."""
+    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
+    _fake_semgrep_path(monkeypatch)
+
+    def _slow(*_a, **kw):
+        raise capabilities.subprocess.TimeoutExpired(
+            "semgrep", timeout=kw.get("timeout", 30))
+
+    monkeypatch.setattr(capabilities.subprocess, "run", _slow)
+    cap = capabilities._probe_semgrep()
+    assert cap.available is False
+    assert "timed out" in cap.detail
+    assert "COVERITY_SEMGREP_PROBE_TIMEOUT" in cap.detail
+    assert "probe raised" not in cap.detail
+
+
+def test_semgrep_nonzero_exit_reports_returncode(monkeypatch):
+    monkeypatch.delenv("COVERITY_ENABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_DISABLE_SEMGREP", raising=False)
+    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
+    _fake_semgrep_path(monkeypatch)
+
+    class _R:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(capabilities.subprocess, "run", lambda *a, **k: _R())
+    cap = capabilities._probe_semgrep()
+    assert cap.available is False
+    assert "exit" in cap.detail and "2" in cap.detail
+
+
+def test_semgrep_probe_timeout_default(monkeypatch):
+    monkeypatch.delenv("COVERITY_SEMGREP_PROBE_TIMEOUT", raising=False)
+    assert capabilities.semgrep_probe_timeout() == \
+        capabilities.SEMGREP_PROBE_TIMEOUT_DEFAULT
+
+
+def test_semgrep_probe_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("COVERITY_SEMGREP_PROBE_TIMEOUT", "12.5")
+    assert capabilities.semgrep_probe_timeout() == 12.5
+
+
+def test_semgrep_probe_timeout_invalid_env_falls_back(monkeypatch):
+    monkeypatch.setenv("COVERITY_SEMGREP_PROBE_TIMEOUT", "not-a-number")
+    assert capabilities.semgrep_probe_timeout() == \
+        capabilities.SEMGREP_PROBE_TIMEOUT_DEFAULT
+
+
 def test_semgrep_legacy_enable_zero_still_disables(monkeypatch):
     """COVERITY_ENABLE_SEMGREP=0 keeps working for old scripts."""
     monkeypatch.setenv("COVERITY_ENABLE_SEMGREP", "0")

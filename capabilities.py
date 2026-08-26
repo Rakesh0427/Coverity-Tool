@@ -32,6 +32,7 @@ from typing import Dict, List, NamedTuple, Optional
 __all__ = [
     "Capability", "probe", "format_banner", "analysis_depth",
     "depth_note", "missing_backends", "reset_cache",
+    "semgrep_probe_timeout", "SEMGREP_PROBE_TIMEOUT_DEFAULT",
     "DEPTH_FULL", "DEPTH_PARTIAL", "DEPTH_MINIMAL",
 ]
 
@@ -57,6 +58,29 @@ DEPTH_PARTIAL = "partial"    # AST available, but proof/type backends missing
 DEPTH_FULL = "full"          # every critical backend live
 
 _CACHE: Optional[Dict[str, Capability]] = None
+
+#: Seconds to wait for ``semgrep --version`` before declaring it unavailable.
+#: semgrep is a Python CLI whose first invocation pays interpreter + module
+#: import cost, which can exceed 5s on a cold cache or slow disk (antivirus
+#: scanning on Windows makes this worse).  A too-short timeout silently
+#: disabled a perfectly-good semgrep; the default is therefore generous.
+SEMGREP_PROBE_TIMEOUT_DEFAULT = 30.0
+
+
+def semgrep_probe_timeout() -> float:
+    """Seconds to allow for ``semgrep --version`` before giving up.
+
+    Override with ``COVERITY_SEMGREP_PROBE_TIMEOUT`` (seconds, float); a
+    non-numeric or sub-second value falls back to the default.  Set
+    ``COVERITY_DISABLE_SEMGREP=1`` to skip the probe entirely.
+    """
+    raw = os.environ.get("COVERITY_SEMGREP_PROBE_TIMEOUT", "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            pass
+    return SEMGREP_PROBE_TIMEOUT_DEFAULT
 
 
 # --------------------------------------------------------------------------- #
@@ -142,17 +166,30 @@ def _probe_semgrep() -> Capability:
     if shutil.which("semgrep") is None:
         return Capability("semgrep", "semgrep (corroboration)", False,
                           "semgrep not on PATH — install or add it to PATH", False)
+    timeout = semgrep_probe_timeout()
     try:
         r = subprocess.run(["semgrep", "--version"],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode == 0:
-            return Capability("semgrep", "semgrep (corroboration)", True,
-                              (r.stdout or "").strip() or "ok", False)
-    except Exception as exc:
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # A slow start is not a failure: semgrep's Python startup regularly
+        # exceeds a few seconds on a cold cache.  Report it as a probe timeout
+        # (not a crash) and tell the operator how to raise the window or opt out.
+        return Capability(
+            "semgrep", "semgrep (corroboration)", False,
+            (f"version probe timed out after {timeout:g}s — semgrep can be slow "
+             f"to start on a cold cache; raise COVERITY_SEMGREP_PROBE_TIMEOUT "
+             f"or set COVERITY_DISABLE_SEMGREP=1 to skip it"), False)
+    except OSError as exc:
+        return Capability("semgrep", "semgrep (corroboration)", False,
+                          f"version probe failed to launch: {exc}", False)
+    except Exception as exc:  # defensive: a probe must never break a run
         return Capability("semgrep", "semgrep (corroboration)", False,
                           f"probe raised: {exc}", False)
+    if r.returncode == 0:
+        return Capability("semgrep", "semgrep (corroboration)", True,
+                          (r.stdout or "").strip() or "ok", False)
     return Capability("semgrep", "semgrep (corroboration)", False,
-                      "version probe failed", False)
+                      f"version probe exited with code {r.returncode}", False)
 
 
 def _probe_simple(key: str, label: str, module: str,

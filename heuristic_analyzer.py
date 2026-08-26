@@ -1297,8 +1297,18 @@ def _semgrep_enabled() -> bool:
             if shutil.which("semgrep") is None:
                 _SEMGREP_AVAILABLE = False
             else:
-                # Quick probe: semgrep --version must succeed within 3s
-                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=3)
+                # Probe: semgrep --version must succeed.  semgrep's Python
+                # startup is slow on a cold cache, so use the same generous,
+                # COVERITY_SEMGREP_PROBE_TIMEOUT-overridable window as the
+                # capabilities banner instead of a hard 3s cutoff that silently
+                # disables an otherwise-usable semgrep.
+                timeout = 30.0
+                if _capabilities is not None:
+                    try:
+                        timeout = _capabilities.semgrep_probe_timeout()
+                    except Exception:
+                        pass
+                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=timeout)
                 _SEMGREP_AVAILABLE = (r.returncode == 0)
         except Exception:
             _SEMGREP_AVAILABLE = False
