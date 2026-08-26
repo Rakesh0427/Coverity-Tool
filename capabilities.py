@@ -167,9 +167,12 @@ def _probe_semgrep() -> Capability:
         return Capability("semgrep", "semgrep (corroboration)", False,
                           "semgrep not on PATH — install or add it to PATH", False)
     timeout = semgrep_probe_timeout()
+    env = dict(os.environ)
+    env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+    env["SEMGREP_SEND_METRICS"] = "off"
     try:
         r = subprocess.run(["semgrep", "--version"],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         # A slow start is not a failure: semgrep's Python startup regularly
         # exceeds a few seconds on a cold cache.  Report it as a probe timeout
