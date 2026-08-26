@@ -702,10 +702,47 @@ def _guard_rejects_negative(var_name: str, cond: str) -> bool:
 
 def _resolve_var_value_before_line(code: str, var_name: str, access_line: int,
                                    code_start_line: int, resolution_sources: List[str]) -> Optional[int]:
-    flow = _extract_index_flow(code, var_name, access_line, code_start_line)
-    if flow.get('assign_expr'):
-        return _resolve_integer_constant(flow['assign_expr'], resolution_sources)
-    return None
+    """Constant-fold the value of `var_name` at `access_line`.
+
+    Tracks plain assignments (`i = 3`), compound updates (`i += 4`, `i -= 2`,
+    `i++`) and chained constants so an index built as `0` then `+= 4` resolves
+    to 4 instead of "unknown".
+    """
+    if not var_name or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', var_name):
+        return None
+    lines = code.splitlines()
+    access_rel = access_line - code_start_line + 1
+    if access_rel < 1 or access_rel > len(lines):
+        return None
+
+    def _const(expr: str) -> Optional[int]:
+        return _resolve_integer_constant(expr.strip(), resolution_sources)
+
+    value: Optional[int] = None
+    _esc = re.escape(var_name)
+    token_pat = re.compile(
+        rf'\b{_esc}\s*=(?!=)\s*[^;]+;'
+        rf'|\b{_esc}\s*(?:\+=|-=|\*=)\s*[^;]+;'
+        rf'|\b{_esc}\s*\+\+\s*;'
+        rf'|\+\+\s*{_esc}\s*;')
+    for i in range(0, access_rel - 1):
+        for m in token_pat.finditer(lines[i]):
+            tok = m.group(0)
+            if re.match(rf'\b{_esc}\s*=(?!=)', tok):
+                value = _const(re.sub(rf'^\b{_esc}\s*=\s*', '', tok).rstrip(';').strip())
+            elif value is not None:
+                m_comp = re.match(rf'\b{_esc}\s*(\+=|-=|\*=)\s*([^;]+);', tok)
+                if m_comp:
+                    rhs = _const(m_comp.group(2))
+                    op = m_comp.group(1)
+                    if rhs is None:
+                        value = None
+                    else:
+                        value = (value + rhs) if op == '+=' else \
+                                (value - rhs) if op == '-=' else (value * rhs)
+                elif tok.rstrip(';').endswith('++'):
+                    value += 1
+    return value
 
 
 def _resolve_expr_value_before_line(code: str, expr: str, access_line: int,
@@ -2536,10 +2573,55 @@ def _loop_bound_assessment(code: str, idx_var: str, arr_name: str, arr_size: int
     return ('safe', safe_explanation) if safe_explanation else ('', '')
 
 
+def _else_block_intervals(code: str, code_start_line: int = 1) -> List[Tuple[int, int]]:
+    """Return (start_line, end_line) intervals (absolute) of `else { ... }`
+    blocks.  A closing `}` on the same line as the opening counts, so
+    `} else { x = 1; }` yields a one-line interval."""
+    intervals: List[Tuple[int, int]] = []
+    stack: List[Tuple[int, int]] = []   # (depth_at_open, open_line)
+    depth = 0
+    for rel, line in enumerate(code.splitlines(), 1):
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == '{':
+                pre = line[:i]
+                is_else = bool(re.search(r'\belse\s*$', pre))
+                if is_else:
+                    stack.append((depth, rel))
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if stack and depth == stack[-1][0]:
+                    _d, opened = stack.pop()
+                    intervals.append((opened + code_start_line - 1, rel + code_start_line - 1))
+            i += 1
+    # Unclosed else blocks (snippet cut off) extend to the end of the snippet.
+    last = len(code.splitlines()) + code_start_line - 1
+    for _d, opened in stack:
+        intervals.append((opened + code_start_line - 1, last))
+    return intervals
+
+
+def _access_in_else_of_guard(code: str, guard_line: int, access_line: int,
+                             code_start_line: int = 1) -> bool:
+    """True when `access_line` sits inside an `else` block whose matching `if`
+    is at/before `guard_line` — i.e. the access runs only when the guard's
+    condition is FALSE."""
+    if not guard_line or not access_line or access_line <= guard_line:
+        return False
+    for start, end in _else_block_intervals(code, code_start_line):
+        if start <= access_line <= end and guard_line < start:
+            return True
+    return False
+
+
 def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
                            concrete_idx, arr_size, arr_size_expr, arr_name,
                            guard_line, covers_all_paths,
-                           concrete_idx_source: str = "Coverity's trace"):
+                           concrete_idx_source: str = "Coverity's trace",
+                           access_line: int = 0, code: str = '',
+                           code_start_line: int = 1):
     """Assess the guard near an OVERRUN access vs. the flagged index idx_var.
 
     For OVERRUN the surrounding guard is often a NULL check on the buffer
@@ -2585,6 +2667,19 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
             f"pointer (`{arr_name}`) but does not reference `{idx_var}`; it is not a "
             f"bounds check and cannot rule out an out-of-bounds `{arr_name}[{idx_var}]`.")
 
+    # An access that sits inside the `else` of the bounds check executes only
+    # when the check FAILED — the guard proves the violation instead of
+    # preventing it (CSV rows #94/#95: else-branch write past the end).
+    if access_line and code and _access_in_else_of_guard(code, guard_line, access_line,
+                                                         code_start_line):
+        _ub = re.search(rf'\b{re.escape(idx_var)}\b\s*(<=|<)\s*(\w+)', guard_cond)
+        if _ub:
+            return "unsafe", (
+                f"The access at line {access_line} is inside the `else` of the check "
+                f"`{guard_cond}` at line {guard_line}`, i.e. it executes only when that "
+                f"bounds check fails (`{idx_var}` is NOT within `{_ub.group(2)}`), so the "
+                f"access is out of bounds by construction on this path.")
+
     # A concrete index value from Coverity's path or a resolved local constant
     # assignment is the decisive signal.
     if concrete_idx is not None and arr_size > 0:
@@ -2623,6 +2718,18 @@ def _assess_guard_vs_index(guard_cond, idx_var, guard_op, guard_limit,
                 f"so the access can still run out of bounds.")
         if arr_size_expr and (ub_str in arr_size_expr or "sizeof" in guard_cond
                               or ub_str == arr_name):
+            # An inclusive `<=` against the array's own size expression is the
+            # classic off-by-one: it admits index == size, one past the last
+            # valid element (CSV rows #93/#100/#101/#122-133).
+            if ub_op == '<=' and (ub_str == arr_size_expr or ub_str in arr_size_expr
+                                  or arr_size_expr in ub_str):
+                _sz = arr_size if arr_size else arr_size_expr
+                return "unsafe", (
+                    f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` with "
+                    f"`<=` against `{ub_str}`, the declared size of `{arr_name}` "
+                    f"({_sz} elements). The `<=` admits `{idx_var}` = {ub_str}, which is "
+                    f"one past the last valid index ({ub_str} - 1) — an off-by-one "
+                    f"out-of-bounds access; the check must be `<`.")
             return "safe", (
                 f"Guard `{guard_cond}` at line {guard_line} bounds `{idx_var}` against "
                 f"`{ub_str}`, which tracks the size of `{arr_name}`; the access is in range.")
@@ -3043,8 +3150,28 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         loop_guard_status, loop_guard_explanation = _loop_bound_assessment(
             code, idx_var, arr_name, arr_size,
             lambda tok: _resolve_integer_constant(tok, resolution_sources))
-        concrete_idx = None
-        concrete_idx_source = ''
+        # A loop header that references the index makes the mutation
+        # loop-driven: every iteration carries a different value, so the
+        # initialiser proves nothing (the loop's terminal bound decides, and
+        # an unresolvable terminal bound must stay inconclusive).
+        _idx_in_loop_header = any(
+            idx_var in header for _kind, header in _extract_loop_headers(code))
+        if loop_guard_status or _idx_in_loop_header:
+            concrete_idx = None
+            concrete_idx_source = ''
+        else:
+            # Straight-line compound updates (`i += 4`, `i++` outside any
+            # loop): fold the initialiser plus every update before the access
+            # into the value the flagged access actually sees.
+            folded = _resolve_var_value_before_line(
+                code, idx_var, access_line_actual, code_start_line, resolution_sources)
+            if folded is not None:
+                concrete_idx = folded
+                concrete_idx_source = (f"the folded value of `{idx_var}` at line "
+                                       f"{access_line_actual} (initialiser plus updates)")
+            else:
+                concrete_idx = None
+                concrete_idx_source = ''
 
     if guard_limit and not str(guard_limit).isdigit() and resolved_guard_limit is not None:
         guard_limit = str(resolved_guard_limit)
@@ -3126,7 +3253,8 @@ def _analyze_overrun(code: str, sub_checker: str, events: List[Dict],
         guard_cond, idx_var, guard_op, guard_limit, concrete_idx,
         arr_size, arr_size_expr, arr_name, guard_line,
         bool(ctx.get('guard_covers_all_paths', False)),
-        concrete_idx_source)
+        concrete_idx_source,
+        access_line=access_line_actual, code=code, code_start_line=code_start_line)
 
     # A resolved loop bound is decisive for a loop counter: it bounds every
     # iteration, not just the first. Prefer it over weaker guard evidence,

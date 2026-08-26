@@ -301,6 +301,39 @@ def analyze_leak_exits(code: str, resource: str, release_func: str,
     }
 
 
+def _line_inside_disabled_ifdef(code: str, target_line: int,
+                                code_start_line: int = 1) -> str:
+    """Return the macro name when `target_line` (absolute) sits inside an
+    `#ifdef M` / `#if defined(M)` block where M is never `#define`d in `code`
+    and the block has no `#else` branch — i.e. the flagged code is compiled
+    out of this build.  Returns '' otherwise."""
+    if not code or not target_line:
+        return ''
+    lines = code.splitlines()
+    target_rel = target_line - code_start_line + 1
+    stack = []   # [macro_or_None, start_rel, has_else]
+    for rel, raw in enumerate(lines, 1):
+        m_ifdef = re.match(r'\s*#\s*ifdef\s+([A-Za-z_]\w*)', raw)
+        m_ifdef0 = re.match(r'\s*#\s*if\s+0\b', raw)
+        m_ifdefd = re.match(r'\s*#\s*if\s+defined\s*\(\s*([A-Za-z_]\w*)\s*\)', raw)
+        m_else = re.match(r'\s*#\s*else\b', raw)
+        m_endif = re.match(r'\s*#\s*endif\b', raw)
+        if m_ifdef0:
+            stack.append([None, rel, False])
+        elif m_ifdef:
+            stack.append([m_ifdef.group(1), rel, False])
+        elif m_ifdefd:
+            stack.append([m_ifdefd.group(1), rel, False])
+        elif m_else and stack:
+            stack[-1][2] = True
+        elif m_endif and stack:
+            macro, start_rel, has_else = stack.pop()
+            if start_rel <= target_rel <= rel and macro and not has_else:
+                if not re.search(rf'#\s*define\s+{re.escape(macro)}\b', code):
+                    return macro
+    return ''
+
+
 def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> EvidenceAccumulator:
     """Translate context and parsed events into weighted Evidence objects."""
     acc = EvidenceAccumulator()
@@ -529,6 +562,19 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
             weight=0.95,
             description="Code is inside #if 0 or #ifdef NEVER — intentionally disabled."
         ))
+    else:
+        _disabled_macro = _line_inside_disabled_ifdef(
+            code, context.get('line', 0), context.get('code_start_line', 1))
+        if _disabled_macro:
+            acc.add(Evidence(
+                label="preprocessor_disabled_block",
+                polarity="fp",
+                weight=0.95,
+                description=(f"The flagged line is inside `#ifdef {_disabled_macro}`, and "
+                             f"{_disabled_macro} is not defined anywhere in the extracted "
+                             f"sources with no `#else` fallback — the flagged code is not "
+                             f"compiled in this build.")
+            ))
 
     if code and re.search(r'//\s*fallthrough|/\*\s*fall.?through|FALLTHRU|FALLTHROUGH|\[\[fallthrough\]\]', code, re.I):
         acc.add(Evidence(
