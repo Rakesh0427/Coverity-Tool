@@ -1308,7 +1308,10 @@ def _semgrep_enabled() -> bool:
                         timeout = _capabilities.semgrep_probe_timeout()
                     except Exception:
                         pass
-                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=timeout)
+                env = dict(os.environ)
+                env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+                env["SEMGREP_SEND_METRICS"] = "off"
+                r = subprocess.run(["semgrep", "--version"], capture_output=True, timeout=timeout, env=env)
                 _SEMGREP_AVAILABLE = (r.returncode == 0)
         except Exception:
             _SEMGREP_AVAILABLE = False
@@ -1336,9 +1339,12 @@ def _run_semgrep_check(file_path: str, defect_line: int, checker: str) -> Option
                 return check_id
         return None
     try:
+        env = dict(os.environ)
+        env["SEMGREP_ENABLE_VERSION_CHECK"] = "0"
+        env["SEMGREP_SEND_METRICS"] = "off"
         result = subprocess.run(
             ['semgrep', '--json', '--config', 'p/c-and-cpp', '--no-git-ignore', file_path],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=10, env=env
         )
         data = json.loads(result.stdout or '{}')
         hits = []
