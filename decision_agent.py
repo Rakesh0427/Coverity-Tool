@@ -97,6 +97,8 @@ class DecisionAgent:
         "strncpy_count_from_strlen", "dest_larger_than_copy",
         "string_already_terminated_or_not_cstring",
         "pointer_first_element_alias",
+        "assigned_nonnull_address",
+        "memcpy_size_equals_dest_sizeof",
     }
 
 
@@ -180,9 +182,11 @@ class DecisionAgent:
 
         for ev in dominant:
             if ev.description:
-                reasoning.append(f"{ev.label}: {ev.description}")
+                # Reviewer-facing text: use the human sentence, not the
+                # machine label ("explicit_null_termination: ...").
+                reasoning.append(ev.description)
             else:
-                reasoning.append(ev.label)
+                reasoning.append(ev.label.replace('_', ' '))
 
         if not reasoning:
             reasoning = ["Insufficient evidence for automatic classification."]
@@ -299,6 +303,94 @@ def analyze_leak_exits(code: str, resource: str, release_func: str,
     }
 
 
+def _line_inside_disabled_ifdef(code: str, target_line: int,
+                                code_start_line: int = 1) -> str:
+    """Return the macro name when `target_line` (absolute) sits inside an
+    `#ifdef M` / `#if defined(M)` block where M is never `#define`d in `code`
+    and the block has no `#else` branch — i.e. the flagged code is compiled
+    out of this build.  Returns '' otherwise."""
+    if not code or not target_line:
+        return ''
+    lines = code.splitlines()
+    target_rel = target_line - code_start_line + 1
+    stack = []   # [macro_or_None, start_rel, has_else]
+    for rel, raw in enumerate(lines, 1):
+        m_ifdef = re.match(r'\s*#\s*ifdef\s+([A-Za-z_]\w*)', raw)
+        m_ifdef0 = re.match(r'\s*#\s*if\s+0\b', raw)
+        m_ifdefd = re.match(r'\s*#\s*if\s+defined\s*\(\s*([A-Za-z_]\w*)\s*\)', raw)
+        m_else = re.match(r'\s*#\s*else\b', raw)
+        m_endif = re.match(r'\s*#\s*endif\b', raw)
+        if m_ifdef0:
+            stack.append([None, rel, False])
+        elif m_ifdef:
+            stack.append([m_ifdef.group(1), rel, False])
+        elif m_ifdefd:
+            stack.append([m_ifdefd.group(1), rel, False])
+        elif m_else and stack:
+            stack[-1][2] = True
+        elif m_endif and stack:
+            macro, start_rel, has_else = stack.pop()
+            if start_rel <= target_rel <= rel and macro and not has_else:
+                if not re.search(rf'#\s*define\s+{re.escape(macro)}\b', code):
+                    return macro
+    return ''
+
+
+def _split_call_args(text: str, open_paren: int):
+    """Top-level comma-split arguments of the call whose '(' is at open_paren.
+    Handles nested parens so ``sizeof(a->f)`` is not cut at its ')'."""
+    depth, i, args, cur, bracket = 1, open_paren + 1, [], [], 0
+    while i < len(text) and depth > 0:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        if depth == 1 and ch == ',' and bracket == 0:
+            args.append(''.join(cur).strip())
+            cur = []
+            i += 1
+            continue
+        if ch in '[{':
+            bracket += 1
+        elif ch in ']}':
+            bracket -= 1
+        cur.append(ch)
+        i += 1
+    if cur:
+        args.append(''.join(cur).strip())
+    return [a for a in args if a]
+
+
+def _memcpy_bounded_by_dest_sizeof(code: str, flagged_line: int,
+                                   code_start_line: int = 1) -> bool:
+    """True when the flagged line copies with an explicit length of
+    ``sizeof(<destination>)`` — the copy is bounded by the destination's own
+    size and cannot overrun it (CSV #96/#111/#112: matching fixed fields)."""
+    if not code or not flagged_line:
+        return False
+    lines = code.splitlines()
+    rel = flagged_line - code_start_line
+    if not (0 <= rel < len(lines)):
+        return False
+    text = lines[rel]
+    m = re.search(r'\b(?:memcpy|memmove)\s*\(', text)
+    if not m:
+        return False
+    args = _split_call_args(text, m.end() - 1)
+    if len(args) < 3:
+        return False
+    dst, size_arg = args[0].strip(), args[-1].strip()
+    sz_m = re.fullmatch(r'sizeof\s*\(\s*(.+?)\s*\)', size_arg)
+    if not sz_m:
+        return False
+    sz_obj = sz_m.group(1).strip()
+    # Exact match (a->field == a->field), or both are the same array name.
+    return sz_obj == dst.strip()
+
+
 def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> EvidenceAccumulator:
     """Translate context and parsed events into weighted Evidence objects."""
     acc = EvidenceAccumulator()
@@ -340,12 +432,31 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
     if origin:
         if any(src in origin for src in ['network', 'args', 'env', 'file', 'caller-controlled', 'tainted', 'external']):
             if checker in _TAINT_RELEVANT_CHECKERS:
-                acc.add(Evidence(
-                    label="taint_from_untrusted_source",
-                    polarity="bug",
-                    weight=0.80,
-                    description=f"Variable originates from untrusted source: {origin}."
-                ))
+                # For the null-termination checkers the source being
+                # caller-controlled is only a contributing factor: the copy
+                # count already caps how many bytes are written, and the
+                # dedicated analyzer weighs terminator facts (pre-zeroing,
+                # sizeof-1, struct-field use). Record taint at a modest,
+                # non-critical weight so it cannot veto those facts.
+                if checker in ("BUFFER_SIZE", "BUFFER_SIZE_WARNING", "STRING_NULL") and \
+                        context.get('sink_func', '') in ('strncpy', 'strncat', 'strlcpy',
+                                                         'snprintf', 'memcpy', 'memmove',
+                                                         'memcpy_s', 'strcpy_s'):
+                    acc.add(Evidence(
+                        label="taint_context_untrusted_source",
+                        polarity="bug",
+                        weight=0.35,
+                        description=(f"The copied data originates from {origin}; a long "
+                                     f"source is what makes a full-capacity copy leave "
+                                     f"the destination unterminated.")
+                    ))
+                else:
+                    acc.add(Evidence(
+                        label="taint_from_untrusted_source",
+                        polarity="bug",
+                        weight=0.80,
+                        description=f"Variable originates from untrusted source: {origin}."
+                    ))
             # For value-semantics checkers the origin is not defect evidence;
             # the concrete value/width decides. Record it as neutral context.
         elif any(src in origin for src in ['literal', 'local', 'bounded', 'safe']):
@@ -398,19 +509,46 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
             description=f"Always-unsafe sink function {sink}() detected."
         ))
     elif sink in ('strncpy', 'strncat', 'snprintf', 'strlcpy', 'strlcat', 'memcpy_s', 'strcpy_s'):
-        acc.add(Evidence(
-            label="bounded_sink_function",
-            polarity="fp",
-            weight=0.85,
-            description=f"Bounded/safe sink function {sink}() detected."
-        ))
+        _bounded_is_fp = True
+        if checker in ('BUFFER_SIZE', 'STRING_NULL') and sink in ('strncpy', 'strncat', 'strlcpy'):
+            # For the null-termination checkers, "the API is bounded" does NOT
+            # answer the flagged question: strncpy(dst, src, sizeof(dst)) is
+            # exactly the pattern that fills the buffer and leaves it
+            # unterminated. Only treat the bounded API as FP evidence when the
+            # code shows a terminator guarantee.
+            code = context.get('code', '') or ''
+            _has_nul_guarantee = (
+                re.search(r'\bmemset\s*\(\s*\w+\s*,\s*0', code)
+                or re.search(r"\[\s*[^\]]+\]\s*=\s*['\"]\\0['\"]", code)
+                or re.search(r'sizeof\s*\([^)]*\)\s*-\s*1', code)
+                or re.search(r'strlen\s*\([^)]*\)\s*\+\s*1', code)
+            )
+            if not _has_nul_guarantee:
+                _bounded_is_fp = False
+        if _bounded_is_fp:
+            acc.add(Evidence(
+                label="bounded_sink_function",
+                polarity="fp",
+                weight=0.85,
+                description=f"Bounded/safe sink function {sink}() detected."
+            ))
     elif sink == 'memcpy':
-        acc.add(Evidence(
-            label="memcpy_sink",
-            polarity="bug",
-            weight=0.60,
-            description="memcpy() requires manual size validation."
-        ))
+        if _memcpy_bounded_by_dest_sizeof(code, context.get('line', 0),
+                                          context.get('code_start_line', 1)):
+            acc.add(Evidence(
+                label="memcpy_size_equals_dest_sizeof",
+                polarity="fp",
+                weight=0.92,
+                description=("The memcpy length argument is sizeof(destination) — the copy "
+                             "is bounded by the destination's own size and cannot overrun it.")
+            ))
+        else:
+            acc.add(Evidence(
+                label="memcpy_sink",
+                polarity="bug",
+                weight=0.60,
+                description="memcpy() requires manual size validation."
+            ))
 
     release_func = context.get('release_func', '')
     alloc_line = context.get('alloc_line', 0)
@@ -491,6 +629,19 @@ def build_evidence(context: Dict, events_parsed: Dict, checker: str = "") -> Evi
             weight=0.95,
             description="Code is inside #if 0 or #ifdef NEVER — intentionally disabled."
         ))
+    else:
+        _disabled_macro = _line_inside_disabled_ifdef(
+            code, context.get('line', 0), context.get('code_start_line', 1))
+        if _disabled_macro:
+            acc.add(Evidence(
+                label="preprocessor_disabled_block",
+                polarity="fp",
+                weight=0.95,
+                description=(f"The flagged line is inside `#ifdef {_disabled_macro}`, and "
+                             f"{_disabled_macro} is not defined anywhere in the extracted "
+                             f"sources with no `#else` fallback — the flagged code is not "
+                             f"compiled in this build.")
+            ))
 
     if code and re.search(r'//\s*fallthrough|/\*\s*fall.?through|FALLTHRU|FALLTHROUGH|\[\[fallthrough\]\]', code, re.I):
         acc.add(Evidence(

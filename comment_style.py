@@ -279,9 +279,11 @@ def _render_buffer_or_string(classification: str, checker: str, ctx: Dict,
             facts.append(f"and `{dest}` is pre-zeroed with memset at line {mline},"
                          " which keeps the buffer null-terminated")
         if facts:
-            head = f"{sink} copies {src} into {dest}"
+            head = f"`{sink}()` at line {line} copies into `{dest or 'the destination'}`"
             if count:
-                head += f" with {count} as the copy limit"
+                head += f" bounded by `{count}`"
+            if src and src != 'the source data':
+                head += f" from `{src}`"
             return f"{head}, {facts[0]}. False positive."
         reason = _fp_reason_text(ctx, sink)
         if reason:
@@ -392,10 +394,12 @@ def _render_integer_overflow(classification: str, checker: str, ctx: Dict, code:
                     f"`{ctx.get('integer_type', 'int')}`, so no overflow occurs on the reported path. "
                     f"False positive.")
         reason = _fp_reason_text(ctx, "")
-        base = f"The arithmetic at line {line} in {function}() is bounded and cannot overflow"
         if reason:
-            return f"{base}: {reason}. False positive."
-        return f"{base} the machine representation on the flagged path. False positive."
+            return f"The arithmetic at line {line} in {function}() cannot overflow: {reason}. False positive."
+        # Without a concrete result or a cited bound there is no code fact to
+        # justify "cannot overflow" — keep the analyzer's own comment instead
+        # of asserting an unsupported claim.
+        return None
     if classification == "Bug":
         if ctx.get('concrete_result') is not None:
             lhs = ctx.get('lhs_expr') or 'lhs'
@@ -416,19 +420,47 @@ def _render_array_vs_singleton(classification: str, checker: str, ctx: Dict, cod
     if not text:
         return None
 
+    m = re.search(r'&?\s*([A-Za-z_]\w*)\s*\[\s*([^\]]+)\s*\]', text)
+    var = _normalize_var(m.group(1), ctx.get('var') or '') if m else _normalize_var(ctx.get('var') or '')
+    idx = _compact(m.group(2)) if m else ''
+    loc = f"line {line} in {function}()" if (line and function) else f"line {line}" if line else ""
+
+    # Resolve a literal index so the comment states facts instead of
+    # hedging ("index 0" must never be described as an overrun risk).
+    idx_const = None
+    if idx:
+        try:
+            idx_const = int(idx, 0)
+        except (TypeError, ValueError):
+            idx_const = None
+
     if classification == "Bug":
-        m = re.search(r'&?\s*([A-Za-z_]\w*)\s*\[\s*([^\]]+)\s*\]', text)
+        if idx_const is not None and idx_const <= 0:
+            # `x[0]` / `&x[0]` cannot walk past a singleton — a bug claim
+            # here would be wrong; let the caller keep its own comment.
+            return None
         if m:
-            base = _normalize_var(m.group(1), ctx.get('var') or 'the singleton')
-            idx = m.group(2).strip()
-            return (f"{base} is a singleton variable, but `{_compact(text)}` accesses it using "
-                    f"array index {idx} without a bounds check. If {idx} > 0, this reads/writes "
-                    "memory past the singleton and can corrupt adjacent data.")
+            if idx_const is not None:
+                return (f"`{_compact(text)}` treats `{var}` as an array, but only one `{var}` "
+                        f"object exists. Index {idx_const} reads/writes {idx_const} object(s) past "
+                        f"the singleton — past-the-end memory that belongs to adjacent variables. "
+                        f"Declare `{var}` as an array of the needed length or index a real array.")
+            return (f"`{_compact(text)}` treats `{var}` as an array, but only one `{var}` object "
+                    f"exists, and the index `{idx}` is not bounded to 0 at this site. Whenever "
+                    f"`{idx}` evaluates to a value > 0 the access reads/writes past the singleton "
+                    "into adjacent memory. Add an explicit bounds check or use a real array.")
         return (f"At line {line}, a singleton variable is accessed with an array index without a "
                 f"bounds check. If the index exceeds 0, memory past the singleton is "
                 "read/written. Add an explicit bounds check or pass a real array.")
     if classification == "False positive":
-        return (f"The singleton at line {line} in {function}() is only accessed with a "
+        if idx_const == 0:
+            return (f"`{_compact(text)}` at {loc} accesses element 0 of `{var}`. "
+                    f"`{var}[0]` designates the object itself, and `&{var}[0]` is the same "
+                    f"address as `&{var}`, so the access stays inside the single object and "
+                    "cannot touch adjacent memory. False positive.")
+        if idx_const is not None and idx_const > 0:
+            return None  # a constant >0 index past a singleton is a real defect claim — no FP text
+        return (f"The singleton `{var or 'object'}` at {loc} is only accessed with a "
                 "single-element contract (index 0), so the access stays within the object. "
                 "False positive.")
     return None
@@ -438,6 +470,23 @@ def _render_negative_returns(classification: str, checker: str, ctx: Dict, code:
                              code_start_line: int, line: int, function: str) -> Optional[str]:
     var = _normalize_var(ctx.get('var') or 'the return value')
     if classification == "False positive":
+        # Prefer the variable a visible `< 0` / `>= 0` guard actually checks —
+        # it is the value whose negativity is in question.
+        gvar = ''
+        for abs_no, text in _code_lines(code, code_start_line):
+            m = re.search(r'\bif\s*\(\s*([A-Za-z_]\w*)\s*<\s*0\s*\)', text)
+            if m:
+                gvar = m.group(1)
+                break
+        if not gvar:
+            m = re.search(r'\bif\s*\(\s*([A-Za-z_]\w*)\s*>=\s*0\s*\)', code)
+            gvar = m.group(1) if m else ''
+        if gvar:
+            gline = _find_line(code, rf'\b{re.escape(gvar)}\s*<\s*0\s*\)|\b{re.escape(gvar)}\s*>=\s*0\s*\)',
+                               code_start_line)
+            return (f"`{gvar}` is checked for a negative/error value at line {gline} before it is used "
+                    f"as a size/index at line {line}, so the flagged path cannot carry a negative "
+                    f"value into the memory operation. False positive.")
         if ctx.get('concrete_value') is not None and ctx['concrete_value'] >= 0:
             return (f"At line {line} in {function}(), `{var}` resolves to {ctx['concrete_value']} before it is used "
                     f"as a size/index, so the flagged path does not carry a negative error value into the memory "
@@ -455,9 +504,10 @@ def _render_negative_returns(classification: str, checker: str, ctx: Dict, code:
                     f"as a size/index. Converting that negative error code to an unsigned quantity yields a very large "
                     f"value and can drive an out-of-bounds access or huge allocation.")
         return (f"At line {line} in {function}(), a signed return value is used as a size or "
-                f"index without first validating it is >= 0. If {var} returns a negative error "
-                "code, it is cast to a large unsigned value, causing a massive allocation or "
-                "memory corruption. Add an explicit `if (result < 0)` check before use.")
+                f"index without first validating it is >= 0. If the call that produced `{var}` "
+                "returns a negative error code (e.g. -1), the value is converted to a large "
+                "unsigned quantity, causing a massive allocation or an out-of-bounds access. "
+                "Add an explicit `if (result < 0)` check before use.")
     return None
 
 
