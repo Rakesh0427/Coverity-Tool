@@ -169,7 +169,7 @@ def create_doc():
         ("11", "Understanding Dispositions — Bug / False positive / Intentional / Needs review", "11"),
         ("12", "Output Files — CSV / JSON / Breakdown (exact columns)", "12"),
         ("13", "Pull Defects from Coverity Connect — Server → Excel", "13"),
-        ("14", "Push Dispositions to Coverity — CSV → Server", "14"),
+        ("14", "Push Dispositions to Coverity — Results → Server", "14"),
         ("15", "Decision Engine — Confidence, CWE/CERT/OWASP", "15"),
         ("16", "Troubleshooting & Performance Notes", "16"),
         ("17", "Security & Privacy", "16"),
@@ -223,7 +223,7 @@ def create_doc():
         ("2. Analyse", "Tree-sitter (once per file, cached) + rule engine per checker", "coverity_dispositions.csv (comment/fix/confidence/CWE)"),
         ("3. Review", "Results page → double-click row", "Events, source function, suggestion"),
         ("4. Decide", "✓ Accept Suggestion or ✎ Override", "coverity_final_decisions.csv"),
-        ("5. Push back", "⬆ Push to Coverity (header)", "Server triage store updated"),
+        ("5. Push back", "⬆ Push these to Coverity (Results toolbar)", "Server triage store updated"),
     ]
     for s,w,r in steps:
         row = table.add_row().cells
@@ -545,7 +545,7 @@ def create_doc():
             for r in p.runs: r.bold=True; r.font.size=Pt(8); r.font.color.rgb=RGBColor(255,255,255)
         shading = OxmlElement('w:shd'); shading.set(qn('w:fill'),'1E3A5F'); hdr[i]._tc.get_or_add_tcPr().append(shading)
     outs = [
-        ("coverity_dispositions.csv", "CID, Checker, Type, Severity, File, Line, Function, Classification, Comment, Fix, Timestamp, Category, CWE-url (added in v7)", "Machine suggestions for every defect; import to Excel; feed to Push dialog"),
+        ("coverity_dispositions.csv", "CID, Checker, Type, Severity, File, Line, Function, Classification, Comment, Fix, Timestamp, Category, CWE-url (added in v7)", "Machine suggestions for every defect; import to Excel"),
         ("audit.jsonl", "One JSON per line: {cid, checker, events, reasoning[], confidence, context_hash, code_start_line} — full evidence", "Audit trail, debugging, re-triage"),
         ("coverity_final_decisions.csv", "CID, Checker, File, Line, FinalClassification, FinalComment, Fix, Reviewer, Timestamp, Status (Accepted/Overridden), Category", "Engineer-approved; this is what Push pushes; deduped by CID"),
         ("needs_review_breakdown.txt", "Classification counts: Bug:12, ...\\nNeeds review rows: 8\\n  by reason: no_code:3, line_various:2...\\n  by checker: OVERUN:4...\\n  by category: Buffer overflow:5...", "Quick why-Needs-review summary without re-running"),
@@ -608,25 +608,25 @@ def create_doc():
     run.font.size = Pt(7.5); run.italic = True
 
     # --- 14 Push ---
-    p = doc.add_heading("14. Push Dispositions to Coverity — CSV → Server", level=1)
+    p = doc.add_heading("14. Push Dispositions to Coverity — Results → Server", level=1)
     p.runs[0].font.color.rgb = C_HDR
-    doc.add_paragraph("Push writes your Accepted/Overridden decisions back to the Coverity triage store (Classification + Comment). It is available from the header ⬆ Push to Coverity at any time — you don't need to re-run analysis.").runs[0].font.size = Pt(9)
+    doc.add_paragraph("Push writes your decisions back to the Coverity triage store (Classification + Comment). Click ⬆ Push these to Coverity in the Results toolbar after analysis — it pushes the defects currently in the table straight from memory, with no CSV export/re-import round trip.").runs[0].font.size = Pt(9)
     add_image_with_highlights(os.path.join(IMAGES_DIR, "gui-push.png"),
-        "Figure 6 — Push Dialog (3 Steps). Validates CIDs exist in target project.",
+        "Figure 6 — Push Dialog. Validates CIDs exist in the target project before pushing.",
         [
-            ("1", "Step 1 — Server Connection", "Same Host/Port/User/Pass + Allow self-signed toggle → Test Connection → Connected (X projects found)"),
-            ("2", "Step 2 — Project & Stream + Triage Store", "Project dropdown → Stream dropdown → Triage Store (auto-filled as <project>-TS, editable; usually matches project name, not Default)"),
-            ("3", "Step 3 — Load CSV & Review", "Browse… → pick coverity_dispositions.csv or coverity_final_decisions.csv (CID + Classification required) → table shows CID | ServerCID | Classification | Comment (trunc) | Checker | File — double-click row to edit Classification/Comment before pushing"),
-            ("4", "Validate CIDs against Server", "🔍 Validate fetches all defects for the project and matches CSV CIDs by CID or (checker, basename). Green = matched, Red = NOT FOUND (removed — belongs to other project). Auto-validates after load."),
-            ("5", "⬆ Push to Coverity", "Pushes in batches of 100 CIDs via updateTriageForCIDsInTriageStore → shows Succeeded/Failed + first error + tip: Try triage store = '<project>'"),
+            ("1", "Step 1 — Server Connection", "Host/Port/User/Pass → 🔌 Connect → Connected (X projects found)"),
+            ("2", "Step 2 — Project & Triage Store", "Project dropdown → Triage Store (auto-filled to the project's store, editable; usually matches the project name, not Default)"),
+            ("3", "Step 3 — Which Defects to Push", "Choose: Accepted/overridden only (default) | Everything except 'Needs review' | All analysed defects. Table shows CID | ServerCID | Classification | Action | Comment | Checker | File — double-click a row to edit Classification/Action/Comment."),
+            ("4", "Validate CIDs against Server", "🔍 Validate fetches all defects for the project and matches by CID, or remaps stale CIDs by (checker, basename). Green = matched, Red = NOT FOUND (skipped). Validation is required before pushing."),
+            ("5", "⬆ Push to Coverity", "Batched updateTriageForCIDsInTriageStore calls → shows Succeeded/Failed + first error + tip: Try triage store = '<project>'. Tick Dry run first to preview without writing."),
         ])
     steps = [
-        "1. Header → ⬆ Push to Coverity → fill Host/Port/User/Pass → check Allow self-signed if needed → Test Connection",
-        "2. Pick Project → Stream → verify Triage Store (if push fails, try store = project name, not Default; use ... button to list DefectService SOAP methods for debugging)",
-        "3. Step 3 → Browse… → pick your CSV (the tool accepts both dispositions.csv and final_decisions.csv layouts, dedupes by CID keeping last)",
-        "4. Wait for auto-validate (or click 🔍 Validate) → green rows = ready to push, red rows auto-removed",
-        "5. Double-click any row to edit Classification/Comment if needed → then ⬆ Push to Coverity → watch Pushing 1/12… → Push Complete: Succeeded: 12, Failed: 0",
-        "6. If Failed >0 and error is Triage Store, change store and retry; if CID NOT FOUND, you picked wrong project",
+        "1. On the Results page → ⬆ Push these to Coverity → fill Host/Port/User/Pass → 🔌 Connect",
+        "2. Pick Project → verify Triage Store (if push fails, try store = project name, not Default)",
+        "3. Choose which defects to push (default = Accepted/overridden only; safest) — the count label updates live",
+        "4. Click 🔍 Validate CIDs against Server → green rows = ready, red rows = skipped",
+        "5. Double-click any row to edit Classification/Action/Comment if needed; optionally tick Dry run → then ⬆ Push to Coverity",
+        "6. Results table rows turn green (pushed) or red (failed); if Failed >0 with a Triage Store error, change the store and retry",
     ]
     for s in steps:
         doc.add_paragraph(s, style='List Number').runs[0].font.size = Pt(8)
@@ -677,7 +677,7 @@ def create_doc():
         ("Tree-sitter fails to parse my C++ code", "Use C++ (.cpp/.c) language option. For mixed projects run twice."),
         ("Pull fails with SOAP Fault", "Copy log's [shape,pageSize=] line. Missing element sortAscending is now handled (all pageSpec shapes include sortAscending with exact casing)."),
         ("Pull REST 0 defects but SOAP has defects", "REST base discovery probed ports/roots concurrently (8 workers, 3s). If REST unavailable, it falls back to SOAP and overlays REST lines if Pull dialog's Fix current lines is checked."),
-        ("Push: 0 Succeeded, Failed: N, First error: Triage Store", "Try store = project name (e.g., MyProject-TS), not Default. Use ... to list getTriageStores()."),
+        ("Push: 0 Succeeded, Failed: N, First error: Triage Store", "Try store = project name (e.g., MyProject-TS), not Default. The Triage Store dropdown lists getTriageStores() after Connect."),
         ("Needs review for everything", "Intended for checkers with no rule yet or line Various. Add rule in heuristic_analyzer.py dispatch or provide concrete line."),
         ("Analysis completed very quickly (<50ms/defect)", "Source files not loading. Check Source Root path; watch log for [Source] Loading: lines."),
     ]
@@ -756,7 +756,7 @@ def create_doc():
         "1. Point Coverity Report at index.html folder (or ⬇ Pull from Coverity)\n"
         "2. Set Source Code Root to your C/C++ sources (repo root)\n"
         "3. ▶ Start Disposition → wait → double-click and Accept / Override each finding\n"
-        "4. ⬆ Push to Coverity to write decisions back, or Export to Excel\n"
+        "4. On Results → ⬆ Push these to Coverity to write decisions back, or Export to Excel\n"
         "* Source code never leaves your machine *"
     )
     run.font.name = 'Consolas'; run.font.size = Pt(7.5)

@@ -307,12 +307,6 @@ class App(tk.Tk):
         self._breadcrumb = tk.Label(hdr, text="Setup", font=("Segoe UI", 10),
                                     bg=C_HDR_BG, fg="#93C5FD")
         self._breadcrumb.pack(side="right", padx=20)
-        tk.Button(hdr, text="⬆  Push to Coverity",
-                  command=lambda: PushDialog(self, self),
-                  bg="#1D4ED8", fg="#FFFFFF", relief="flat",
-                  font=("Segoe UI", 9, "bold"), padx=10, pady=5,
-                  cursor="hand2", activebackground="#1E40AF"
-                  ).pack(side="right", padx=(0, 6), pady=10)
 
     def _notify(self, message, kind="info"):
         """Show a transient toast-style notification in the top-right corner.
@@ -1548,37 +1542,49 @@ class ResultsPage(Page):
                               bg=C_BORDER, sashwidth=4, relief="flat")
         pane.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        # ---- COLUMN 1: Minimal tree (ID + Class) ----
-        left = tk.Frame(pane, bg=C_BG, width=200)
+        # ---- COLUMN 1: Findings cards (grouped by checker category) ----
+        # A scrollable list of comfortable two-line cards: line 1 shows the
+        # CID + checker (and a push ✓/✗), line 2 a verdict pill + confidence
+        # bar. Implemented as a Canvas + inner Frame because a Treeview cannot
+        # render multi-line card content.
+        left = tk.Frame(pane, bg=C_BG, width=252)
         left.pack_propagate(False)
-        pane.add(left, minsize=160, width=200)
+        pane.add(left, minsize=214, width=252)
 
-        self._tree = ttk.Treeview(left, columns=("ID", "Class"), show="headings",
-                                   selectmode="browse")
-        self._tree.column("ID",    width=45,  anchor="center", stretch=False)
-        self._tree.column("Class", width=150, anchor="w",      stretch=True)
-        self._tree.heading("ID",    text="ID",    anchor="w")
-        self._tree.heading("Class", text="Class", anchor="w")
+        cap = tk.Frame(left, bg=C_HDR_BG, height=24)
+        cap.pack(fill="x")
+        cap.pack_propagate(False)
+        tk.Label(cap, text="Findings", font=("Segoe UI", 9, "bold"),
+                 bg=C_HDR_BG, fg=C_HDR_TEXT).pack(side="left", padx=10)
+        self._find_count_lbl = tk.Label(cap, text="", font=("Segoe UI", 9, "bold"),
+                                        bg=C_HDR_BG, fg="#93C5FD")
+        self._find_count_lbl.pack(side="right", padx=10)
 
-        vsb = ttk.Scrollbar(left, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=vsb.set)
-        self._tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        left.rowconfigure(0, weight=1)
-        left.columnconfigure(0, weight=1)
+        list_f = tk.Frame(left, bg=C_BG)
+        list_f.pack(fill="both", expand=True)
+        self._find_canvas = tk.Canvas(list_f, bg=C_BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(list_f, orient="vertical",
+                            command=self._find_canvas.yview)
+        self._find_canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._find_canvas.pack(side="left", fill="both", expand=True)
+        self._find_inner = tk.Frame(self._find_canvas, bg=C_BG)
+        self._find_win = self._find_canvas.create_window(
+            (0, 0), window=self._find_inner, anchor="nw")
+        self._find_canvas.bind("<Configure>", self._on_find_canvas_config)
+        self._find_inner.bind(
+            "<Configure>",
+            lambda e: self._find_canvas.configure(
+                scrollregion=self._find_canvas.bbox("all")))
+        # Mouse-wheel scrolling (Windows/macOS use <MouseWheel>; Linux uses
+        # Button-4/Button-5). Bound application-wide only while hovering the
+        # list so other panels keep their normal behaviour.
+        self._find_canvas.bind("<Enter>", lambda e: self._bind_find_wheel(True))
+        self._find_canvas.bind("<Leave>", lambda e: self._bind_find_wheel(False))
 
-        self._tree.bind("<<TreeviewSelect>>", self._on_select)
-        self._tree.bind("<Double-1>", self._on_double_click)
-
-        for cls, col in CLASS_COLOR.items():
-            self._tree.tag_configure(cls, foreground=col)
-        self._tree.tag_configure("pushed",    foreground="#16A34A")
-        self._tree.tag_configure("push_fail", foreground="#DC2626")
-        self._tree.tag_configure("conf_high", foreground="#16A34A")
-        self._tree.tag_configure("conf_med",  foreground="#D97706")
-        self._tree.tag_configure("conf_low",  foreground="#DC2626")
-        self._tree.tag_configure("cat_header", font=("Segoe UI", 9, "bold"),
-                                 foreground=C_ACCENT, background="#EAF1FB")
+        self._card_by_cid = {}
+        self._collapsed = set()
+        self._selected_card = None
 
         # ---- COLUMN 2: Info panel ----
         mid = tk.Frame(pane, bg=C_PANEL, width=420)
@@ -1692,154 +1698,167 @@ class ResultsPage(Page):
         self._active_cat = "All"
         self._filter_var.set("All")
         self._cat_var.set("All")
+        # Fresh analysis: start with every category expanded and no selection.
+        self._collapsed = set()
+        self._selected_card = None
+        self._sel_idx = None
         categories = [cat for cat, _items in group_results_by_category(self._all_results).items()]
         self._cat_combo.configure(values=["All"] + categories)
         self._populate(self._all_results)
         self._update_summary(self._all_results)
 
+    def _on_find_canvas_config(self, event):
+        """Keep the inner card frame exactly as wide as the canvas."""
+        self._find_canvas.itemconfig(self._find_win, width=event.width)
+
+    def _bind_find_wheel(self, on):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            if on:
+                self._find_canvas.bind_all(seq, self._on_find_wheel)
+            else:
+                self._find_canvas.unbind_all(seq)
+
+    def _on_find_wheel(self, event):
+        if getattr(event, "num", None) == 4:
+            self._find_canvas.yview_scroll(-3, "units")
+        elif getattr(event, "num", None) == 5:
+            self._find_canvas.yview_scroll(3, "units")
+        else:
+            self._find_canvas.yview_scroll(
+                int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    # Verdict pill colours: (pill background, text)
+    _PILL_STYLE = {
+        "Bug":            ("#FEE2E2", "#B91C1C", "Bug"),
+        "False positive": ("#DCFCE7", "#15803D", "False positive"),
+        "Intentional":    ("#FEF3C7", "#B45309", "Intentional"),
+        "Needs review":   ("#CFFAFE", "#0E7490", "Review"),
+        "Accepted":       ("#D1FAE5", "#047857", "Accepted"),
+    }
+
     def _populate(self, results):
-        self._tree.delete(*self._tree.get_children())
+        for w in self._find_inner.winfo_children():
+            w.destroy()
+        self._card_by_cid = {}
+
+        self._find_count_lbl.configure(text=f"{len(results)}")
+
+        if not results:
+            tk.Label(self._find_inner, text="No findings",
+                     font=("Segoe UI", 10), bg=C_BG, fg=C_SUBTEXT,
+                     pady=24).pack()
+            return
+
         groups = group_results_by_category(results)
         for cat, items in groups.items():
-            parent = self._tree.insert("", "end", iid=f"cat-{_iid_safe(cat)}",
-                                       values=("", f"{cat} ({len(items)})"),
-                                       tags=("cat_header",))
+            key = _iid_safe(cat)
+            open_ = key not in self._collapsed
+            arrow = "\u25BE" if open_ else "\u25B8"
+            hdr = tk.Label(self._find_inner,
+                           text=f"{arrow} {cat}",
+                           anchor="w", justify="left",
+                           font=("Segoe UI", 9, "bold"), bg="#EAF1FB",
+                           fg=C_ACCENT, padx=8, pady=4, cursor="hand2")
+            hdr.pack(fill="x", padx=6, pady=(6, 0))
+            hdr.bind("<Button-1>", lambda e, k=key: self._toggle_category(k))
+
+            body = tk.Frame(self._find_inner, bg=C_BG)
+            body.pack(fill="x", padx=6)
+            if not open_:
+                body.pack_forget()
             for r in items:
-                if r.get("accepted", False):
-                    cls = "Accepted"
-                else:
-                    cls = r.get("classification", "Needs review")
-                push_status = r.get("push_status", "")
-                push_tag = "pushed" if push_status == "✓" else ("push_fail" if push_status == "✗" else cls)
-                conf = r.get("confidence", 0.0)
-                # Color tag based on confidence level
-                if conf >= 0.8:
-                    conf_tag = "conf_high"
-                elif conf >= 0.6:
-                    conf_tag = "conf_med"
-                else:
-                    conf_tag = "conf_low"
-                self._tree.insert(parent, "end", tags=(push_tag, conf_tag), values=(
-                    r["cid"],
-                    cls,
-                ))
+                self._make_card(body, r)
 
-    def _update_summary(self, results):
-        for w in self._summary_f.winfo_children():
-            w.destroy()
-        from collections import Counter
-        counts = Counter()
-        for r in results:
-            if r.get("accepted", False):
-                counts["Accepted"] += 1
-            else:
-                counts[r.get("classification", "Needs review")] += 1
-        total = len(results)
-        tk.Label(self._summary_f, text=f"Total: {total}",
-                 font=("Segoe UI", 10, "bold"), bg=C_BG, fg=C_TEXT).pack(
-            side="left", padx=(0, 16))
-        for cls, count in counts.most_common():
-            col = CLASS_COLOR.get(cls, C_SUBTEXT)
-            chip = tk.Frame(self._summary_f, bg=col, padx=8, pady=3)
-            chip.pack(side="left", padx=4)
-            tk.Label(chip, text=f"{cls}  {count}",
-                     font=("Segoe UI", 9, "bold"),
-                     bg=col, fg="#11111B").pack()
+    def _make_card(self, parent, r):
+        if r.get("accepted", False):
+            cls = "Accepted"
+        else:
+            cls = r.get("classification", "Needs review")
+        push_status = r.get("push_status", "")
+        if push_status == "\u2713":
+            card_bg, edge = "#F0FDF4", "#BBF7D0"
+        elif push_status == "\u2717":
+            card_bg, edge = "#FEF2F2", "#FECACA"
+        else:
+            card_bg, edge = C_PANEL, C_BORDER
 
-        # Phase 0 instrumentation: show why remaining Needs-review rows stayed there.
-        need_reasons = Counter(
-            r.get("needs_review_reason") or "other" for r in results
-            if r.get("classification") == "Needs review")
-        if need_reasons:
-            reason_str = "Review due to: " + ", ".join(
-                f"{k}:{v}" for k, v in need_reasons.most_common())
-            tk.Label(self._summary_f, text=f"  {reason_str}",
-                     font=("Segoe UI", 8), bg=C_BG, fg="#94A3B8").pack(
-                side="left", padx=(8, 0))
+        card = tk.Frame(parent, bg=card_bg, highlightthickness=1,
+                        highlightbackground=edge, highlightcolor=edge, bd=0)
+        card.pack(fill="x", pady=3, padx=2)
 
-    def _filter(self, label):
-        self._active_cls = label
-        self._apply_filters()
+        # --- line 1: CID + checker (and a small push marker) ---
+        l1 = tk.Frame(card, bg=card_bg)
+        l1.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(l1, text=str(r["cid"]), font=("Consolas", 9),
+                 bg=card_bg, fg=C_SUBTEXT).pack(side="left")
+        checker = r.get("checker", "") or ""
+        if len(checker) > 18:
+            checker = checker[:18] + "\u2026"
+        tk.Label(l1, text=checker, font=("Segoe UI", 9, "bold"),
+                 bg=card_bg, fg=C_TEXT).pack(side="left", padx=(6, 0))
+        if push_status in ("\u2713", "\u2717"):
+            mark = "\u2713" if push_status == "\u2713" else "\u2717"
+            col = C_FP if push_status == "\u2713" else C_BUG
+            tk.Label(l1, text=mark, font=("Segoe UI", 11, "bold"),
+                     bg=card_bg, fg=col).pack(side="right")
 
-    def _filter_cat(self, category):
-        self._active_cat = category
-        self._apply_filters()
+        # --- line 2: verdict pill + confidence bar ---
+        l2 = tk.Frame(card, bg=card_bg)
+        l2.pack(fill="x", padx=8, pady=(3, 7))
+        pbg, pfg, ptext = self._PILL_STYLE.get(
+            cls, ("#E2E8F0", C_TEXT, cls))
+        pill = tk.Label(l2, text=ptext, font=("Segoe UI", 8, "bold"),
+                        bg=pbg, fg=pfg, padx=7, pady=1)
+        pill.pack(side="left")
 
-    def _apply_filters(self, _event=None):
-        # Clear previous selection and panels
-        self._tree.selection_remove(*self._tree.selection())
-        self._sel_idx = None
-        self._detail_id.configure(state="normal")
-        self._detail_id.delete(1.0, tk.END)
-        self._detail_id.insert(tk.END, "Select a defect")
-        self._detail_id.configure(state="disabled")
-        self._detail_meta.configure(state="normal")
-        self._detail_meta.delete(1.0, tk.END)
-        self._detail_meta.configure(state="disabled")
-        self._detail_class.configure(state="normal")
-        self._detail_class.delete(1.0, tk.END)
-        self._detail_class.configure(state="disabled")
-        self._detail_comment.configure(state="normal")
-        self._detail_comment.delete(1.0, tk.END)
-        self._detail_comment.configure(state="disabled")
-        self._fix_label.pack_forget()
-        self._fix_box.pack_forget()
-        self._accept_btn.configure(text="✔  Accept", bg="#16A34A", command=self._accept)
-        self._code_box.configure(state="normal")
-        self._code_box.delete("1.0", "end")
-        self._code_box.configure(state="disabled")
-        self._code_fname_lbl.configure(text="")
+        try:
+            conf = int(float(r.get("confidence", 0.0)) * 100)
+        except Exception:
+            conf = 0
+        bar_bg = tk.Frame(l2, bg="#E2E8F0", width=74, height=6)
+        bar_bg.pack(side="left", padx=(8, 6), pady=5)
+        bar_bg.pack_propagate(False)
+        conf_col = C_FP if conf >= 80 else (C_INTENT if conf >= 60 else C_BUG)
+        fill_w = max(1, int(74 * max(0, min(conf, 100)) / 100))
+        bar_fg = tk.Frame(bar_bg, bg=conf_col, width=fill_w, height=6)
+        bar_fg.place(x=0, y=0)
+        tk.Label(l2, text=f"{conf}%", font=("Segoe UI", 8, "bold"),
+                 bg=card_bg, fg=conf_col).pack(side="left")
 
-        results = self._all_results
-        if self._active_cls == "Accepted":
-            results = [r for r in results if r.get("accepted", False)]
-        elif self._active_cls != "All":
-            results = [r for r in results
-                       if not r.get("accepted", False)
-                       and r.get("classification") == self._active_cls]
-        if self._active_cat != "All":
-            results = [r for r in results
-                       if category_for_checker(r.get("checker", "")) == self._active_cat]
-        self._populate(results)
+        self._card_by_cid[r["cid"]] = card
 
-    def _sort(self, col):
-        data = [(self._tree.set(k, col), k)
-                for k in self._tree.get_children("")]
-        data.sort()
-        for idx, (_, k) in enumerate(data):
-            self._tree.move(k, "", idx)
+        def _bind(widget):
+            widget.bind("<Button-1>",
+                        lambda e, c=card, d=r: self._select_card(c, d))
+            widget.bind("<Double-Button-1>",
+                        lambda e, d=r: self._open_detail_window(d))
 
-    def _select_by_id(self, cid):
-        def _walk(parent=""):
-            for child in self._tree.get_children(parent):
-                vals = self._tree.item(child)["values"]
-                if vals and vals[0] == cid:
-                    return child
-                found = _walk(child)
-                if found:
-                    return found
-            return None
-        item = _walk()
-        if item:
-            self._tree.selection_set(item)
-            self._tree.see(item)
-            self._on_select()
+        _bind(card); _bind(l1); _bind(l2); _bind(bar_bg); _bind(bar_fg)
+        for w in list(l1.winfo_children()) + list(l2.winfo_children()):
+            _bind(w)
 
-    def _on_select(self, _event=None):
-        sel = self._tree.selection()
-        if not sel:
-            return
-        child = sel[0]
-        # Category header row — expand/collapse it rather than treat as a defect.
-        if self._tree.parent(child) == "":
-            self._toggle_category(child)
-            return
-        shown_cid = self._tree.item(child)["values"][0]
-        defect = next((r for r in self._all_results if r["cid"] == shown_cid), None)
-        if not defect:
-            return
+    def _select_card(self, card, defect):
+        self._highlight_card(card)
         self._sel_idx = defect
+        self._show_defect(defect)
 
+    def _highlight_card(self, card):
+        # Restore the previously selected card's normal look, then accent the new.
+        if self._selected_card is not None:
+            try:
+                old = self._selected_card
+                old.configure(highlightthickness=1,
+                              highlightbackground=C_BORDER, highlightcolor=C_BORDER)
+            except tk.TclError:
+                pass
+        self._selected_card = card
+        if card is not None:
+            card.configure(highlightthickness=2,
+                           highlightbackground=C_ACCENT, highlightcolor=C_ACCENT)
+
+    def _show_defect(self, defect):
+        """Populate the middle detail panel + code viewer for a defect."""
         is_accepted = defect.get("accepted", False)
         if is_accepted:
             cls = "Accepted"
@@ -1893,25 +1912,151 @@ class ResultsPage(Page):
             self._fix_label.pack_forget()
             self._fix_box.pack_forget()
 
-        # -- Populate source code viewer --
         self._populate_code_viewer(defect)
 
         if is_accepted:
             self._accept_btn.configure(
-                text="\u2714  Accepted",
-                bg=C_ACCEPTED,
-                fg="#FFFFFF",
-                activebackground=C_ACCEPTED,
-                command=self._show_already_accepted
-            )
+                text="\u2714  Accepted", bg=C_ACCEPTED, fg="#FFFFFF",
+                activebackground=C_ACCEPTED, command=self._show_already_accepted)
         else:
             self._accept_btn.configure(
-                text="\u2714  Accept",
-                bg="#16A34A",
-                fg="#FFFFFF",
-                activebackground="#16A34A",
-                command=self._accept
-            )
+                text="\u2714  Accept", bg="#16A34A", fg="#FFFFFF",
+                activebackground="#16A34A", command=self._accept)
+
+    def _clear_detail(self):
+        """Empty the middle panel and code viewer (used after a filter change)."""
+        self._detail_id.configure(state="normal")
+        self._detail_id.delete(1.0, tk.END)
+        self._detail_id.insert(tk.END, "Select a defect")
+        self._detail_id.configure(state="disabled")
+        for w in (self._detail_meta, self._detail_class, self._detail_comment):
+            w.configure(state="normal")
+            w.delete(1.0, tk.END)
+            w.configure(state="disabled")
+        self._fix_label.pack_forget()
+        self._fix_box.pack_forget()
+        self._accept_btn.configure(text="✔  Accept", bg="#16A34A", command=self._accept)
+        self._code_box.configure(state="normal")
+        self._code_box.delete("1.0", "end")
+        self._code_box.configure(state="disabled")
+        self._code_fname_lbl.configure(text="")
+
+    def _update_summary(self, results):
+        for w in self._summary_f.winfo_children():
+            w.destroy()
+        from collections import Counter
+        counts = Counter()
+        for r in results:
+            if r.get("accepted", False):
+                counts["Accepted"] += 1
+            else:
+                counts[r.get("classification", "Needs review")] += 1
+        total = len(results)
+        tk.Label(self._summary_f, text=f"Total: {total}",
+                 font=("Segoe UI", 10, "bold"), bg=C_BG, fg=C_TEXT).pack(
+            side="left", padx=(0, 16))
+        for cls, count in counts.most_common():
+            col = CLASS_COLOR.get(cls, C_SUBTEXT)
+            chip = tk.Frame(self._summary_f, bg=col, padx=8, pady=3)
+            chip.pack(side="left", padx=4)
+            tk.Label(chip, text=f"{cls}  {count}",
+                     font=("Segoe UI", 9, "bold"),
+                     bg=col, fg="#11111B").pack()
+
+        # Phase 0 instrumentation: show why remaining Needs-review rows stayed there.
+        need_reasons = Counter(
+            r.get("needs_review_reason") or "other" for r in results
+            if r.get("classification") == "Needs review")
+        if need_reasons:
+            reason_str = "Review due to: " + ", ".join(
+                f"{k}:{v}" for k, v in need_reasons.most_common())
+            tk.Label(self._summary_f, text=f"  {reason_str}",
+                     font=("Segoe UI", 8), bg=C_BG, fg="#94A3B8").pack(
+                side="left", padx=(8, 0))
+
+    def _filter(self, label):
+        self._active_cls = label
+        self._apply_filters()
+
+    def _filter_cat(self, category):
+        self._active_cat = category
+        self._apply_filters()
+
+    def _apply_filters(self, _event=None):
+        # Clear previous selection and panels
+        self._highlight_card(None)
+        self._sel_idx = None
+        self._clear_detail()
+
+        results = self._all_results
+        if self._active_cls == "Accepted":
+            results = [r for r in results if r.get("accepted", False)]
+        elif self._active_cls != "All":
+            results = [r for r in results
+                       if not r.get("accepted", False)
+                       and r.get("classification") == self._active_cls]
+        if self._active_cat != "All":
+            results = [r for r in results
+                       if category_for_checker(r.get("checker", "")) == self._active_cat]
+        self._populate(results)
+
+    def _toggle_category(self, key):
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+        else:
+            self._collapsed.add(key)
+        # Re-render the list, then scroll back to the top of that category.
+        self._highlight_card(None)
+        self._sel_idx = None
+        results = self._filtered_results()
+        self._populate(results)
+
+    def _filtered_results(self):
+        results = self._all_results
+        if self._active_cls == "Accepted":
+            results = [r for r in results if r.get("accepted", False)]
+        elif self._active_cls != "All":
+            results = [r for r in results
+                       if not r.get("accepted", False)
+                       and r.get("classification") == self._active_cls]
+        if self._active_cat != "All":
+            results = [r for r in results
+                       if category_for_checker(r.get("checker", "")) == self._active_cat]
+        return results
+
+    def _select_by_id(self, cid):
+        card = self._card_by_cid.get(cid)
+        defect = next((r for r in self._all_results
+                       if self._cid_match(r["cid"], cid)), None)
+        if card is None:
+            # The card is hidden by a collapsed category or a filter — expand
+            # the relevant category and re-render so the card exists.
+            if defect is not None:
+                cat = category_for_checker(defect.get("checker", ""))
+                self._collapsed.discard(_iid_safe(cat))
+                self._populate(self._filtered_results())
+                card = self._card_by_cid.get(cid)
+        if card is None or defect is None:
+            return
+        self._highlight_card(card)
+        self._sel_idx = defect
+        self._show_defect(defect)
+        # Bring the card into view inside the scroll area.
+        try:
+            card.update_idletasks()
+            self._find_canvas.update_idletasks()
+            y = card.winfo_rooty() - self._find_canvas.winfo_rooty()
+            self._find_canvas.yview_scroll(int(y / 18), "units")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _cid_match(a, b):
+        """Compare two CIDs robustly (cell strings vs stored ints)."""
+        try:
+            return int(str(a).strip()) == int(str(b).strip())
+        except Exception:
+            return str(a).strip() == str(b).strip()
 
     def _populate_code_viewer(self, defect):
         """Load source code into the right-side code viewer."""
@@ -1993,29 +2138,6 @@ class ResultsPage(Page):
         src_root = self.app._frames[SetupPage]._src_root_var.get().strip()
         DetailWindow(self, d, self.app, src_root=src_root)
 
-    def _on_double_click(self, _event=None):
-        sel = self._tree.selection()
-        if not sel:
-            return
-        item = sel[0]
-        # Category header row — toggle expand/collapse instead of opening a defect.
-        if self._tree.parent(item) == "":
-            self._toggle_category(item)
-            return
-        shown_cid = self._tree.item(item)["values"][0]
-        defect = next((r for r in self._all_results if r["cid"] == shown_cid), None)
-        if defect:
-            self._open_detail_window(defect)
-
-    def _toggle_category(self, item):
-        try:
-            open_state = bool(self._tree.item(item, "open"))
-        except tk.TclError:
-            return
-        self._tree.item(item, open=(not open_state))
-        self._tree.selection_remove(*self._tree.selection())
-        self._sel_idx = None
-
     def _accept(self):
         if not self._sel_idx:
             return
@@ -2048,12 +2170,7 @@ class ResultsPage(Page):
         self._filter(self._filter_var.get())
         self._update_summary(self._all_results)
 
-        for child in self._tree.get_children():
-            if self._tree.item(child)["values"][0] == saved_cid:
-                self._tree.selection_set(child)
-                self._tree.see(child)
-                break
-        self._on_select()
+        self._select_by_id(saved_cid)
         messagebox.showinfo("Saved", "Decision accepted and recorded.\nStatus updated to 'Accepted'.")
 
     def _open_direct_push(self):
@@ -2519,12 +2636,7 @@ class DetailWindow(tk.Toplevel):
         saved_cid = self.defect["cid"]
         rp._filter(rp._filter_var.get())
         rp._update_summary(rp._all_results)
-        for child in rp._tree.get_children():
-            if rp._tree.item(child)["values"][0] == saved_cid:
-                rp._tree.selection_set(child)
-                rp._tree.see(child)
-                break
-        rp._on_select()
+        rp._select_by_id(saved_cid)
 
         messagebox.showinfo("Saved", "Decision accepted.\nStatus updated to 'Accepted'.", parent=self)
         self.destroy()
@@ -3092,742 +3204,6 @@ class PullDialog(tk.Toplevel):
             self._close_btn.configure(state="normal")
         self._log_insert("ok",
             "\nPull complete — review the log above, then click Close.\n")
-# ---------------------------------------------------------------------------
-# Stand-alone Push Dialog — accessible from the main header at any time
-# ---------------------------------------------------------------------------
-class PushDialog(tk.Toplevel):
-    """
-    Three-step dialog: Connect → Select Project → Load CSV → Push.
-    Can be opened without running a fresh analysis (uses any existing CSV).
-    """
-    def __init__(self, parent, app):
-        super().__init__(parent)
-        self.app          = app
-        self._client      = None
-        self._projects    = []       # list of {name, triage_store}
-        self._streams     = []
-        self._csv_rows    = []       # parsed rows from chosen CSV
-
-        self.title("Push Dispositions to Coverity Connect")
-        self.geometry("860x820")
-        self.minsize(700, 660)
-        self.configure(bg=C_BG)
-        self.grab_set()
-        self.resizable(True, True)
-
-        # StringVars — pre-fill from Results page settings if available.
-        # Host/Port come pre-filled with the corporate server details and can
-        # be overwritten by the user.
-        rp = app._frames.get(ResultsPage)
-        self._sv_host    = tk.StringVar(value="coverity-er.honaero.com")
-        self._sv_port    = tk.StringVar(value="443")
-        self._sv_user    = tk.StringVar(value=rp._sv_user.get()    if rp else "")
-        self._sv_pass    = tk.StringVar(value=rp._sv_pass.get()    if rp else "")
-        self._sv_project = tk.StringVar()
-        self._sv_stream  = tk.StringVar()
-        self._sv_store   = tk.StringVar(value=rp._sv_store.get()   if rp else "Default")
-        self._sv_csv     = tk.StringVar()
-
-        self._build()
-
-    # ------------------------------------------------------------------ build
-    def _build(self):
-        canvas = tk.Canvas(self, bg=C_BG, highlightthickness=0)
-        scroll = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        body = tk.Frame(canvas, bg=C_BG)
-        win_id = canvas.create_window((0, 0), window=body, anchor="nw")
-
-        def _on_resize(e):
-            canvas.itemconfig(win_id, width=e.width)
-        canvas.bind("<Configure>", _on_resize)
-        body.bind("<Configure>", lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")))
-
-        # ── Title ──────────────────────────────────────────────────────
-        tk.Label(body, text="⬆  Push Dispositions to Coverity Connect",
-                 font=("Segoe UI", 13, "bold"), bg=C_BG, fg=C_ACCENT
-                 ).pack(anchor="w", padx=20, pady=(16, 4))
-        tk.Label(body,
-                 text="Connect to the server, select your project, load the dispositions\n"
-                      "CSV, then push — no need to re-run the analysis.",
-                 font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT, justify="left"
-                 ).pack(anchor="w", padx=20, pady=(0, 12))
-
-        # ── Step 1 — Server ────────────────────────────────────────────
-        self._section(body, "Step 1 — Server Connection")
-        s1 = self._card(body)
-
-        def _row(parent, label, var, width=22, show="", hint=""):
-            f = tk.Frame(parent, bg=C_PANEL)
-            f.pack(fill="x", padx=10, pady=3)
-            tk.Label(f, text=label, width=10, anchor="w",
-                     font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                     ).pack(side="left")
-            e = tk.Entry(f, textvariable=var, width=width, show=show,
-                         bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT,
-                         relief="flat", font=("Segoe UI", 9),
-                         highlightbackground=C_BORDER, highlightthickness=1)
-            e.pack(side="left", ipady=4, padx=(0, 6))
-            if hint:
-                tk.Label(f, text=hint, font=("Segoe UI", 8), bg=C_PANEL,
-                         fg="#94A3B8").pack(side="left")
-            return e
-
-        hf = tk.Frame(s1, bg=C_PANEL)
-        hf.pack(fill="x", padx=10, pady=3)
-        tk.Label(hf, text="Host", width=10, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                 ).pack(side="left")
-        tk.Entry(hf, textvariable=self._sv_host, width=28,
-                 bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT,
-                 relief="flat", font=("Segoe UI", 9),
-                 highlightbackground=C_BORDER, highlightthickness=1
-                 ).pack(side="left", ipady=4, padx=(0, 6))
-
-        pf = tk.Frame(s1, bg=C_PANEL)
-        pf.pack(fill="x", padx=10, pady=3)
-        tk.Label(pf, text="Port", width=10, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                 ).pack(side="left")
-        tk.Entry(pf, textvariable=self._sv_port, width=7,
-                 bg="#FFFFFF", fg=C_TEXT, insertbackground=C_TEXT,
-                 relief="flat", font=("Segoe UI", 9),
-                 highlightbackground=C_BORDER, highlightthickness=1
-                 ).pack(side="left", ipady=4, padx=(0, 6))
-
-        _row(s1, "Username", self._sv_user, 18)
-        _row(s1, "Password", self._sv_pass, 18, show="*")
-
-        conn_f = tk.Frame(s1, bg=C_PANEL)
-        conn_f.pack(fill="x", padx=10, pady=(2, 8))
-        self._test_btn = tk.Button(
-            conn_f, text="Test Connection", command=self._test_connection,
-            bg=C_CARD, fg=C_ACCENT, relief="flat",
-            font=("Segoe UI", 9, "bold"), padx=10, pady=5, cursor="hand2",
-            activebackground=C_BORDER)
-        self._test_btn.pack(side="left", padx=(0, 10))
-        self._conn_lbl = tk.Label(conn_f, text="",
-                                  font=("Segoe UI", 9, "bold"),
-                                  bg=C_PANEL, fg=C_SUBTEXT)
-        self._conn_lbl.pack(side="left")
-
-        # ── Step 2 — Project & Stream ───────────────────────────────────
-        self._section(body, "Step 2 — Select Project & Stream")
-        s2 = self._card(body)
-
-        pj_f = tk.Frame(s2, bg=C_PANEL)
-        pj_f.pack(fill="x", padx=10, pady=4)
-        tk.Label(pj_f, text="Project", width=10, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                 ).pack(side="left")
-        self._proj_cb = ttk.Combobox(pj_f, textvariable=self._sv_project,
-                                     state="disabled", width=30,
-                                     font=("Segoe UI", 9))
-        self._proj_cb.pack(side="left", padx=(0, 8))
-        self._proj_cb.bind("<<ComboboxSelected>>", self._on_project_selected)
-        tk.Label(pj_f, text="← populated after Test Connection",
-                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8"
-                 ).pack(side="left")
-
-        st_f = tk.Frame(s2, bg=C_PANEL)
-        st_f.pack(fill="x", padx=10, pady=4)
-        tk.Label(st_f, text="Stream", width=10, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                 ).pack(side="left")
-        self._stream_cb = ttk.Combobox(st_f, textvariable=self._sv_stream,
-                                       state="disabled", width=30,
-                                       font=("Segoe UI", 9))
-        self._stream_cb.pack(side="left", padx=(0, 8))
-        tk.Label(st_f, text="← populated after selecting a project",
-                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8"
-                 ).pack(side="left")
-
-        ts_f = tk.Frame(s2, bg=C_PANEL)
-        ts_f.pack(fill="x", padx=10, pady=(4, 8))
-        tk.Label(ts_f, text="Triage Store", width=10, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_SUBTEXT
-                 ).pack(side="left")
-        self._store_cb = ttk.Combobox(ts_f, textvariable=self._sv_store,
-                                      state="disabled", width=28,
-                                      font=("Segoe UI", 9))
-        self._store_cb.pack(side="left", padx=(0, 8))
-        tk.Label(ts_f, text="← auto-filled from project; edit if needed",
-                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8"
-                 ).pack(side="left")
-
-        # ── Step 3 — CSV + defect preview table ────────────────────────
-        self._section(body, "Step 3 — Load CSV & Review Defects to Push")
-        s3 = self._card(body)
-
-        csv_f = tk.Frame(s3, bg=C_PANEL)
-        csv_f.pack(fill="x", padx=10, pady=6)
-        tk.Button(csv_f, text="Browse…", command=self._browse_csv,
-                  bg=C_CARD, fg=C_ACCENT, relief="flat",
-                  font=("Segoe UI", 9, "bold"), padx=8, pady=4,
-                  cursor="hand2", activebackground=C_BORDER
-                  ).pack(side="left", padx=(0, 8))
-        tk.Entry(csv_f, textvariable=self._sv_csv, width=46,
-                 bg="#F8F9FB", fg=C_TEXT, insertbackground=C_TEXT,
-                 relief="flat", font=("Segoe UI", 9),
-                 highlightbackground=C_BORDER, highlightthickness=1
-                 ).pack(side="left", ipady=4)
-
-        self._csv_lbl = tk.Label(s3, text="No file loaded yet.",
-                                 font=("Segoe UI", 9), bg=C_PANEL,
-                                 fg=C_SUBTEXT, anchor="w")
-        self._csv_lbl.pack(fill="x", padx=10, pady=(0, 4))
-
-        # Validate button: fetches server defects to confirm CIDs exist in selected stream
-        val_f = tk.Frame(s3, bg=C_PANEL)
-        val_f.pack(fill="x", padx=10, pady=(0, 4))
-        self._validate_btn = tk.Button(
-            val_f, text="🔍  Validate CIDs against Server",
-            command=self._validate_cids,
-            bg=C_CARD, fg=C_ACCENT, relief="flat",
-            font=("Segoe UI", 9, "bold"), padx=10, pady=4,
-            cursor="hand2", activebackground=C_BORDER, state="disabled")
-        self._validate_btn.pack(side="left")
-        # Debug button — lists available SOAP defect methods to diagnose server version
-        tk.Button(val_f, text="…", command=self._show_defect_methods,
-                  bg=C_CARD, fg=C_SUBTEXT, relief="flat",
-                  font=("Segoe UI", 8), padx=6, pady=4,
-                  cursor="hand2", activebackground=C_BORDER,
-                  ).pack(side="left", padx=(4, 0))
-        self._validate_lbl = tk.Label(
-            val_f, text="", font=("Segoe UI", 9),
-            bg=C_PANEL, fg=C_SUBTEXT)
-        self._validate_lbl.pack(side="left", padx=(10, 0))
-
-        # Defect preview table — CID col shows local CID; ServerCID shows matched server CID
-        tbl_f = tk.Frame(s3, bg=C_PANEL)
-        tbl_f.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-
-        cols = ("CID", "ServerCID", "Classification", "Action", "Comment", "Checker", "File")
-        self._defect_tree = ttk.Treeview(tbl_f, columns=cols,
-                                         show="headings", height=8,
-                                         selectmode="browse")
-        col_widths = {"CID": 55, "ServerCID": 70, "Classification": 110,
-                      "Action": 120, "Comment": 200, "Checker": 120, "File": 140}
-        hdrs = {"CID": "CSV CID", "ServerCID": "Server CID",
-                "Classification": "Classification", "Action": "Action",
-                "Comment": "Comment", "Checker": "Checker", "File": "File"}
-        for c in cols:
-            self._defect_tree.heading(c, text=hdrs[c], anchor="w")
-            self._defect_tree.column(c, width=col_widths[c],
-                                     anchor="w", stretch=(c == "Comment"))
-
-        vsb2 = ttk.Scrollbar(tbl_f, orient="vertical",
-                              command=self._defect_tree.yview)
-        self._defect_tree.configure(yscrollcommand=vsb2.set)
-        self._defect_tree.grid(row=0, column=0, sticky="nsew")
-        vsb2.grid(row=0, column=1, sticky="ns")
-        tbl_f.rowconfigure(0, weight=1)
-        tbl_f.columnconfigure(0, weight=1)
-
-        for cls, col in CLASS_COLOR.items():
-            self._defect_tree.tag_configure(cls, foreground=col)
-        self._defect_tree.tag_configure("matched",   background="#DCFCE7")
-        self._defect_tree.tag_configure("unmatched", background="#FEE2E2")
-        self._defect_tree.tag_configure("pushed",    foreground="#16A34A")
-        self._defect_tree.tag_configure("push_fail", foreground="#DC2626")
-
-        self._defect_tree.bind("<Double-1>", self._edit_row)
-
-        tk.Label(s3, text="Double-click a row to edit Classification/Action/Comment.  Green = CID confirmed on server.  Red = not found (will be skipped).",
-                 font=("Segoe UI", 8), bg=C_PANEL, fg="#94A3B8", anchor="w"
-                 ).pack(fill="x", padx=10, pady=(0, 6))
-
-        # ── Footer buttons ──────────────────────────────────────────────
-        foot = tk.Frame(body, bg=C_BG)
-        foot.pack(fill="x", padx=20, pady=(10, 20))
-        tk.Button(foot, text="Close", command=self.destroy,
-                  bg=C_CARD, fg=C_TEXT, relief="flat",
-                  font=("Segoe UI", 10), padx=14, pady=6,
-                  cursor="hand2").pack(side="left")
-        self._push_btn = tk.Button(
-            foot, text="⬆  Push to Coverity",
-            command=self._push,
-            bg=C_ACCENT, fg="#FFFFFF", relief="flat",
-            font=("Segoe UI", 10, "bold"), padx=18, pady=6,
-            cursor="hand2", activebackground=C_ACCENT2,
-            state="disabled")
-        self._push_btn.pack(side="right")
-
-        self._progress_lbl = tk.Label(foot, text="",
-                                      font=("Segoe UI", 9), bg=C_BG, fg=C_SUBTEXT)
-        self._progress_lbl.pack(side="right", padx=12)
-
-    # ------------------------------------------------------------------ helpers
-    def _section(self, parent, title):
-        f = tk.Frame(parent, bg=C_BG)
-        f.pack(fill="x", padx=20, pady=(10, 2))
-        tk.Label(f, text=title, font=("Segoe UI", 10, "bold"),
-                 bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Frame(f, bg=C_BORDER, height=1).pack(
-            side="left", fill="x", expand=True, padx=(8, 0), pady=5)
-
-    def _card(self, parent):
-        f = tk.Frame(parent, bg=C_PANEL,
-                     highlightbackground=C_BORDER, highlightthickness=1)
-        f.pack(fill="x", padx=20, pady=2)
-        return f
-
-    # ------------------------------------------------------------------ logic
-    def _test_connection(self):
-        host = self._sv_host.get().strip()
-        port = self._sv_port.get().strip()
-        user = self._sv_user.get().strip()
-        pw   = self._sv_pass.get()
-        if not host or not user or not pw:
-            self._conn_lbl.configure(text="Fill in Host, Username and Password", fg=C_INTENT)
-            return
-        if not zeep_available():
-            self._conn_lbl.configure(text="zeep not installed — run: pip install zeep", fg=C_BUG)
-            return
-        self._conn_lbl.configure(text="Testing…", fg=C_SUBTEXT)
-        self._test_btn.configure(state="disabled")
-        self._proj_cb.configure(state="disabled")
-        self._stream_cb.configure(state="disabled")
-
-        def _worker():
-            verify = False
-            client = CoveritySOAPClient(host, port, user, pw, verify_ssl=verify)
-            ok, msg = client.test_connection()
-
-            def _done():
-                self._test_btn.configure(state="normal")
-                if ok:
-                    self._client = client
-                    self._conn_lbl.configure(text=f"✓ {msg}", fg=C_FP)
-                    self._load_projects()
-                else:
-                    self._conn_lbl.configure(text=f"✗ {msg}", fg=C_BUG)
-            self.after(0, _done)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _load_projects(self):
-        self._conn_lbl.configure(text="Loading projects & triage stores…", fg=C_SUBTEXT)
-
-        def _worker():
-            projects = self._client.get_projects()
-            stores   = self._client.get_triage_stores()
-
-            # Merge project-level stores first, then API-returned stores; dedupe
-            proj_stores = [p["triage_store"] for p in projects if p.get("triage_store")]
-            all_stores  = list(dict.fromkeys(proj_stores + stores))
-
-            def _done():
-                self._projects = projects
-                names = [p["name"] for p in projects]
-                self._proj_cb.configure(values=names,
-                                        state="readonly" if names else "disabled")
-                self._store_cb.configure(
-                    values=all_stores,
-                    state="readonly" if all_stores else "normal")
-                if names:
-                    self._proj_cb.current(0)
-                    self._sv_project.set(names[0])
-                    self._on_project_selected()
-                count = len(names)
-                self._conn_lbl.configure(
-                    text=f"✓ Connected  ({count} project{'s' if count != 1 else ''} found)",
-                    fg=C_FP)
-                self._refresh_push_btn()
-            self.after(0, _done)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _on_project_selected(self, _event=None):
-        proj_name = self._sv_project.get()
-        if not proj_name:
-            return
-
-        self._stream_cb.configure(state="disabled", values=[])
-        self._sv_stream.set("")
-        self._sv_store.set("Loading…")
-
-        def _worker():
-            streams     = self._client.get_streams_for_project(proj_name)
-            triage_store = self._client.get_triage_store_for_project(proj_name)
-
-            def _done():
-                self._streams = streams
-                self._stream_cb.configure(
-                    values=streams,
-                    state="readonly" if streams else "disabled")
-                if streams:
-                    self._stream_cb.current(0)
-                    self._sv_stream.set(streams[0])
-
-                # Set triage store — guaranteed to return a value (falls back to {name}-TS)
-                self._sv_store.set(triage_store)
-                vals = list(self._store_cb["values"])
-                if triage_store not in vals:
-                    vals.insert(0, triage_store)
-                    self._store_cb.configure(values=vals)
-                self._store_cb.current(vals.index(triage_store))
-
-                self._refresh_push_btn()
-                if self._csv_rows and self._sv_project.get():
-                    self.after(100, self._validate_cids)
-            self.after(0, _done)
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _browse_csv(self):
-        path = filedialog.askopenfilename(
-            title="Select Dispositions CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            parent=self)
-        if not path:
-            return
-        self._sv_csv.set(path)
-        self._load_csv(path)
-
-    def _load_csv(self, path):
-        import csv as _csv
-        rows = []
-        try:
-            with open(path, newline="", encoding="utf-8-sig") as f:
-                reader = _csv.DictReader(f)
-                for row in reader:
-                    rows.append(row)
-        except Exception as e:
-            self._csv_lbl.configure(text=f"✗ Could not read file: {e}", fg=C_BUG)
-            self._csv_rows = []
-            self._refresh_push_btn()
-            return
-
-        # Accept both dispositions.csv and final_decisions.csv column layouts
-        valid = []
-        for row in rows:
-            cid     = row.get("CID") or row.get("cid") or ""
-            cls     = (row.get("Classification") or row.get("FinalClassification") or
-                       row.get("classification") or "")
-            cmt     = (row.get("Comment") or row.get("FinalComment") or
-                       row.get("comment") or "")
-            action  = cpush.normalize_action(row.get("Action") or row.get("FinalAction") or
-                                             row.get("action") or "") or cpush.default_action_for_classification(cls)
-            checker = row.get("Checker") or row.get("checker") or ""
-            fpath   = row.get("File") or row.get("file") or ""
-            if cid and cls:
-                valid.append({
-                    "cid": int(cid), "classification": cls,
-                    "action": action,
-                    "comment": cmt, "checker": checker, "file": fpath,
-                })
-
-        self._csv_rows = valid
-        # Deduplicate by CID — keep last occurrence (most specific disposition wins)
-        seen = {}
-        for r in valid:
-            seen[r["cid"]] = r
-        valid = list(seen.values())
-        self._csv_rows = valid
-
-        # Clear and repopulate the preview table
-        self._defect_tree.delete(*self._defect_tree.get_children())
-
-        if not valid:
-            self._csv_lbl.configure(
-                text="✗ No valid rows found. CSV must have CID + Classification columns (Action is optional).", 
-                fg=C_BUG)
-        else:
-            from collections import Counter
-            counts  = Counter(r["classification"] for r in valid)
-            summary = "  |  ".join(f"{k}: {v}" for k, v in counts.most_common())
-            self._csv_lbl.configure(
-                text=f"✓ {len(valid)} CID(s) loaded — double-click any row to edit before pushing",
-                fg=C_FP)
-            for r in valid:
-                tag = r["classification"] if r["classification"] in CLASS_COLOR else ""
-                self._defect_tree.insert("", "end", iid=str(r["cid"]),
-                    tags=(tag,),
-                    values=(r["cid"], "", r["classification"], r["action"],
-                            r["comment"][:80], r["checker"],
-                            os.path.basename(r["file"])))
-        self._refresh_push_btn()
-        # Enable Validate button once CSV is loaded and we have a stream selected
-        if valid and self._sv_project.get():
-            self._validate_btn.configure(state="normal")
-            # Auto-validate immediately
-            self.after(100, self._validate_cids)
-        else:
-            self._validate_btn.configure(state="disabled")
-
-    def _show_defect_methods(self):
-        """List available SOAP methods on the defect service — helps diagnose server version issues."""
-        if not self._client:
-            messagebox.showinfo("Debug", "Connect to server first.", parent=self)
-            return
-        try:
-            svc = self._client._get_defect_client().service
-            methods = sorted(m for m in dir(svc) if not m.startswith("_"))
-            win = tk.Toplevel(self)
-            win.title("DefectService SOAP Methods")
-            win.geometry("420x400")
-            win.configure(bg=C_BG)
-            tk.Label(win, text="Available SOAP methods on DefectService:",
-                     font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_TEXT
-                     ).pack(anchor="w", padx=12, pady=(10, 4))
-            lb = tk.Listbox(win, font=("Consolas", 9), bg="#F8F9FB",
-                            fg=C_TEXT, selectbackground=C_ACCENT,
-                            relief="flat", borderwidth=0)
-            lb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-            for m in methods:
-                lb.insert("end", m)
-        except Exception as e:
-            messagebox.showerror("Debug Error", str(e), parent=self)
-
-    def _validate_cids(self):
-        """Fetch defects from ALL project streams and cross-match CSV rows by CID or file+checker."""
-        proj = self._sv_project.get().strip()
-        if not proj or not self._client:
-            return
-        self._validate_btn.configure(state="disabled", text="Fetching…")
-        self._validate_lbl.configure(
-            text=f"Loading defects from all streams in '{proj}'…", fg=C_SUBTEXT)
-
-        def _worker():
-            server_defects, fetch_err = self._client.get_defects_for_project(proj)
-
-            def _done():
-                self._validate_btn.configure(state="normal",
-                                             text="🔍  Validate CIDs against Server")
-                if fetch_err or not server_defects:
-                    detail = fetch_err or "No defects returned for project"
-                    self._validate_lbl.configure(text=f"⚠️  {detail}", fg=C_BUG)
-                    return
-
-                # Build lookup: cid→defect and (checker, basename)→list of defects
-                by_cid    = {d["cid"]: d for d in server_defects}
-                by_sig    = {}  # (checker, basename) → list
-                for d in server_defects:
-                    key = (d["checker"], os.path.basename(d["file"]))
-                    by_sig.setdefault(key, []).append(d)
-
-                matched = unmatched = remapped = 0
-                for r in self._csv_rows:
-                    iid = str(r["cid"])
-                    if not self._defect_tree.exists(iid):
-                        continue
-                    vals = list(self._defect_tree.item(iid)["values"])
-
-                    if r["cid"] in by_cid:
-                        vals[1] = r["cid"]
-                        r["server_cid"] = r["cid"]
-                        self._defect_tree.item(iid, tags=("matched",), values=vals)
-                        matched += 1
-                    else:
-                        sig = (r["checker"], os.path.basename(r["file"]))
-                        candidates = by_sig.get(sig, [])
-                        if len(candidates) == 1:
-                            srv_cid = candidates[0]["cid"]
-                            vals[1] = srv_cid
-                            r["server_cid"] = srv_cid
-                            self._defect_tree.item(iid, tags=("matched",), values=vals)
-                            remapped += 1
-                        else:
-                            vals[1] = "NOT FOUND"
-                            r["server_cid"] = None
-                            self._defect_tree.item(iid, tags=("unmatched",), values=vals)
-                            unmatched += 1
-
-                # Auto-remove NOT FOUND rows — they belong to other projects
-                if unmatched:
-                    not_found_iids = [str(r["cid"]) for r in self._csv_rows
-                                      if r.get("server_cid") is None]
-                    for iid in not_found_iids:
-                        if self._defect_tree.exists(iid):
-                            self._defect_tree.delete(iid)
-                    self._csv_rows = [r for r in self._csv_rows
-                                      if r.get("server_cid") is not None]
-
-                parts = [f"{matched + remapped} ready to push"]
-                if remapped:
-                    parts.append(f"{remapped} remapped by file+checker")
-                if unmatched:
-                    parts.append(f"{unmatched} removed (not in this project)")
-                self._validate_lbl.configure(
-                    text="  •  ".join(parts),
-                    fg=C_FP)
-                self._refresh_push_btn()
-
-            self.after(0, _done)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _edit_row(self, _event=None):
-        sel = self._defect_tree.selection()
-        if not sel:
-            return
-        iid  = sel[0]
-        vals = self._defect_tree.item(iid)["values"]
-        # cols: CID(0), ServerCID(1), Classification(2), Action(3), Comment(4), Checker(5), File(6)
-        cid, cur_cls, cur_action, cur_cmt = vals[0], vals[2], vals[3], vals[4]
-
-        # Find full comment from csv_rows (table truncates to 80 chars)
-        full_cmt = next(
-            (r["comment"] for r in self._csv_rows if r["cid"] == int(cid)),
-            cur_cmt)
-
-        win = tk.Toplevel(self)
-        win.title(f"Edit CID {cid}")
-        win.geometry("500x320")
-        win.configure(bg=C_BG)
-        win.grab_set()
-
-        tk.Label(win, text=f"CID {cid}  —  {cur_cmt}",
-                 font=("Segoe UI", 11, "bold"), bg=C_BG, fg=C_ACCENT
-                 ).pack(anchor="w", padx=20, pady=(16, 8))
-
-        cls_var = tk.StringVar(value=cur_cls)
-        cls_f = tk.Frame(win, bg=C_BG)
-        cls_f.pack(fill="x", padx=20, pady=4)
-        tk.Label(cls_f, text="Classification", width=14, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_SUBTEXT
-                 ).pack(side="left")
-        cls_cb = ttk.Combobox(cls_f, textvariable=cls_var, state="readonly",
-                              values=["Bug", "False positive", "Intentional",
-                                      "Needs review"],
-                              width=18, font=("Segoe UI", 9))
-        cls_cb.pack(side="left")
-
-        action_var = tk.StringVar(value=cur_action or cpush.default_action_for_classification(cur_cls))
-        action_f = tk.Frame(win, bg=C_BG)
-        action_f.pack(fill="x", padx=20, pady=4)
-        tk.Label(action_f, text="Action", width=14, anchor="w",
-                 font=("Segoe UI", 9, "bold"), bg=C_BG, fg=C_SUBTEXT
-                 ).pack(side="left")
-        ttk.Combobox(action_f, textvariable=action_var, state="readonly",
-                     values=cpush.ACTION_VALUES, width=18,
-                     font=("Segoe UI", 9)).pack(side="left")
-
-        tk.Label(win, text="Comment", font=("Segoe UI", 9, "bold"),
-                 bg=C_BG, fg=C_SUBTEXT).pack(anchor="w", padx=20, pady=(8, 2))
-        cmt_box = tk.Text(win, height=4, bg="#FFFFFF", fg=C_TEXT,
-                          insertbackground=C_TEXT, relief="flat",
-                          font=("Segoe UI", 9), borderwidth=1,
-                          highlightthickness=1, highlightbackground=C_BORDER)
-        cmt_box.pack(fill="x", padx=20)
-        cmt_box.insert("end", full_cmt)
-
-        def _save():
-            new_cls = cls_var.get()
-            new_action = cpush.normalize_action(action_var.get()) or cpush.default_action_for_classification(new_cls)
-            new_cmt = cmt_box.get("1.0", "end-1c").strip()
-            for r in self._csv_rows:
-                if r["cid"] == int(cid):
-                    r["classification"] = new_cls
-                    r["action"]         = new_action
-                    r["comment"]        = new_cmt
-                    break
-            # Preserve existing tags (matched/unmatched); just update editable cols
-            existing_tags = self._defect_tree.item(iid)["tags"]
-            self._defect_tree.item(iid, tags=existing_tags,
-                values=(vals[0], vals[1], new_cls, new_action, new_cmt[:80], vals[5], vals[6]))
-            win.destroy()
-
-        tk.Button(win, text="Save", command=_save,
-                  bg=C_ACCENT, fg="#FFFFFF", relief="flat",
-                  font=("Segoe UI", 10, "bold"), padx=16, pady=6,
-                  cursor="hand2").pack(pady=12)
-
-    def _refresh_push_btn(self):
-        ready = (self._client is not None and
-                 bool(self._sv_project.get()) and
-                 bool(self._csv_rows))
-        self._push_btn.configure(state="normal" if ready else "disabled")
-        can_validate = (self._client is not None and
-                        bool(self._sv_project.get()) and
-                        bool(self._csv_rows))
-        self._validate_btn.configure(state="normal" if can_validate else "disabled")
-
-    def _push(self):
-        if not self._client or not self._csv_rows:
-            return
-        store = self._sv_store.get().strip() or self._sv_project.get() or "Default"
-        rows  = self._csv_rows
-        self._push_btn.configure(state="disabled", text="Pushing…")
-
-        def _worker():
-            pushed_ok    = 0
-            pushed_fail  = 0
-            first_error  = None
-            total        = len(rows)
-
-            for i, row in enumerate(rows):
-                # Use server-validated CID if available (may differ from CSV CID after remapping)
-                push_cid = row.get("server_cid") or row["cid"]
-                if push_cid is None:
-                    # server said NOT FOUND — skip
-                    pushed_fail += 1
-                    def _mark_skip(cid=row["cid"]):
-                        iid = str(cid)
-                        if self._defect_tree.exists(iid):
-                            vals = self._defect_tree.item(iid)["values"]
-                            self._defect_tree.item(iid, tags=("push_fail",),
-                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
-                    self.after(0, _mark_skip)
-                    def _tick_skip(done=i + 1):
-                        self._progress_lbl.configure(text=f"Pushing {done}/{total}…")
-                    self.after(0, _tick_skip)
-                    continue
-
-                ok, _, err = self._client.update_triage(
-                    [push_cid], store,
-                    row["classification"], row["comment"],
-                    action=row.get("action") or cpush.default_action_for_classification(row.get("classification")))
-                if ok:
-                    pushed_ok += 1
-                    def _mark_ok(cid=row["cid"]):
-                        iid = str(cid)
-                        if self._defect_tree.exists(iid):
-                            vals = self._defect_tree.item(iid)["values"]
-                            self._defect_tree.item(iid, tags=("pushed",),
-                                values=(f"✓ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
-                    self.after(0, _mark_ok)
-                else:
-                    pushed_fail += 1
-                    if first_error is None and err:
-                        first_error = err
-                    def _mark_fail(cid=row["cid"]):
-                        iid = str(cid)
-                        if self._defect_tree.exists(iid):
-                            vals = self._defect_tree.item(iid)["values"]
-                            self._defect_tree.item(iid, tags=("push_fail",),
-                                values=(f"✗ {vals[0]}", vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]))
-                    self.after(0, _mark_fail)
-
-                def _tick(done=i + 1):
-                    self._progress_lbl.configure(text=f"Pushing {done}/{total}…")
-                self.after(0, _tick)
-
-            def _done():
-                self._push_btn.configure(state="normal", text="⬆  Push to Coverity")
-                self._progress_lbl.configure(text="")
-                msg = f"Pushed to triage store '{store}'.\n\n"
-                msg += f"  Succeeded : {pushed_ok}\n"
-                msg += f"  Failed    : {pushed_fail}"
-                if first_error:
-                    msg += f"\n\nFirst error:\n{first_error}"
-                    msg += ("\n\nTip: Check the Triage Store name — it usually\n"
-                            "matches the project name, not 'Default'.\n"
-                            f"Try: '{self._sv_project.get()}'")
-                icon = "showinfo" if pushed_fail == 0 else "showwarning"
-                getattr(messagebox, icon)(
-                    "Push Complete" if pushed_fail == 0 else "Push Finished with Errors",
-                    msg, parent=self)
-                # Keep the dialog open after acknowledgement so the user can
-                # review the per-defect status in the table. It is closed only
-                # when the user chooses Close (or uses the window close control).
-            self.after(0, _done)
-
-        threading.Thread(target=_worker, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------

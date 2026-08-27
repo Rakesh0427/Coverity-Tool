@@ -13,7 +13,7 @@ A local, privacy-preserving decision assistant for triaging **Coverity** and **C
 | 2. Analyse | tree-sitter parses the local source file once per file (cached); rule engine runs per checker | `coverity_dispositions.csv` with classification/comment/fix/confidence |
 | 3. Review | Results page — double-click a row | see events, source, suggestion |
 | 4. Decide | **Accept Suggestion** or **Override** | `coverity_final_decisions.csv` |
-| 5. Push back | **Push these to Coverity** (Results toolbar, direct) or **Push to Coverity** (header, from CSV) | server dispositions updated |
+| 5. Push back | **Push these to Coverity** (Results toolbar) | server dispositions updated |
 
 Output files (in your chosen Output folder):
 
@@ -233,15 +233,12 @@ python local_gui.py
 
 ### 4.4 Push to Coverity
 
-There are two ways to write dispositions back to Coverity Connect. Both end up
-calling the same SOAP `updateTriageForCIDsInTriageStore` operation and both
-write the **Classification** and **Comment** attributes into the project's
-triage store.
-
-#### A. Direct push from the Results page (no CSV) — recommended
-
-The **⬆ Push these to Coverity** button in the Results toolbar pushes the
-defects currently in the table, straight from memory:
+The **⬆ Push these to Coverity** button in the Results toolbar writes the
+dispositions back to Coverity Connect, calling the SOAP
+`updateTriageForCIDsInTriageStore` operation to set the **Classification** and
+**Comment** attributes in the project's triage store. It pushes the defects
+currently in the table, straight from memory — no CSV export or re-import
+needed:
 
 1. **Step 1 — Server Connection** — host, port, username, password → **Connect**.
    Tick *Allow self-signed certificate* only for corporate servers whose
@@ -272,19 +269,6 @@ Notes:
   reviewers in Connect can see where the triage came from.
 - Updates are batched: defects sharing a classification *and* comment go in one
   call, capped at 100 CIDs per request (the server limit).
-
-#### B. Push from a CSV
-
-The header **⬆ Push to Coverity** button opens the CSV-based dialog, useful when
-you want to push decisions made in an earlier session or edited by hand:
-
-1. **Connect** — host, port, username, password → **Test Connection**.
-2. **Select Project** and **Stream** (streams load after project selection).
-3. **Load CSV** — choose `coverity_final_decisions.csv` (or `dispositions.csv`),
-   review the row count, then **Push**.
-
-Pushed dispositions are written to the server triage store; any rows rejected by
-the server are listed so you can fix and retry.
 
 #### Troubleshooting
 
@@ -400,6 +384,6 @@ python local_gui.py
 1. Point **Coverity Report** at your `index.html` report folder (or **⬇ Pull from Coverity**).
 2. Set **Source Code Root** to your C/C++ sources.
 3. **▶ Start Disposition** → wait → double-click and **Accept / Override** each finding.
-4. **⬆ Push to Coverity** to write decisions back, or **Export to Excel**.
+4. **⬆ Push these to Coverity** on the Results page to write decisions back, or **Export to Excel**.
 
 *Source code never leaves your machine.*
