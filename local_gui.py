@@ -868,6 +868,13 @@ class AnalysisPage(Page):
         if not relative_path:
             return ""
 
+        if not hasattr(self, "_resolved_paths_cache"):
+            self._resolved_paths_cache = {}
+
+        cached = self._resolved_paths_cache.get(relative_path)
+        if cached is not None:
+            return cached
+
         roots = []
         if self._src_root:
             roots.append(self._src_root)
@@ -896,6 +903,9 @@ class AnalysisPage(Page):
         if not hasattr(self, "_fn_index_cache"):
             self._fn_index_cache = {}
 
+        skip = {'.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target',
+                'node_modules', '.venv', 'venv', 'dist', 'CMakeFiles', '.idea', '.vscode'}
+
         for base in roots:
             if not base or not os.path.isdir(base):
                 continue
@@ -903,6 +913,7 @@ class AnalysisPage(Page):
             # 1) Direct join first (works for relative paths)
             candidate = os.path.join(base, relative_path)
             if os.path.isfile(candidate):
+                self._resolved_paths_cache[relative_path] = candidate
                 return candidate
 
             # 2) For absolute paths, try progressively shorter suffixes, keeping
@@ -916,6 +927,10 @@ class AnalysisPage(Page):
                         best_score = score
                         best_path = tail_path
 
+            if best_path:
+                self._resolved_paths_cache[relative_path] = best_path
+                return best_path
+
             # 3) Basename match as a last resort, using a cached filename->paths
             #    index (one walk per root, not per defect). Among same-named files,
             #    pick the one whose directory path best preserves the defect's
@@ -926,6 +941,7 @@ class AnalysisPage(Page):
                 if base not in self._fn_index_cache:
                     idx = {}
                     for root, _dirs, fnames in os.walk(base):
+                        _dirs[:] = [d for d in _dirs if d not in skip]
                         for fn in fnames:
                             idx.setdefault(fn.lower(), []).append(os.path.join(root, fn))
                     self._fn_index_cache[base] = idx
@@ -934,6 +950,8 @@ class AnalysisPage(Page):
                     if score > best_score:
                         best_score = score
                         best_path = cand
+
+        self._resolved_paths_cache[relative_path] = best_path
         return best_path
 
     def _find_function_line(self, filepath: str, func_name: str) -> int:
@@ -1065,18 +1083,6 @@ class AnalysisPage(Page):
                            f"'Needs review' (no source code to analyse).\n"
                            f"  Verify the Source Code Root points to the same tree Coverity "
                            f"analysed, or check the paths in the sheet's File column.\n"))
-
-            # Report which analysis backends are actually live. A run with
-            # libclang/z3/tree-sitter missing produces far more 'Needs review'
-            # rows, and without this banner that is indistinguishable from a
-            # full-strength run that genuinely found nothing.
-            if _capabilities is not None:
-                try:
-                    _depth = _capabilities.analysis_depth()
-                    _tag = "info" if _depth == _capabilities.DEPTH_FULL else "warn"
-                    q.put((_tag, _capabilities.format_banner() + "\n"))
-                except Exception:
-                    pass
 
             # Warm the one-time workspace index up front so the first defect does
             # not silently stall the whole run for tens of seconds, and so the
@@ -1229,8 +1235,17 @@ class AnalysisPage(Page):
                             # can extract the correct function and absolute line numbers
                             path_for_ctx = real_path if real_path else filepath
                             rich_ctx = build_defect_context(
-                                {"events": events, "file": path_for_ctx, "line": line, "function": func},
-                                self._src_root, self._language)
+                                {
+                                    "events": events,
+                                    "file": path_for_ctx,
+                                    "line": line,
+                                    "function": func,
+                                    "function_code": src_code,
+                                    "code_start_line": start_line,
+                                },
+                                self._src_root,
+                                self._language,
+                            )
                             rich_ctx.pop("function_code", None)  # keep our own extraction
                         except Exception as e:
                             q.put(("warn", f"  [Context] Rich context build failed: {e}\n"))
@@ -1272,7 +1287,7 @@ class AnalysisPage(Page):
                         try:
                             classification, comment, fix, confidence = analyze_defect(
                                 context, checker, events, sub_checker=type_val,
-                                file=filepath, line=line, function=func,
+                                file=real_path or filepath, line=line, function=func,
                                 line_is_various=line_is_various,
                                 tree=context.get("function_tree"))
                         except Exception as ex:

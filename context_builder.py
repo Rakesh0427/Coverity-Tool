@@ -121,10 +121,9 @@ def _find_callers(function_name: str, src_root: str) -> List[Dict]:
 
     paths, callsite_index = _build_callsite_index(src_root)
     sites = callsite_index.get(function_name, [])
-    # Cap pathological fan-outs (a function invoked thousands of times); the
-    # typical number of real call sites is far below this.
-    if len(sites) > 500:
-        sites = sites[:500]
+    # Cap fan-outs to avoid extracting hundreds of caller bodies for common utilities
+    if len(sites) > 25:
+        sites = sites[:25]
 
     # Group call sites by file so each file is read only once.
     by_file: Dict[str, List[int]] = {}
@@ -181,27 +180,17 @@ def _extract_func_name_from_code(func_code: str) -> str:
 
 
 def warm_workspace_index(src_root: str, language: str = 'c') -> bool:
-    """Pre-build the cached workspace call-site index up front.
+    """Pre-build the cached workspace call-site and symbol indices up front.
 
-    Building this lazily on the first defect makes that one defect block with no
-    progress and inflates the per-defect ETA. Calling it once at the start of an
-    analysis (with a visible status message) moves the one-time cost out of the
-    defect loop.
-
-    IMPORTANT: this intentionally does NOT pre-build the tree-sitter symbol
-    index (`build_symbol_index`), which parses every file and is very expensive
-    on large trees. The symbol index stays lazy and cached, so it is only built
-    once, and only when a defect function actually calls an in-tree callee.
-    Per-file function extraction re-parsing is separately cached in
-    code_extractor, so defects in the same file don't re-parse.
+    Building this up front moves the one-time indexing cost out of the defect loop,
+    ensuring per-defect analysis runs without stalls.
     """
     if not src_root or not os.path.isdir(src_root):
         return False
     try:
         _build_callsite_index(src_root)
-        # Discover header directories once here too, so the first defect does
-        # not pay for the tree walk that libclang's -I flags need.
         _include_dirs_for(src_root)
+        build_symbol_index(src_root, language)
         return True
     except Exception:
         return False
@@ -275,10 +264,11 @@ def build_defect_context(defect: Dict, src_root: str, language: str = 'c') -> Di
     # Give libclang the real file + include paths before any analysis runs.
     _set_clang_context(filepath, src_root)
 
-    func_code = ''
-    func_tree = None
-    code_start_line = 1
-    if filepath and os.path.exists(filepath):
+    func_code = defect.get('function_code', '')
+    func_tree = defect.get('function_tree', None)
+    code_start_line = defect.get('code_start_line', 1)
+
+    if not func_code and filepath and os.path.exists(filepath):
         # Resolve the precise function start from the AST when the name is known.
         extract_line = line
         if func_name:
