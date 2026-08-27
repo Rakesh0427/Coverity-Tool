@@ -4,10 +4,9 @@ coverity_push.py — push analysed dispositions back to Coverity Connect.
 
 Why this module exists
 ----------------------
-An earlier CSV-based push dialog could push, but only by writing a CSV and
-reading it back in. Everything that is *not* Tk lives here instead, so the same
-logic can be reused straight from the results table (no CSV round trip),
-unit-tested without a server, and driven headlessly.
+The Setup-page ``PushDialog`` loads an existing CSV, while the reusable
+selection, validation, and push primitives live here so they can also be tested
+without Tk, used with in-memory results, or driven headlessly.
 
 The pipeline is four small, independently testable steps::
 
