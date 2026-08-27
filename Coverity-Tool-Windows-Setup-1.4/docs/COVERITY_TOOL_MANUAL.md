@@ -12,7 +12,7 @@ A local, privacy-preserving decision assistant for triaging **Coverity** and **C
 | 2. Analyse | tree-sitter parses the local source file once per file (cached); rule engine runs per checker | `coverity_dispositions.csv` with classification/comment/fix/confidence |
 | 3. Review | Results page — double-click a row | see events, source, suggestion |
 | 4. Decide | **Accept Suggestion** or **Override** | `coverity_final_decisions.csv` |
-| 5. Push back | **Push to Coverity** (header button) | server dispositions updated |
+| 5. Push back | **Push these to Coverity** (Results, direct) or **Push to Coverity** (Setup, CSV) | server dispositions updated |
 
 Output files (in your chosen Output folder):
 
@@ -96,6 +96,9 @@ python local_gui.py
 (Or use `run_gui.bat` / `run_gui.ps1`, which pre-set the Tcl/Tk library paths.)
 
 ### 4.1 Setup page
+
+The top header includes **⬆ Push to Coverity** for loading and pushing an existing decisions CSV. That CSV action appears on Setup only; Results has the separate **⬆ Push these to Coverity** direct action.
+
 1. **Coverity Report (HTML folder or Excel file)** — browse to the report folder containing `index.html` (or a single `.html` file, or an `.xlsx/.xls` export).
    - The **⬇ Pull from Coverity** button opens the Pull dialog (section 5).
 2. **Source Code Root (required)** — the folder containing your actual `.c/.cpp/.h/.hpp` files. The tool refuses to use the report folder itself as the source root.
@@ -122,12 +125,15 @@ python local_gui.py
   - **Full code view** — open the whole function in a resizable window (Copy with Ctrl+C works even on disabled text).
 - Accepted/overridden rows are written to `coverity_final_decisions.csv` immediately; the summary updates live.
 - Use the **filter** drop-down (All / Bug / False positive / Intentional / Needs review) to work through the most important tail first.
+- Click a finding in the left panel and use **Up / Down** to move through defects; **Home / End** and **Page Up / Page Down** are also supported.
+- Use **⬆ Push these to Coverity** to push the current analysis directly.
 
 ### 4.4 Push to Coverity
-- The header **⬆ Push to Coverity** button opens a three-step dialog:
+- **Results:** **⬆ Push these to Coverity** pushes the current in-memory analysis directly.
+- **Setup:** the header **⬆ Push to Coverity** button opens the CSV-based three-step dialog:
   1. **Connect** — host, port, username, password → **Test Connection** (REST when available, SOAP otherwise).
   2. **Select Project** and **Stream** (streams load after project selection).
-  3. **Load CSV** — choose `coverity_final_decisions.csv` (or `dispositions.csv`), review the row count, then **Push**.
+  3. **Load CSV** — choose `coverity_final_decisions.csv` (or `coverity_dispositions.csv`), review the row count, then **Push**.
 - Pushed dispositions are written to the server triage store; any rows rejected by the server are listed so you can fix and retry.
 
 ---
@@ -234,6 +240,6 @@ python local_gui.py
 1. Point **Coverity Report** at your `index.html` report folder (or **⬇ Pull from Coverity**).
 2. Set **Source Code Root** to your C/C++ sources.
 3. **▶ Start Disposition** → wait → double-click and **Accept / Override** each finding.
-4. **⬆ Push to Coverity** to write decisions back, or **Export to Excel**.
+4. Use **⬆ Push these to Coverity** on Results for a direct push, or use **⬆ Push to Coverity** on Setup for a CSV push.
 
 *Source code never leaves your machine.*

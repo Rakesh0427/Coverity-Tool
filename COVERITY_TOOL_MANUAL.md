@@ -13,7 +13,7 @@ A local, privacy-preserving decision assistant for triaging **Coverity** and **C
 | 2. Analyse | tree-sitter parses the local source file once per file (cached); rule engine runs per checker | `coverity_dispositions.csv` with classification/comment/fix/confidence |
 | 3. Review | Results page — double-click a row | see events, source, suggestion |
 | 4. Decide | **Accept Suggestion** or **Override** | `coverity_final_decisions.csv` |
-| 5. Push back | **Push these to Coverity** (Results toolbar) | server dispositions updated |
+| 5. Push back | **Push these to Coverity** (Results toolbar, direct) or **Push to Coverity** (Setup header, CSV) | server dispositions updated |
 
 Output files (in your chosen Output folder):
 
@@ -204,6 +204,9 @@ python local_gui.py
 (Or use `run_gui.bat` / `run_gui.ps1`, which pre-set the Tcl/Tk library paths.)
 
 ### 4.1 Setup page
+
+The top header includes **⬆ Push to Coverity** for loading and pushing an existing decisions CSV without running a new analysis. This CSV button is shown on Setup only; Results has a separate **⬆ Push these to Coverity** action for the current in-memory results.
+
 1. **Coverity Report (HTML folder or Excel file)** — browse to the report folder containing `index.html` (or a single `.html` file, or an `.xlsx/.xls` export).
    - The **⬇ Pull from Coverity** button opens the Pull dialog (section 5).
 2. **Source Code Root (required)** — the folder containing your actual `.c/.cpp/.h/.hpp` files. The tool refuses to use the report folder itself as the source root.
@@ -230,45 +233,36 @@ python local_gui.py
   - **Full code view** — open the whole function in a resizable window (Copy with Ctrl+C works even on disabled text).
 - Accepted/overridden rows are written to `coverity_final_decisions.csv` immediately; the summary updates live.
 - Use the **filter** drop-down (All / Bug / False positive / Intentional / Needs review) to work through the most important tail first.
+- Click a finding in the left panel, then use **Up / Down** to move between defects. **Home / End** jump to the first or last visible defect, and **Page Up / Page Down** move one screen at a time. The selected card is scrolled into view automatically.
+- Use **⬆ Push these to Coverity** to validate and push the current analysis directly, without exporting and reloading a CSV.
 
 ### 4.4 Push to Coverity
 
-The **⬆ Push these to Coverity** button in the Results toolbar writes the
-dispositions back to Coverity Connect, calling the SOAP
-`updateTriageForCIDsInTriageStore` operation to set the **Classification** and
-**Comment** attributes in the project's triage store. It pushes the defects
-currently in the table, straight from memory — no CSV export or re-import
-needed:
+Two push workflows are available:
 
-1. **Step 1 — Server Connection** — host, port, username, password → **Connect**.
-   Tick *Allow self-signed certificate* only for corporate servers whose
-   certificate chain you trust.
-2. **Step 2 — Project & Triage Store** — pick the project; the matching triage
-   store is filled in automatically (you can still edit it).
-3. **Step 3 — Which Defects to Push** — choose one of:
-   - *Accepted / overridden only* (default, safest) — only defects you explicitly
-     reviewed with **Accept** or **Override**.
-   - *Everything except 'Needs review'* — every defect the tool classified.
-   - *All analysed defects*.
-4. **Validate CIDs against Server** — required before pushing. Rows turn
-   **green** when the CID exists on the server and **red** when it does not.
-   Because CIDs shift between analysis runs, a stale CID is automatically
-   remapped by *file + checker* when that resolves to exactly one server defect;
-   ambiguous matches stay red and are skipped rather than guessed.
-5. **Push to Coverity** — confirm the summary. Tick **Dry run** first to see
-   exactly what would be written without touching the server.
+#### A. Direct push from Results
 
-After a real push, rows in the Results table are coloured green (pushed) or
-red (failed).
+The Results toolbar's **⬆ Push these to Coverity** button sends the current
+in-memory analysis without a CSV round trip:
 
-Notes:
-- An *Accepted* defect pushes its underlying classification (Bug / False
-  positive / …), never the literal word "Accepted" — that is a review state in
-  this tool, not a Coverity classification.
-- Comments get a `[Coverity Tool — user — date]` provenance marker appended so
-  reviewers in Connect can see where the triage came from.
-- Updates are batched: defects sharing a classification *and* comment go in one
-  call, capped at 100 CIDs per request (the server limit).
+1. Connect with the Coverity host, port, username, and password.
+2. Select the project and verify its triage store.
+3. Choose Accepted/overridden findings, all decided findings, or all findings.
+4. Validate CIDs against the server; unmatched defects are skipped safely.
+5. Optionally use Dry run, then choose **Push to Coverity**.
+
+#### B. CSV push from Setup
+
+The Setup header's **⬆ Push to Coverity** button opens the stand-alone CSV
+workflow and can be used without rerunning analysis:
+
+1. **Step 1 — Server Connection** — enter host, port, username and password,
+   then choose **Test Connection**.
+2. **Step 2 — Select Project & Stream** — select the project and stream. The
+   matching triage store is filled automatically and can be corrected if needed.
+3. **Step 3 — Load CSV & Review Defects to Push** — load
+   `coverity_final_decisions.csv` or `coverity_dispositions.csv`.
+4. Validate CIDs, edit any row if needed, then choose **Push to Coverity**.
 
 #### Troubleshooting
 
@@ -276,9 +270,8 @@ Notes:
 |---|---|
 | Every row fails | Wrong triage store name. It usually matches the **project** name, not `Default`. |
 | "zeep library not installed" | Run `pip install zeep`. |
-| All CIDs show NOT FOUND | Wrong project selected, or the report came from a different stream/server. |
-| Push button stays greyed out | You must **Validate** first, and at least one CID must match. |
-| SSL / certificate errors | Corporate self-signed cert — tick *Allow self-signed certificate* (only if you trust the chain). |
+| All CIDs are removed during validation | Wrong project selected, or the report came from a different stream/server. |
+| Push button stays greyed out | Connect successfully, select a project, and load a valid CSV containing CID + Classification. |
 
 ---
 
@@ -384,6 +377,6 @@ python local_gui.py
 1. Point **Coverity Report** at your `index.html` report folder (or **⬇ Pull from Coverity**).
 2. Set **Source Code Root** to your C/C++ sources.
 3. **▶ Start Disposition** → wait → double-click and **Accept / Override** each finding.
-4. **⬆ Push these to Coverity** on the Results page to write decisions back, or **Export to Excel**.
+4. Use **⬆ Push these to Coverity** on Results for a direct push, or return to **Setup** and use **⬆ Push to Coverity** to load and push a decisions CSV.
 
 *Source code never leaves your machine.*

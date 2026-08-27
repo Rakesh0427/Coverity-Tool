@@ -223,7 +223,7 @@ def create_doc():
         ("2. Analyse", "Tree-sitter (once per file, cached) + rule engine per checker", "coverity_dispositions.csv (comment/fix/confidence/CWE)"),
         ("3. Review", "Results page → double-click row", "Events, source function, suggestion"),
         ("4. Decide", "✓ Accept Suggestion or ✎ Override", "coverity_final_decisions.csv"),
-        ("5. Push back", "⬆ Push these to Coverity (Results toolbar)", "Server triage store updated"),
+        ("5. Push back", "Results: direct push | Setup: CSV push", "Server triage store updated"),
     ]
     for s,w,r in steps:
         row = table.add_row().cells
@@ -452,18 +452,18 @@ def create_doc():
         doc.add_paragraph(b, style='List Bullet').runs[0].font.size = Pt(8)
 
     # --- 9 Results Page ---
-    p = doc.add_heading("9. GUI Tour 3: Results Page — Filters, Tree, Details, Code Viewer", level=1)
+    p = doc.add_heading("9. GUI Tour 3: Results Page — Filters, Findings, Details, Code Viewer", level=1)
     p.runs[0].font.color.rgb = C_HDR
     add_image_with_highlights(os.path.join(IMAGES_DIR, "gui-results.png"),
-        "Figure 3 — Results Page. 3-column paned window: tree | details | code.",
+        "Figure 3 — Results Page. 3-column paned window: findings | details | code.",
         [
             ("1", "Top toolbar: Disposition Results + filter chips", "Click All/Bug/False positive/Intentional/Needs review/Accepted to filter. Category dropdown (Buffer overflow, Null pointer...) filters orthogonally. Count chips show totals."),
-            ("2", "Left tree (ID + Class) grouped by Category", "Categories in CATEGORY_ORDER, Uncategorized last. Expand/collapse: click header. Double-click row → Detail Window. Tags: pushed=green, push_fail=red, conf_high/med/low."),
+            ("2", "Left findings cards grouped by Category", "Each card shows CID, checker, verdict, and confidence. Click a card, then use Up/Down to move and auto-scroll; Home/End and Page Up/Page Down are supported. Click a category header to expand/collapse; double-click a card for Detail Window."),
             ("3", "Middle details panel", "ID 12345 — BUFFER_SIZE (Buffer overflow) + File:line + Function | Severity | Confidence 85% (color by 0.8/0.6 thresholds) + Classification big colored + Comment paragraph (CWE/CERT footer) + Proposed Fix light-blue box (code-exact, // CWE tag) + buttons."),
             ("4", "Right code viewer (dark #1E1E1E)", "VS Code theme via Pygments. Line numbers gray, error line #5A1D1D red. Source origin banner: ✓ Local source file (green), ⚠ HTML-embedded (yellow), ✗ No source (red)."),
             ("5", "Bottom buttons: Full code view | Accept | Override", "Accept → status Accepted (green), writes coverity_final_decisions.csv. Override → dialog to pick classification + comment."),
         ])
-    doc.add_paragraph("Tip: Use the filter drop-down to work the most important tail first (Bug → Needs review → False positive). The tree updates live.", style='Intense Quote').runs[0].font.size = Pt(8)
+    doc.add_paragraph("Tip: Use the filter controls to work the most important tail first (Bug → Needs review → False positive). The findings cards update live, and the arrow keys move through the visible defects.", style='Intense Quote').runs[0].font.size = Pt(8)
 
     # Table for detail panel fields
     table = doc.add_table(rows=1, cols=3)
@@ -608,25 +608,25 @@ def create_doc():
     run.font.size = Pt(7.5); run.italic = True
 
     # --- 14 Push ---
-    p = doc.add_heading("14. Push Dispositions to Coverity — Results → Server", level=1)
+    p = doc.add_heading("14. Push Dispositions to Coverity — CSV → Server", level=1)
     p.runs[0].font.color.rgb = C_HDR
-    doc.add_paragraph("Push writes your decisions back to the Coverity triage store (Classification + Comment). Click ⬆ Push these to Coverity in the Results toolbar after analysis — it pushes the defects currently in the table straight from memory, with no CSV export/re-import round trip.").runs[0].font.size = Pt(9)
+    doc.add_paragraph("Push writes decisions back to the Coverity triage store (Classification + Comment). Use ⬆ Push these to Coverity on Results for the current in-memory analysis, or use the Setup header’s ⬆ Push to Coverity action to load and push an existing decisions CSV.").runs[0].font.size = Pt(9)
     add_image_with_highlights(os.path.join(IMAGES_DIR, "gui-push.png"),
-        "Figure 6 — Push Dialog. Validates CIDs exist in the target project before pushing.",
+        "Figure 6 — Setup Header Push Dialog. Validates CSV CIDs before pushing.",
         [
             ("1", "Step 1 — Server Connection", "Host/Port/User/Pass → 🔌 Connect → Connected (X projects found)"),
             ("2", "Step 2 — Project & Triage Store", "Project dropdown → Triage Store (auto-filled to the project's store, editable; usually matches the project name, not Default)"),
-            ("3", "Step 3 — Which Defects to Push", "Choose: Accepted/overridden only (default) | Everything except 'Needs review' | All analysed defects. Table shows CID | ServerCID | Classification | Action | Comment | Checker | File — double-click a row to edit Classification/Action/Comment."),
-            ("4", "Validate CIDs against Server", "🔍 Validate fetches all defects for the project and matches by CID, or remaps stale CIDs by (checker, basename). Green = matched, Red = NOT FOUND (skipped). Validation is required before pushing."),
-            ("5", "⬆ Push to Coverity", "Batched updateTriageForCIDsInTriageStore calls → shows Succeeded/Failed + first error + tip: Try triage store = '<project>'. Tick Dry run first to preview without writing."),
+            ("3", "Step 3 — Load CSV & Review", "Browse for coverity_final_decisions.csv or coverity_dispositions.csv. Table shows CID | ServerCID | Classification | Action | Comment | Checker | File — double-click a row to edit before pushing."),
+            ("4", "Validate CIDs against Server", "🔍 Validate fetches all defects for the project and matches by CID, or remaps a stale CID by (checker, basename). Green = matched; unmatched rows are removed rather than guessed."),
+            ("5", "⬆ Push to Coverity", "Writes the reviewed CSV rows with updateTriageForCIDsInTriageStore → shows Succeeded/Failed + first error + tip: Try triage store = '<project>'."),
         ])
     steps = [
-        "1. On the Results page → ⬆ Push these to Coverity → fill Host/Port/User/Pass → 🔌 Connect",
-        "2. Pick Project → verify Triage Store (if push fails, try store = project name, not Default)",
-        "3. Choose which defects to push (default = Accepted/overridden only; safest) — the count label updates live",
-        "4. Click 🔍 Validate CIDs against Server → green rows = ready, red rows = skipped",
-        "5. Double-click any row to edit Classification/Action/Comment if needed; optionally tick Dry run → then ⬆ Push to Coverity",
-        "6. Results table rows turn green (pushed) or red (failed); if Failed >0 with a Triage Store error, change the store and retry",
+        "1. Return to Setup → top header ⬆ Push to Coverity → fill Host/Port/User/Pass → Test Connection",
+        "2. Pick Project and Stream → verify Triage Store (if push fails, try store = project name, not Default)",
+        "3. Browse for coverity_final_decisions.csv or coverity_dispositions.csv (CID + Classification are required)",
+        "4. Wait for auto-validation (or click 🔍 Validate) → green rows = ready; unmatched rows are removed",
+        "5. Double-click any row to edit Classification/Action/Comment if needed → then ⬆ Push to Coverity",
+        "6. Review green (pushed) or red (failed) rows in the dialog; if Failed >0, correct the triage store and retry",
     ]
     for s in steps:
         doc.add_paragraph(s, style='List Number').runs[0].font.size = Pt(8)
@@ -756,7 +756,7 @@ def create_doc():
         "1. Point Coverity Report at index.html folder (or ⬇ Pull from Coverity)\n"
         "2. Set Source Code Root to your C/C++ sources (repo root)\n"
         "3. ▶ Start Disposition → wait → double-click and Accept / Override each finding\n"
-        "4. On Results → ⬆ Push these to Coverity to write decisions back, or Export to Excel\n"
+        "4. Results → ⬆ Push these to Coverity (direct), or Setup → ⬆ Push to Coverity (CSV)\n"
         "* Source code never leaves your machine *"
     )
     run.font.name = 'Consolas'; run.font.size = Pt(7.5)
