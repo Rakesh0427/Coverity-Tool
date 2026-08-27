@@ -4,6 +4,7 @@ Coverity Triage Pro - Modern Desktop GUI
 Workflow: Setup -> Analysis -> Results
 """
 import csv, json, os, sys, threading, queue, re, time
+from collections import OrderedDict
 
 # --- Tcl/Tk path fix for frozen (PyInstaller) and regular installs ---
 # Fixes "can't find package Tk" / Tcl errors when running as exe or when
