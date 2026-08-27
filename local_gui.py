@@ -228,6 +228,67 @@ def _select_all_text(event):
     return "break"
 
 
+# Caches for fast source file discovery and content in GUI
+_SRC_FILE_RESOLVE_CACHE = {}  # (src_root, file_path) -> resolved_absolute_path
+_SRC_FILE_LINES_CACHE = {}    # resolved_absolute_path -> List[str] lines
+
+
+def _resolve_source_path(src_root, file_path):
+    """Resolve file_path relative to src_root with caching and fast search."""
+    if not file_path:
+        return ""
+    cache_key = (src_root or "", file_path)
+    cached = _SRC_FILE_RESOLVE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    search_path = file_path
+    if src_root and not os.path.isabs(search_path):
+        search_path = os.path.join(src_root, search_path)
+
+    if os.path.isfile(search_path):
+        _SRC_FILE_RESOLVE_CACHE[cache_key] = search_path
+        return search_path
+
+    if src_root and os.path.isabs(file_path):
+        rel_parts = file_path.strip(os.sep).split(os.sep)
+        for i in range(len(rel_parts)):
+            tail_path = os.path.join(src_root, *rel_parts[i:])
+            if os.path.isfile(tail_path):
+                _SRC_FILE_RESOLVE_CACHE[cache_key] = tail_path
+                return tail_path
+
+    if src_root and os.path.isdir(src_root):
+        target_base = os.path.basename(file_path)
+        skip = {'.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target',
+                'node_modules', '.venv', 'venv', 'dist', 'CMakeFiles'}
+        for root, dirs, files in os.walk(src_root):
+            dirs[:] = [d for d in dirs if d not in skip]
+            if target_base in files:
+                found = os.path.join(root, target_base)
+                _SRC_FILE_RESOLVE_CACHE[cache_key] = found
+                return found
+
+    _SRC_FILE_RESOLVE_CACHE[cache_key] = search_path if os.path.isfile(search_path) else ""
+    return _SRC_FILE_RESOLVE_CACHE[cache_key]
+
+
+def _get_source_file_lines(resolved_path):
+    """Read source file lines with in-memory caching."""
+    if not resolved_path or not os.path.isfile(resolved_path):
+        return []
+    cached = _SRC_FILE_LINES_CACHE.get(resolved_path)
+    if cached is not None:
+        return cached
+    try:
+        with open(resolved_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        _SRC_FILE_LINES_CACHE[resolved_path] = lines
+        return lines
+    except Exception:
+        return []
+
+
 # -- Main application ---------------------------------------------------------
 class App(tk.Tk):
     def __init__(self):
@@ -807,6 +868,13 @@ class AnalysisPage(Page):
         if not relative_path:
             return ""
 
+        if not hasattr(self, "_resolved_paths_cache"):
+            self._resolved_paths_cache = {}
+
+        cached = self._resolved_paths_cache.get(relative_path)
+        if cached is not None:
+            return cached
+
         roots = []
         if self._src_root:
             roots.append(self._src_root)
@@ -835,6 +903,9 @@ class AnalysisPage(Page):
         if not hasattr(self, "_fn_index_cache"):
             self._fn_index_cache = {}
 
+        skip = {'.git', '.hg', '.svn', '__pycache__', 'build', 'out', 'target',
+                'node_modules', '.venv', 'venv', 'dist', 'CMakeFiles', '.idea', '.vscode'}
+
         for base in roots:
             if not base or not os.path.isdir(base):
                 continue
@@ -842,6 +913,7 @@ class AnalysisPage(Page):
             # 1) Direct join first (works for relative paths)
             candidate = os.path.join(base, relative_path)
             if os.path.isfile(candidate):
+                self._resolved_paths_cache[relative_path] = candidate
                 return candidate
 
             # 2) For absolute paths, try progressively shorter suffixes, keeping
@@ -855,6 +927,10 @@ class AnalysisPage(Page):
                         best_score = score
                         best_path = tail_path
 
+            if best_path:
+                self._resolved_paths_cache[relative_path] = best_path
+                return best_path
+
             # 3) Basename match as a last resort, using a cached filename->paths
             #    index (one walk per root, not per defect). Among same-named files,
             #    pick the one whose directory path best preserves the defect's
@@ -865,6 +941,7 @@ class AnalysisPage(Page):
                 if base not in self._fn_index_cache:
                     idx = {}
                     for root, _dirs, fnames in os.walk(base):
+                        _dirs[:] = [d for d in _dirs if d not in skip]
                         for fn in fnames:
                             idx.setdefault(fn.lower(), []).append(os.path.join(root, fn))
                     self._fn_index_cache[base] = idx
@@ -873,6 +950,8 @@ class AnalysisPage(Page):
                     if score > best_score:
                         best_score = score
                         best_path = cand
+
+        self._resolved_paths_cache[relative_path] = best_path
         return best_path
 
     def _find_function_line(self, filepath: str, func_name: str) -> int:
@@ -1004,18 +1083,6 @@ class AnalysisPage(Page):
                            f"'Needs review' (no source code to analyse).\n"
                            f"  Verify the Source Code Root points to the same tree Coverity "
                            f"analysed, or check the paths in the sheet's File column.\n"))
-
-            # Report which analysis backends are actually live. A run with
-            # libclang/z3/tree-sitter missing produces far more 'Needs review'
-            # rows, and without this banner that is indistinguishable from a
-            # full-strength run that genuinely found nothing.
-            if _capabilities is not None:
-                try:
-                    _depth = _capabilities.analysis_depth()
-                    _tag = "info" if _depth == _capabilities.DEPTH_FULL else "warn"
-                    q.put((_tag, _capabilities.format_banner() + "\n"))
-                except Exception:
-                    pass
 
             # Warm the one-time workspace index up front so the first defect does
             # not silently stall the whole run for tens of seconds, and so the
@@ -1168,8 +1235,17 @@ class AnalysisPage(Page):
                             # can extract the correct function and absolute line numbers
                             path_for_ctx = real_path if real_path else filepath
                             rich_ctx = build_defect_context(
-                                {"events": events, "file": path_for_ctx, "line": line, "function": func},
-                                self._src_root, self._language)
+                                {
+                                    "events": events,
+                                    "file": path_for_ctx,
+                                    "line": line,
+                                    "function": func,
+                                    "function_code": src_code,
+                                    "code_start_line": start_line,
+                                },
+                                self._src_root,
+                                self._language,
+                            )
                             rich_ctx.pop("function_code", None)  # keep our own extraction
                         except Exception as e:
                             q.put(("warn", f"  [Context] Rich context build failed: {e}\n"))
@@ -1211,7 +1287,7 @@ class AnalysisPage(Page):
                         try:
                             classification, comment, fix, confidence = analyze_defect(
                                 context, checker, events, sub_checker=type_val,
-                                file=filepath, line=line, function=func,
+                                file=real_path or filepath, line=line, function=func,
                                 line_is_various=line_is_various,
                                 tree=context.get("function_tree"))
                         except Exception as ex:
@@ -1492,6 +1568,13 @@ class ResultsPage(Page):
         self._active_cat   = "All"
         self._soap_client  = None
         self._conn_tested  = False
+        self._card_by_cid  = {}
+        self._card_meta_by_cid = {}
+        self._category_blocks = OrderedDict()
+        self._visible_results = []
+        self._collapsed    = set()
+        self._selected_card = None
+        self._no_findings_lbl = None
         # Server settings StringVars — created before _build() uses them
         self._sv_host      = tk.StringVar()
         self._sv_port      = tk.StringVar(value="443")
@@ -1564,11 +1647,6 @@ class ResultsPage(Page):
         pane.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         # ---- COLUMN 1: Findings cards (grouped by checker category) ----
-        # A scrollable list of comfortable two-line cards: line 1 shows the
-        # CID + checker (and a push ✓/✗), line 2 a verdict pill. Confidence is
-        # deliberately NOT repeated on the card — it lives in the middle detail
-        # panel only. Implemented as a Canvas + inner Frame because a Treeview
-        # cannot render multi-line card content.
         left = tk.Frame(pane, bg=C_BG, width=252)
         left.pack_propagate(False)
         pane.add(left, minsize=214, width=252)
@@ -1599,6 +1677,11 @@ class ResultsPage(Page):
             "<Configure>",
             lambda e: self._find_canvas.configure(
                 scrollregion=self._find_canvas.bbox("all")))
+
+        self._no_findings_lbl = tk.Label(
+            self._find_inner, text="No findings",
+            font=("Segoe UI", 10), bg=C_BG, fg=C_SUBTEXT, pady=24)
+
         # Restore the keyboard behaviour users expect from a tree: after a
         # card is clicked, Up/Down move through findings and keep the selected
         # card visible. Home/End and Page Up/Page Down are supported too.
@@ -1624,11 +1707,6 @@ class ResultsPage(Page):
         # list so other panels keep their normal behaviour.
         self._find_canvas.bind("<Enter>", lambda e: self._bind_find_wheel(True))
         self._find_canvas.bind("<Leave>", lambda e: self._bind_find_wheel(False))
-
-        self._card_by_cid = {}
-        self._visible_results = []
-        self._collapsed = set()
-        self._selected_card = None
 
         # ---- COLUMN 2: Info panel ----
         mid = tk.Frame(pane, bg=C_PANEL, width=420)
@@ -1732,7 +1810,8 @@ class ResultsPage(Page):
         self._sel_idx = None
         categories = [cat for cat, _items in group_results_by_category(self._all_results).items()]
         self._cat_combo.configure(values=["All"] + categories)
-        self._populate(self._all_results)
+        self._build_card_tree(self._all_results)
+        self._apply_filters()
         self._update_summary(self._all_results)
 
     def _on_find_canvas_config(self, event):
@@ -1765,19 +1844,23 @@ class ResultsPage(Page):
         "Accepted":       ("#D1FAE5", "#047857", "Accepted"),
     }
 
-    def _populate(self, results):
+    def _build_card_tree(self, results):
+        """Instantiate category containers and card widgets once for fast filtering."""
         for w in self._find_inner.winfo_children():
-            w.destroy()
+            if w is not self._no_findings_lbl:
+                w.destroy()
+
         self._card_by_cid = {}
+        self._card_meta_by_cid = {}
+        self._category_blocks = OrderedDict()
         self._visible_results = []
 
-        self._find_count_lbl.configure(text=f"{len(results)}")
-
         if not results:
-            tk.Label(self._find_inner, text="No findings",
-                     font=("Segoe UI", 10), bg=C_BG, fg=C_SUBTEXT,
-                     pady=24).pack()
+            self._no_findings_lbl.pack(pady=24)
+            self._find_count_lbl.configure(text="0")
             return
+
+        self._no_findings_lbl.pack_forget()
 
         groups = group_results_by_category(results)
         for cat, items in groups.items():
@@ -1785,7 +1868,7 @@ class ResultsPage(Page):
             open_ = key not in self._collapsed
             arrow = "\u25BE" if open_ else "\u25B8"
             hdr = tk.Label(self._find_inner,
-                           text=f"{arrow} {cat}",
+                           text=f"{arrow} {cat} ({len(items)})",
                            anchor="w", justify="left",
                            font=("Segoe UI", 9, "bold"), bg="#EAF1FB",
                            fg=C_ACCENT, padx=8, pady=4, cursor="hand2")
@@ -1796,10 +1879,18 @@ class ResultsPage(Page):
             body.pack(fill="x", padx=6)
             if not open_:
                 body.pack_forget()
-                continue
+
+            card_entries = []
             for r in items:
-                self._visible_results.append(r)
-                self._make_card(body, r)
+                entry = self._make_card(body, r)
+                card_entries.append(entry)
+
+            self._category_blocks[cat] = {
+                "key": key,
+                "hdr": hdr,
+                "body": body,
+                "cards": card_entries,
+            }
 
     def _make_card(self, parent, r):
         if r.get("accepted", False):
@@ -1821,23 +1912,24 @@ class ResultsPage(Page):
         # --- line 1: CID + checker (and a small push marker) ---
         l1 = tk.Frame(card, bg=card_bg)
         l1.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Label(l1, text=str(r["cid"]), font=("Consolas", 9),
-                 bg=card_bg, fg=C_SUBTEXT).pack(side="left")
+        cid_lbl = tk.Label(l1, text=str(r["cid"]), font=("Consolas", 9),
+                           bg=card_bg, fg=C_SUBTEXT)
+        cid_lbl.pack(side="left")
         checker = r.get("checker", "") or ""
         if len(checker) > 18:
             checker = checker[:18] + "\u2026"
-        tk.Label(l1, text=checker, font=("Segoe UI", 9, "bold"),
-                 bg=card_bg, fg=C_TEXT).pack(side="left", padx=(6, 0))
+        chk_lbl = tk.Label(l1, text=checker, font=("Segoe UI", 9, "bold"),
+                           bg=card_bg, fg=C_TEXT)
+        chk_lbl.pack(side="left", padx=(6, 0))
+
+        push_lbl = tk.Label(l1, text="", font=("Segoe UI", 11, "bold"), bg=card_bg)
         if push_status in ("\u2713", "\u2717"):
             mark = "\u2713" if push_status == "\u2713" else "\u2717"
             col = C_FP if push_status == "\u2713" else C_BUG
-            tk.Label(l1, text=mark, font=("Segoe UI", 11, "bold"),
-                     bg=card_bg, fg=col).pack(side="right")
+            push_lbl.configure(text=mark, fg=col)
+            push_lbl.pack(side="right")
 
         # --- line 2: verdict pill ---
-        # Note: no confidence bar here. The confidence value is shown once,
-        # in the middle detail panel's metadata line, so the card does not
-        # duplicate information that the detail view already presents.
         l2 = tk.Frame(card, bg=card_bg)
         l2.pack(fill="x", padx=8, pady=(3, 7))
         pbg, pfg, ptext = self._PILL_STYLE.get(
@@ -1847,6 +1939,16 @@ class ResultsPage(Page):
         pill.pack(side="left")
 
         self._card_by_cid[r["cid"]] = card
+        self._card_meta_by_cid[r["cid"]] = {
+            "card": card,
+            "l1": l1,
+            "l2": l2,
+            "cid_lbl": cid_lbl,
+            "chk_lbl": chk_lbl,
+            "push_lbl": push_lbl,
+            "pill": pill,
+            "defect": r,
+        }
 
         def _bind(widget):
             widget.bind("<Button-1>",
@@ -1854,9 +1956,66 @@ class ResultsPage(Page):
             widget.bind("<Double-Button-1>",
                         lambda e, d=r: self._open_detail_window(d))
 
-        _bind(card); _bind(l1); _bind(l2)
-        for w in list(l1.winfo_children()) + list(l2.winfo_children()):
-            _bind(w)
+        _bind(card)
+        _bind(l1)
+        _bind(l2)
+        _bind(cid_lbl)
+        _bind(chk_lbl)
+        _bind(push_lbl)
+        _bind(pill)
+
+        return (card, r, pill, push_lbl)
+
+    def _update_card_view(self, r):
+        """Update a single card's visual styling in place without re-creating widgets."""
+        meta = self._card_meta_by_cid.get(r["cid"])
+        if not meta:
+            return
+        card = meta["card"]
+        l1 = meta["l1"]
+        l2 = meta["l2"]
+        cid_lbl = meta["cid_lbl"]
+        chk_lbl = meta["chk_lbl"]
+        push_lbl = meta["push_lbl"]
+        pill = meta["pill"]
+
+        if r.get("accepted", False):
+            cls = "Accepted"
+        else:
+            cls = r.get("classification", "Needs review")
+        push_status = r.get("push_status", "")
+        if push_status == "\u2713":
+            card_bg, edge = "#F0FDF4", "#BBF7D0"
+        elif push_status == "\u2717":
+            card_bg, edge = "#FEF2F2", "#FECACA"
+        else:
+            card_bg, edge = C_PANEL, C_BORDER
+
+        card.configure(bg=card_bg, highlightbackground=edge, highlightcolor=edge)
+        l1.configure(bg=card_bg)
+        l2.configure(bg=card_bg)
+        cid_lbl.configure(bg=card_bg)
+        chk_lbl.configure(bg=card_bg)
+
+        pbg, pfg, ptext = self._PILL_STYLE.get(cls, ("#E2E8F0", C_TEXT, cls))
+        pill.configure(text=ptext, bg=pbg, fg=pfg)
+
+        if push_status in ("\u2713", "\u2717"):
+            mark = "\u2713" if push_status == "\u2713" else "\u2717"
+            col = C_FP if push_status == "\u2713" else C_BUG
+            push_lbl.configure(text=mark, fg=col, bg=card_bg)
+            if not push_lbl.winfo_ismapped():
+                push_lbl.pack(side="right")
+        else:
+            push_lbl.configure(text="", bg=card_bg)
+            if push_lbl.winfo_ismapped():
+                push_lbl.pack_forget()
+
+    def _populate(self, results):
+        """Backwards-compatible population handler."""
+        if not self._category_blocks or len(results) != len(self._card_by_cid):
+            self._build_card_tree(results)
+        self._apply_filters()
 
     def _select_card(self, card, defect):
         self._find_canvas.focus_set()
@@ -1911,15 +2070,13 @@ class ResultsPage(Page):
     def _ensure_card_visible(self, card):
         """Scroll just enough to reveal ``card`` in the findings viewport."""
         try:
-            self._find_inner.update_idletasks()
             bbox = self._find_canvas.bbox("all")
             if not bbox:
                 return
 
-            # Card coordinates are relative to a per-category body frame.
             card_top = 0
             widget = card
-            while widget is not self._find_inner:
+            while widget is not self._find_inner and widget is not None:
                 card_top += widget.winfo_y()
                 widget = widget.master
             card_bottom = card_top + card.winfo_height()
@@ -1938,8 +2095,9 @@ class ResultsPage(Page):
             max_top = max(content_top, content_bottom - view_height)
             target_top = min(max(target_top, content_top), max_top)
             content_height = max(1, content_bottom - content_top)
-            self._find_canvas.yview_moveto(
-                (target_top - content_top) / content_height)
+            if content_height > 0:
+                self._find_canvas.yview_moveto(
+                    (target_top - content_top) / content_height)
         except (AttributeError, tk.TclError):
             pass
 
@@ -2030,7 +2188,9 @@ class ResultsPage(Page):
         self._code_box.configure(state="disabled")
         self._code_fname_lbl.configure(text="")
 
-    def _update_summary(self, results):
+    def _update_summary(self, results=None):
+        if results is None:
+            results = self._all_results
         for w in self._summary_f.winfo_children():
             w.destroy()
         from collections import Counter
@@ -2064,42 +2224,113 @@ class ResultsPage(Page):
                 side="left", padx=(8, 0))
 
     def _filter(self, label):
+        self._filter_var.set(label)
         self._active_cls = label
         self._apply_filters()
 
     def _filter_cat(self, category):
+        self._cat_var.set(category)
         self._active_cat = category
         self._apply_filters()
 
     def _apply_filters(self, _event=None):
-        # Clear previous selection and panels
+        """Instant filter tab switcher: adjusts widget visibility with zero widget recreation."""
         self._highlight_card(None)
         self._sel_idx = None
         self._clear_detail()
 
-        results = self._all_results
-        if self._active_cls == "Accepted":
-            results = [r for r in results if r.get("accepted", False)]
-        elif self._active_cls != "All":
-            results = [r for r in results
-                       if not r.get("accepted", False)
-                       and r.get("classification") == self._active_cls]
-        if self._active_cat != "All":
-            results = [r for r in results
-                       if category_for_checker(r.get("checker", "")) == self._active_cat]
-        self._populate(results)
+        visible_results = []
+        for cat, block in self._category_blocks.items():
+            hdr = block["hdr"]
+            body = block["body"]
+            cards = block["cards"]
+            key = block["key"]
+
+            if self._active_cat != "All" and cat != self._active_cat:
+                if hdr.winfo_ismapped():
+                    hdr.pack_forget()
+                if body.winfo_ismapped():
+                    body.pack_forget()
+                continue
+
+            matching_cards = 0
+            for card, r, _pill, _push in cards:
+                is_accepted = r.get("accepted", False)
+                cls = "Accepted" if is_accepted else r.get("classification", "Needs review")
+
+                matches_cls = (
+                    self._active_cls == "All" or
+                    (self._active_cls == "Accepted" and is_accepted) or
+                    (self._active_cls == cls and not is_accepted)
+                )
+
+                if matches_cls:
+                    visible_results.append(r)
+                    matching_cards += 1
+                    if not card.winfo_ismapped():
+                        card.pack(fill="x", pady=3, padx=2)
+                else:
+                    if card.winfo_ismapped():
+                        card.pack_forget()
+
+            if matching_cards > 0:
+                open_ = key not in self._collapsed
+                arrow = "\u25BE" if open_ else "\u25B8"
+                hdr.configure(text=f"{arrow} {cat} ({matching_cards})")
+                if not hdr.winfo_ismapped():
+                    hdr.pack(fill="x", padx=6, pady=(6, 0))
+                if open_:
+                    if not body.winfo_ismapped():
+                        body.pack(fill="x", padx=6)
+                else:
+                    if body.winfo_ismapped():
+                        body.pack_forget()
+            else:
+                if hdr.winfo_ismapped():
+                    hdr.pack_forget()
+                if body.winfo_ismapped():
+                    body.pack_forget()
+
+        self._visible_results = visible_results
+        self._find_count_lbl.configure(text=f"{len(visible_results)}")
+        if not visible_results:
+            if not self._no_findings_lbl.winfo_ismapped():
+                self._no_findings_lbl.pack(pady=24)
+        else:
+            if self._no_findings_lbl.winfo_ismapped():
+                self._no_findings_lbl.pack_forget()
+
+        self._find_canvas.configure(scrollregion=self._find_canvas.bbox("all"))
+        self._find_canvas.yview_moveto(0.0)
 
     def _toggle_category(self, key):
+        """Toggle category collapse without re-creating any cards."""
         self._find_canvas.focus_set()
         if key in self._collapsed:
             self._collapsed.discard(key)
         else:
             self._collapsed.add(key)
-        # Re-render the list, then scroll back to the top of that category.
-        self._highlight_card(None)
-        self._sel_idx = None
-        results = self._filtered_results()
-        self._populate(results)
+
+        for cat, block in self._category_blocks.items():
+            if block["key"] == key:
+                hdr = block["hdr"]
+                body = block["body"]
+                cards = block["cards"]
+                matching_count = sum(1 for c, r, _p, _ps in cards if (
+                    self._active_cls == "All" or
+                    (self._active_cls == "Accepted" and r.get("accepted", False)) or
+                    (self._active_cls == r.get("classification", "Needs review") and not r.get("accepted", False))
+                ))
+                open_ = key not in self._collapsed
+                arrow = "\u25BE" if open_ else "\u25B8"
+                hdr.configure(text=f"{arrow} {cat} ({matching_count})")
+                if open_:
+                    body.pack(fill="x", padx=6)
+                else:
+                    body.pack_forget()
+                break
+
+        self._find_canvas.configure(scrollregion=self._find_canvas.bbox("all"))
 
     def _filtered_results(self):
         results = self._all_results
@@ -2115,20 +2346,18 @@ class ResultsPage(Page):
         return results
 
     def _select_by_id(self, cid):
-        card = self._card_by_cid.get(cid)
         defect = next((r for r in self._all_results
                        if self._cid_match(r["cid"], cid)), None)
-        if card is None:
-            # The card is hidden by a collapsed category or a filter — expand
-            # the relevant category and re-render so the card exists.
-            if defect is not None:
-                cat = category_for_checker(defect.get("checker", ""))
-                self._collapsed.discard(_iid_safe(cat))
-                self._populate(self._filtered_results())
-                card = self._card_by_cid.get(cid)
-        if card is None or defect is None:
+        if defect is None:
             return
-        self._select_card(card, defect)
+        cat = category_for_checker(defect.get("checker", ""))
+        key = _iid_safe(cat)
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+            self._apply_filters()
+        card = self._card_by_cid.get(defect.get("cid"))
+        if card is not None:
+            self._select_card(card, defect)
 
     @staticmethod
     def _cid_match(a, b):
@@ -2139,36 +2368,17 @@ class ResultsPage(Page):
             return str(a).strip() == str(b).strip()
 
     def _populate_code_viewer(self, defect):
-        """Load source code into the right-side code viewer."""
+        """Load source code into the right-side code viewer with caching and batch text insertion."""
         src_root = self.app._frames[SetupPage]._src_root_var.get().strip()
         file_path = defect.get("file", "")
         raw_lines = []
         origin = "none"
 
-        # Try local file first
-        if file_path and src_root:
-            search_path = file_path
-            if not os.path.isabs(search_path):
-                search_path = os.path.join(src_root, search_path)
-            if os.path.isabs(file_path) and not os.path.isfile(search_path):
-                rel_parts = file_path.strip(os.sep).split(os.sep)
-                for i in range(len(rel_parts)):
-                    tail_path = os.path.join(src_root, *rel_parts[i:])
-                    if os.path.isfile(tail_path):
-                        search_path = tail_path
-                        break
-            if not os.path.isfile(search_path):
-                for root, dirs, files in os.walk(src_root):
-                    if os.path.basename(file_path) in files:
-                        search_path = os.path.join(root, os.path.basename(file_path))
-                        break
-            if os.path.isfile(search_path):
-                try:
-                    with open(search_path, "r", encoding="utf-8", errors="replace") as f:
-                        raw_lines = f.readlines()
-                    origin = "local"
-                except Exception:
-                    pass
+        resolved_path = _resolve_source_path(src_root, file_path) if file_path else ""
+        if resolved_path:
+            raw_lines = _get_source_file_lines(resolved_path)
+            if raw_lines:
+                origin = "local"
 
         # Fallback to embedded source
         if not raw_lines:
@@ -2178,7 +2388,7 @@ class ResultsPage(Page):
                 origin = "html"
 
         if not raw_lines:
-            raw_lines = ["(No source code available)"]
+            raw_lines = ["(No source code available)\n"]
             origin = "none"
 
         self._code_box.configure(state="normal")
@@ -2187,19 +2397,16 @@ class ResultsPage(Page):
         error_line = defect.get("line", 0)
         total = len(raw_lines)
 
-        for i, line in enumerate(raw_lines):
-            lno = i + 1
-            display = line.rstrip("\n").rstrip("\r")
-            self._code_box.insert("end", f"{lno:>6}  ", "lineno")
-            self._code_box.insert("end", display + "\n")
-            if lno == error_line:
-                line_start = self._code_box.index("end-2l linestart")
-                line_end = self._code_box.index("end-1l lineend")
-                self._code_box.tag_add("error_line", line_start, line_end)
+        # Batch insert for instant rendering of large files
+        formatted = "".join(f"{i+1:>6}  {line.rstrip(chr(13) + chr(10))}\n"
+                            for i, line in enumerate(raw_lines))
+        self._code_box.insert("1.0", formatted)
 
-        # Scroll to error line with padding to center it
+        # Highlight error line if present
         if error_line and 1 <= error_line <= total:
+            self._code_box.tag_add("error_line", f"{error_line}.0", f"{error_line}.end+1c")
             self._code_box.see(f"{error_line}.0")
+
         self._code_box.configure(state="disabled")
 
         fname = os.path.basename(file_path) if file_path else ""
@@ -2247,7 +2454,8 @@ class ResultsPage(Page):
         )
 
         saved_cid = self._sel_idx["cid"]
-        self._filter(self._filter_var.get())
+        self._update_card_view(self._sel_idx)
+        self._apply_filters()
         self._update_summary(self._all_results)
 
         self._select_by_id(saved_cid)
@@ -2265,7 +2473,9 @@ class ResultsPage(Page):
                          on_complete=self._refresh_after_push)
 
     def _refresh_after_push(self):
-        """Repaint the tree so push_status colouring (green/red) shows up."""
+        """Repaint the cards so push_status colouring (green/red) shows up."""
+        for r in self._all_results:
+            self._update_card_view(r)
         self._apply_filters()
         self._update_summary(self._all_results)
 
@@ -2323,7 +2533,8 @@ class ResultsPage(Page):
             self._sel_idx["accepted_at"] = ""
             self._save_decision(self._sel_idx, classification, comment, accepted=False)
             win.destroy()
-            self._filter(self._filter_var.get())
+            self._update_card_view(self._sel_idx)
+            self._apply_filters()
             self._update_summary(self._all_results)
             messagebox.showinfo("Saved", "Override recorded.\nStatus updated.")
 
@@ -2575,35 +2786,12 @@ class DetailWindow(tk.Toplevel):
         source_origin = "none"
         file_path = defect.get("file", "")
         if file_path:
-            search_path = file_path
-            if not os.path.isabs(search_path):
-                search_path = os.path.join(self.src_root, search_path)
-
-            if os.path.isabs(file_path) and not os.path.isfile(search_path):
-                rel_parts = file_path.strip(os.sep).split(os.sep)
-                for i in range(len(rel_parts)):
-                    tail_path = os.path.join(self.src_root, *rel_parts[i:])
-                    if os.path.isfile(tail_path):
-                        search_path = tail_path
-                        break
-
-            if not os.path.isfile(search_path):
-                for root, dirs, files in os.walk(self.src_root):
-                    if os.path.basename(file_path) in files:
-                        search_path = os.path.join(root, os.path.basename(file_path))
-                        break
-
-            if os.path.isfile(search_path):
-                try:
-                    with open(search_path, "r", encoding="utf-8", errors="replace") as f:
-                        lines = f.readlines()
-                    src = "".join(
-                        f"{i+1:>6}  {l}"
-                        for i, l in enumerate(lines)
-                    )
+            resolved_path = _resolve_source_path(self.src_root, file_path)
+            if resolved_path:
+                lines = _get_source_file_lines(resolved_path)
+                if lines:
+                    src = "".join(f"{i+1:>6}  {l}" for i, l in enumerate(lines))
                     source_origin = "local"
-                except Exception:
-                    pass
 
         if not src:
             src = defect.get("source_code", "")

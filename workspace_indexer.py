@@ -4,6 +4,7 @@ Builds a function-name → (filepath, start_line, end_line, signature) map
 by scanning all C/C++ source files under a root directory.
 """
 import os
+import re
 from typing import Dict, List, NamedTuple, Optional
 
 # Reuse the already-configured parser from code_extractor
@@ -19,6 +20,16 @@ class FunctionEntry(NamedTuple):
     signature:  str   # first non-blank line of the function
 
 
+_CONTROL_KEYWORDS = frozenset({
+    'if', 'while', 'for', 'switch', 'catch', 'return', 'sizeof', 'sizeof...',
+    'define', 'include', 'typedef', 'struct', 'union', 'enum', 'case', 'default',
+})
+
+_FUNC_PAT = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z0-9_\s\*:<>,~]*[\s\*])?([A-Za-z_]\w*)\s*\([^;]*\)\s*\{?'
+)
+
+
 def _extract_signature(source: str, start_byte: int, end_byte: int) -> str:
     snippet = source[start_byte:start_byte + 200]
     for line in snippet.splitlines():
@@ -32,27 +43,66 @@ def _scan_file(filepath: str, language: str) -> Dict[str, List[FunctionEntry]]:
     source = _read_file(filepath)
     if not source:
         return {}
+
+    # Fast line scan first (avoids expensive full-AST tree-sitter parse for entire workspace)
+    lines = source.splitlines()
+    result: Dict[str, List[FunctionEntry]] = {}
+    n = len(lines)
+    i = 0
+    while i < n:
+        line = lines[i].strip()
+        if not line or line.startswith(('#', '//', '/*', '*')):
+            i += 1
+            continue
+        m = _FUNC_PAT.match(line)
+        if m and m.group(1) not in _CONTROL_KEYWORDS:
+            name = m.group(1)
+            start_line = i + 1
+            sig = line[:120]
+            has_brace = '{' in line
+            k = i
+            while not has_brace and k < min(n - 1, i + 4):
+                k += 1
+                if '{' in lines[k]:
+                    has_brace = True
+                    break
+                if ';' in lines[k]:
+                    break
+            if has_brace:
+                depth = 0
+                end_line = min(n, start_line + 50)
+                for j in range(k, n):
+                    depth += lines[j].count('{') - lines[j].count('}')
+                    if depth <= 0 and j >= k:
+                        end_line = j + 1
+                        i = j
+                        break
+                entry = FunctionEntry(filepath, start_line, end_line, sig)
+                result.setdefault(name, []).append(entry)
+        i += 1
+
+    if result:
+        return result
+
+    # Fallback to tree-sitter AST parse if regex found nothing
     try:
         parser = _get_parser(language)
         tree = parser.parse(bytes(source, 'utf-8'))
+        def _walk(node):
+            if node.type in ('function_definition', 'method_definition'):
+                name = _get_func_name(node)
+                if name:
+                    start = node.start_point[0] + 1   # tree-sitter rows are 0-indexed
+                    end   = node.end_point[0] + 1
+                    sig   = _extract_signature(source, node.start_byte, node.end_byte)
+                    entry = FunctionEntry(filepath, start, end, sig)
+                    result.setdefault(name, []).append(entry)
+            for child in node.children:
+                _walk(child)
+        _walk(tree.root_node)
     except Exception:
-        return {}
+        pass
 
-    result: Dict[str, List[FunctionEntry]] = {}
-
-    def _walk(node):
-        if node.type == 'function_definition':
-            name = _get_func_name(node)
-            if name:
-                start = node.start_point[0] + 1   # tree-sitter rows are 0-indexed
-                end   = node.end_point[0] + 1
-                sig   = _extract_signature(source, node.start_byte, node.end_byte)
-                entry = FunctionEntry(filepath, start, end, sig)
-                result.setdefault(name, []).append(entry)
-        for child in node.children:
-            _walk(child)
-
-    _walk(tree.root_node)
     return result
 
 

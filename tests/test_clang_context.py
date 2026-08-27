@@ -152,3 +152,26 @@ def test_translation_units_are_cached(tmp_path):
     cr.set_translation_context(str(src), [])
     assert cr.parse_real_file() is cr.parse_real_file()
     cr.clear_tu_cache()
+
+
+@requires_libclang
+def test_patched_clang_finalizers_survive_shutdown(tmp_path):
+    """Simulate interpreter shutdown where clang.cindex.conf is cleared before GC."""
+    import clang.cindex as cx
+    src = tmp_path / "t.c"
+    src.write_text("int x = 42;")
+    cr.set_translation_context(str(src), [])
+    tu = cr.parse_real_file()
+    assert tu is not None
+
+    idx = cx.Index.create()
+    # Save original conf and simulate interpreter shutdown where conf becomes None
+    orig_conf = cx.conf
+    try:
+        cx.conf = None
+        # Calling __del__ directly or via garbage collection must not raise AttributeError
+        tu.__del__()
+        idx.__del__()
+    finally:
+        cx.conf = orig_conf
+
