@@ -472,9 +472,9 @@ class SetupPage(Page):
         f = filedialog.askopenfilename(
             title="Select Coverity Report (HTML or Excel)",
             filetypes=[
-                ("All supported", "*.html *.xlsx *.xls"),
+                ("All supported", "*.html *.xlsx"),
                 ("HTML files", "*.html"),
-                ("Excel files", "*.xlsx *.xls"),
+                ("Excel files", "*.xlsx"),
                 ("All files", "*.*")
             ])
         if f:
@@ -520,15 +520,23 @@ class SetupPage(Page):
 
         if os.path.isfile(inp):
             ext = os.path.splitext(inp)[1].lower()
-            if ext in ('.xlsx', '.xls'):
+            if ext == '.xlsx':
                 input_mode = "excel"
                 input_path = inp
+            elif ext == '.xls':
+                # openpyxl reads only .xlsx — be explicit instead of failing
+                # later in the analysis thread with a cryptic parser error.
+                messagebox.showwarning("Unsupported Excel Format",
+                    "Legacy .xls files cannot be read by the analyser.\n\n"
+                    "Please open the export in Excel (or LibreOffice) and\n"
+                    "save it as .xlsx, then select that file instead.")
+                return
             elif ext == '.html':
                 input_mode = "html"
                 input_path = inp
             else:
                 messagebox.showwarning("Invalid File",
-                    "Please select an HTML file, Excel file (.xlsx/.xls), or a folder.")
+                    "Please select an HTML file, Excel file (.xlsx), or a folder.")
                 return
         elif os.path.isdir(inp):
             index_path = os.path.join(inp, "index.html")
@@ -1557,9 +1565,10 @@ class ResultsPage(Page):
 
         # ---- COLUMN 1: Findings cards (grouped by checker category) ----
         # A scrollable list of comfortable two-line cards: line 1 shows the
-        # CID + checker (and a push ✓/✗), line 2 a verdict pill + confidence
-        # bar. Implemented as a Canvas + inner Frame because a Treeview cannot
-        # render multi-line card content.
+        # CID + checker (and a push ✓/✗), line 2 a verdict pill. Confidence is
+        # deliberately NOT repeated on the card — it lives in the middle detail
+        # panel only. Implemented as a Canvas + inner Frame because a Treeview
+        # cannot render multi-line card content.
         left = tk.Frame(pane, bg=C_BG, width=252)
         left.pack_propagate(False)
         pane.add(left, minsize=214, width=252)
@@ -1626,15 +1635,9 @@ class ResultsPage(Page):
         mid.pack_propagate(False)
         pane.add(mid, minsize=350, width=420)
 
-        self._detail_id = tk.Text(mid, height=2, bg=C_PANEL,
-            font=("Segoe UI", 13, "bold"), relief="flat", wrap="word",
-            borderwidth=0, highlightthickness=0, state="disabled",
-            fg=C_ACCENT)
-        self._detail_id.bind("<Control-c>",
-            lambda e: _copy_selected_text(self._detail_id, self.app, "id / checker"))
-        self._detail_id.bind("<Control-a>", _select_all_text)
-        self._detail_id.pack(anchor="w", padx=14, pady=(14, 0))
-
+        # The middle panel intentionally does NOT repeat the CID + checker
+        # title or the classification verdict — the selected findings card on
+        # the left already shows both, and duplicating them here was redundant.
         self._detail_meta = tk.Text(mid, height=3, bg=C_PANEL,
             font=("Segoe UI", 9), relief="flat", wrap="word",
             borderwidth=0, highlightthickness=0, state="disabled",
@@ -1642,17 +1645,7 @@ class ResultsPage(Page):
         self._detail_meta.bind("<Control-c>",
             lambda e: _copy_selected_text(self._detail_meta, self.app, "metadata"))
         self._detail_meta.bind("<Control-a>", _select_all_text)
-        self._detail_meta.pack(fill="x", padx=14, pady=(2, 0))
-
-        self._detail_class = tk.Text(mid, height=1, bg=C_PANEL,
-            font=("Segoe UI", 12, "bold"), relief="flat", wrap="word",
-            borderwidth=0, highlightthickness=0, state="disabled",
-            fg=C_FP)
-        self._detail_class.tag_configure("cls", foreground=C_FP)
-        self._detail_class.bind("<Control-c>",
-            lambda e: _copy_selected_text(self._detail_class, self.app, "classification"))
-        self._detail_class.bind("<Control-a>", _select_all_text)
-        self._detail_class.pack(fill="x", padx=14, pady=(10, 0))
+        self._detail_meta.pack(fill="x", padx=14, pady=(14, 0))
 
         self._detail_comment = tk.Text(mid, height=4, bg=C_PANEL, fg=C_TEXT,
             font=("Segoe UI", 10), relief="flat", wrap="word",
@@ -1660,7 +1653,7 @@ class ResultsPage(Page):
         self._detail_comment.bind("<Control-c>",
             lambda e: _copy_selected_text(self._detail_comment, self.app, "comment"))
         self._detail_comment.bind("<Control-a>", _select_all_text)
-        self._detail_comment.pack(fill="both", expand=True, padx=14, pady=(2, 6))
+        self._detail_comment.pack(fill="both", expand=True, padx=14, pady=(10, 6))
 
         self._fix_label = tk.Label(mid, text="Source-validated Proposed Fix",
                  font=("Segoe UI", 9, "bold"), bg=C_PANEL, fg=C_ACCENT)
@@ -1841,7 +1834,10 @@ class ResultsPage(Page):
             tk.Label(l1, text=mark, font=("Segoe UI", 11, "bold"),
                      bg=card_bg, fg=col).pack(side="right")
 
-        # --- line 2: verdict pill + confidence bar ---
+        # --- line 2: verdict pill ---
+        # Note: no confidence bar here. The confidence value is shown once,
+        # in the middle detail panel's metadata line, so the card does not
+        # duplicate information that the detail view already presents.
         l2 = tk.Frame(card, bg=card_bg)
         l2.pack(fill="x", padx=8, pady=(3, 7))
         pbg, pfg, ptext = self._PILL_STYLE.get(
@@ -1849,20 +1845,6 @@ class ResultsPage(Page):
         pill = tk.Label(l2, text=ptext, font=("Segoe UI", 8, "bold"),
                         bg=pbg, fg=pfg, padx=7, pady=1)
         pill.pack(side="left")
-
-        try:
-            conf = int(float(r.get("confidence", 0.0)) * 100)
-        except Exception:
-            conf = 0
-        bar_bg = tk.Frame(l2, bg="#E2E8F0", width=74, height=6)
-        bar_bg.pack(side="left", padx=(8, 6), pady=5)
-        bar_bg.pack_propagate(False)
-        conf_col = C_FP if conf >= 80 else (C_INTENT if conf >= 60 else C_BUG)
-        fill_w = max(1, int(74 * max(0, min(conf, 100)) / 100))
-        bar_fg = tk.Frame(bar_bg, bg=conf_col, width=fill_w, height=6)
-        bar_fg.place(x=0, y=0)
-        tk.Label(l2, text=f"{conf}%", font=("Segoe UI", 8, "bold"),
-                 bg=card_bg, fg=conf_col).pack(side="left")
 
         self._card_by_cid[r["cid"]] = card
 
@@ -1872,7 +1854,7 @@ class ResultsPage(Page):
             widget.bind("<Double-Button-1>",
                         lambda e, d=r: self._open_detail_window(d))
 
-        _bind(card); _bind(l1); _bind(l2); _bind(bar_bg); _bind(bar_fg)
+        _bind(card); _bind(l1); _bind(l2)
         for w in list(l1.winfo_children()) + list(l2.winfo_children()):
             _bind(w)
 
@@ -1976,20 +1958,14 @@ class ResultsPage(Page):
                            highlightbackground=C_ACCENT, highlightcolor=C_ACCENT)
 
     def _show_defect(self, defect):
-        """Populate the middle detail panel + code viewer for a defect."""
-        is_accepted = defect.get("accepted", False)
-        if is_accepted:
-            cls = "Accepted"
-            col = C_ACCEPTED
-        else:
-            cls = defect.get("classification", "Needs review")
-            col = CLASS_COLOR.get(cls, C_TEXT)
+        """Populate the middle detail panel + code viewer for a defect.
 
-        self._detail_id.configure(state="normal")
-        self._detail_id.delete(1.0, tk.END)
-        cat = category_for_checker(defect.get("checker", ""))
-        self._detail_id.insert(tk.END, f"ID {defect['cid']}  —  {defect['checker']}  ({cat})")
-        self._detail_id.configure(state="disabled")
+        The panel shows only data the findings card does not already show
+        (file/line, function, severity, confidence, comment, fix); the CID,
+        checker and verdict stay on the selected card to avoid duplication.
+        """
+        is_accepted = defect.get("accepted", False)
+
         line_display = "Various" if defect.get("line_is_various") else defect.get("line", "")
         conf = defect.get('confidence', 0.0)
         conf_str = f"{int(conf*100)}%"
@@ -2002,11 +1978,6 @@ class ResultsPage(Page):
             f"Severity: {defect.get('severity', 'N/A')}   •   "
             f"Confidence: {conf_str}")
         self._detail_meta.configure(state="disabled")
-        self._detail_class.configure(state="normal")
-        self._detail_class.delete(1.0, tk.END)
-        self._detail_class.tag_configure("cls", foreground=col)
-        self._detail_class.insert(tk.END, cls, "cls")
-        self._detail_class.configure(state="disabled")
 
         if is_accepted:
             comment_text = f"Accepted by {defect.get('accepted_by', 'unknown')} at {defect.get('accepted_at', '')}. {defect.get('comment', '')}"
@@ -2043,11 +2014,11 @@ class ResultsPage(Page):
 
     def _clear_detail(self):
         """Empty the middle panel and code viewer (used after a filter change)."""
-        self._detail_id.configure(state="normal")
-        self._detail_id.delete(1.0, tk.END)
-        self._detail_id.insert(tk.END, "Select a defect")
-        self._detail_id.configure(state="disabled")
-        for w in (self._detail_meta, self._detail_class, self._detail_comment):
+        self._detail_meta.configure(state="normal", fg=C_SUBTEXT)
+        self._detail_meta.delete(1.0, tk.END)
+        self._detail_meta.insert(tk.END, "Select a finding to see its details")
+        self._detail_meta.configure(state="disabled")
+        for w in (self._detail_comment,):
             w.configure(state="normal")
             w.delete(1.0, tk.END)
             w.configure(state="disabled")
