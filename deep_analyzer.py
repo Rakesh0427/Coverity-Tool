@@ -285,6 +285,8 @@ def _libclang_buffer_info(code: str, var_name: str) -> 'Optional[BufferInfo]':
     """Use libclang AST to resolve exact buffer size including pointer-to-malloc cases."""
     try:
         import clang.cindex as cx
+        if _CLANG_RESOLVER and hasattr(_cr, '_patch_clang_cindex'):
+            _cr._patch_clang_cindex()
         import tempfile, os
         idx = cx.Index.create()
         # write to a temp .c file so clang can parse it

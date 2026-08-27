@@ -6,10 +6,66 @@ Extracted from deep_analyzer._libclang_buffer_info and expanded.
 Falls back gracefully when libclang is unavailable or the code cannot be parsed.
 Windows: set LIBCLANG_PATH env var to the path of libclang.dll if auto-discovery fails.
 """
+import atexit
 import re
 import os
 import tempfile
 from typing import Dict, Optional, Sequence, Tuple
+
+# ---------------------------------------------------------------------------
+# Clang finalizer safety patch
+# ---------------------------------------------------------------------------
+
+def _patch_clang_cindex() -> None:
+    """Patch clang.cindex finalizers to prevent AttributeError during interpreter shutdown.
+
+    In standard libclang python bindings, TranslationUnit.__del__, Index.__del__, etc.
+    invoke methods on `conf.lib`. During Python process shutdown, module globals (like `conf`)
+    are cleared in arbitrary order, often becoming None before surviving AST objects are
+    garbage collected. This causes `AttributeError: 'NoneType' object has no attribute 'lib'`
+    messages to be emitted to stderr on exit.
+    """
+    try:
+        import clang.cindex as cx
+    except (ImportError, Exception):
+        return
+
+    if getattr(cx, '_cov_tool_patched', False):
+        return
+
+    classes = (
+        'TranslationUnit',
+        'Index',
+        'Diagnostic',
+        'TokenGroup',
+        'CodeCompletionResults',
+        'CompilationDatabase',
+        'CompileCommands',
+        '_CXString',
+    )
+    for cls_name in classes:
+        cls = getattr(cx, cls_name, None)
+        if cls and hasattr(cls, '__del__'):
+            orig_del = cls.__del__
+
+            def _make_safe_del(orig, module):
+                def _safe_del(self, _orig=orig, _mod=module):
+                    try:
+                        conf = getattr(_mod, 'conf', None)
+                        if conf is not None and getattr(conf, 'lib', None) is not None:
+                            _orig(self)
+                    except Exception:
+                        pass
+                return _safe_del
+
+            cls.__del__ = _make_safe_del(orig_del, cx)
+
+    cx._cov_tool_patched = True
+
+
+# Apply finalizer safety patch immediately if clang.cindex is available
+_patch_clang_cindex()
+
 
 # ---------------------------------------------------------------------------
 # Windows DLL discovery
@@ -19,6 +75,7 @@ def _init_libclang() -> bool:
     """Attempt to locate and configure libclang. Returns True if available."""
     try:
         import clang.cindex as cx
+        _patch_clang_cindex()
         # Try default (auto-discovered via PATH / LD_LIBRARY_PATH)
         try:
             cx.Index.create()
@@ -169,6 +226,9 @@ def parse_real_file(file_path: str = ''):
 def clear_tu_cache() -> None:
     """Drop cached translation units (after edits, or to release memory)."""
     _TU_CACHE.clear()
+
+
+atexit.register(clear_tu_cache)
 
 
 def _parse_code(code: str, extra_args=None):
