@@ -6,18 +6,63 @@
 block_cipher = None
 
 import os, sys, sysconfig
-# --- Bundle Tcl/Tk for frozen exe (fixes Tcl errors) ---
+
+
+# Ensure PyInstaller's tkinter probe uses the interpreter's real Tcl/Tk
+# instead of inherited external toolchain variables.
+_base_tcl = os.path.join(getattr(sys, "base_prefix", ""), "tcl", "tcl8.6")
+_base_tk = os.path.join(getattr(sys, "base_prefix", ""), "tcl", "tk8.6")
+if os.path.isfile(os.path.join(_base_tcl, "init.tcl")):
+    os.environ["TCL_LIBRARY"] = _base_tcl
+if os.path.isfile(os.path.join(_base_tk, "tk.tcl")):
+    os.environ["TK_LIBRARY"] = _base_tk
+
+
+def _dedupe_pairs(pairs):
+    out, seen = [], set()
+    for src, dst in pairs:
+        key = (os.path.normcase(os.path.abspath(src)), dst)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((src, dst))
+    return out
+
+
+def _python_roots():
+    roots = []
+    for p in (
+        sysconfig.get_path("data"),
+        getattr(sys, "base_prefix", ""),
+        getattr(sys, "prefix", ""),
+        os.path.dirname(os.path.dirname(sys.executable)),
+    ):
+        if p and p not in roots:
+            roots.append(p)
+    return roots
+
+
+# --- Bundle Tcl/Tk + _tkinter for frozen exe ---
+# Virtual environments on Windows may not carry Tcl/Tk files under their own
+# root, so probe both the venv and base interpreter roots.
 _tcl_datas = []
-try:
-    _tcl_root = os.path.join(sysconfig.get_path("data"), "tcl")
-    if os.path.isdir(_tcl_root):
-        for _sub in ("tcl8.6", "tk8.6"):
-            _src = os.path.join(_tcl_root, _sub)
-            if os.path.isdir(_src):
-                _tcl_datas.append((_src, os.path.join("tcl", _sub)))
-    # Also handle PyInstaller _MEIPASS case via runtime hook (local_gui.py does os.environ setup)
-except Exception:
-    pass
+_tk_binaries = []
+for _root in _python_roots():
+    _tcl_root = os.path.join(_root, "tcl")
+    _dll_dir = os.path.join(_root, "DLLs")
+
+    for _sub in ("tcl8.6", "tk8.6"):
+        _src = os.path.join(_tcl_root, _sub)
+        if os.path.isdir(_src):
+            _tcl_datas.append((_src, os.path.join("tcl", _sub)))
+
+    for _dll in ("_tkinter.pyd", "tcl86t.dll", "tk86t.dll"):
+        _src = os.path.join(_dll_dir, _dll)
+        if os.path.isfile(_src):
+            _tk_binaries.append((_src, "."))
+
+_tcl_datas = _dedupe_pairs(_tcl_datas)
+_tk_binaries = _dedupe_pairs(_tk_binaries)
 
 # --- Bundle cppcheck (offline corroboration backend) from the pip wheel ---
 # capabilities.find_cppcheck_bin() finds it at runtime under
@@ -34,7 +79,7 @@ except Exception:
 a = Analysis(
     ['local_gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=_tk_binaries,
     datas=_tcl_datas + _cppcheck_datas + [
         ('docs/Coverity_Tool_User_Guide.docx', 'docs'),
         ('docs/CORROBORATION_BACKEND.md', 'docs'),
@@ -47,6 +92,7 @@ a = Analysis(
         'zeep', 'zeep.transports', 'zeep.wsse.username', 'zeep.exceptions',
         'lxml', 'lxml.etree', 'bs4', 'openpyxl', 'openpyxl.styles',
         'requests', 'urllib3',
+        'tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', '_tkinter',
         'tree_sitter', 'tree_sitter_c', 'tree_sitter_cpp',
         'pygments', 'pygments.lexers', 'pygments.formatters',
         'yaml', 'networkx',

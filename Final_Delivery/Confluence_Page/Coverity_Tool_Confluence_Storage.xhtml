@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<confluence-storage xmlns:ac="http://atlassian.com/content" xmlns:ri="http://atlassian.com/resource/identifier">
+<h1>Coverity Disposition Tool</h1>
+<ac:structured-macro ac:name="info"><ac:rich-text-body><p><strong>Parent page:</strong> Datalink Quality Dashboard<br/><strong>Space:</strong> CNSDLK<br/><strong>Current package:</strong> Coverity-Tool-Final-20260831.zip<br/><strong>Manual document:</strong> Coverity_Tool_User_Manual.docx</p></ac:rich-text-body></ac:structured-macro>
+
+<h2>Overview</h2>
+<p>The Coverity Disposition Tool is a Windows desktop utility for reviewing Coverity findings, checking each finding against local source code, recording reviewer decisions, and pushing final dispositions back to Coverity Connect.</p>
+<ul>
+  <li>Pull defects from Coverity Connect.</li>
+  <li>Run local disposition analysis against the matching source checkout.</li>
+  <li>Review each CID with source context and suggested disposition.</li>
+  <li>Accept or override decisions.</li>
+  <li>Push approved dispositions back to Coverity Connect.</li>
+</ul>
+
+<h2>Downloads</h2>
+<table><tbody>
+<tr><th>File</th><th>Purpose</th></tr>
+<tr><td><ac:link><ri:attachment ri:filename="Coverity-Tool-Final-20260831.zip"/><ac:plain-text-link-body><![CDATA[Coverity-Tool-Final-20260831.zip]]></ac:plain-text-link-body></ac:link></td><td>Final Windows package containing the executable and required runtime files.</td></tr>
+<tr><td><ac:link><ri:attachment ri:filename="Coverity_Tool_User_Manual.docx"/><ac:plain-text-link-body><![CDATA[Coverity_Tool_User_Manual.docx]]></ac:plain-text-link-body></ac:link></td><td>Word user manual with screenshots and workflow explanation.</td></tr>
+</tbody></table>
+
+<h2>Package Contents</h2>
+<table><tbody>
+<tr><th>Item</th><th>Description</th></tr>
+<tr><td>CoverityTool.exe</td><td>Main desktop application.</td></tr>
+<tr><td>_internal</td><td>Required runtime libraries. Keep this folder beside the executable.</td></tr>
+<tr><td>docs</td><td>User manual, sample report, and sample source files.</td></tr>
+<tr><td>run_tool.bat</td><td>Batch launcher for the packaged tool.</td></tr>
+<tr><td>CoverityTool.bat</td><td>Alternate launcher.</td></tr>
+<tr><td>README.md / README.txt</td><td>Short setup and troubleshooting notes.</td></tr>
+</tbody></table>
+
+<h2>Important Usage Notes</h2>
+<ul>
+  <li>Keep CoverityTool.exe and _internal in the same folder.</li>
+  <li>Do not move only the .exe to another location; the app needs the bundled runtime files.</li>
+  <li>Use the final package zip from this page, not older local builds.</li>
+  <li>Source code is analyzed locally. The tool does not upload local source code.</li>
+  <li>Coverity Connect login requires Honeywell network/SSO access and Coverity project permissions.</li>
+</ul>
+
+<h2>End-to-End Workflow</h2>
+<ol>
+  <li>If defects are not already in Coverity Connect, use <strong>Commit Defects</strong>.</li>
+  <li>Use <strong>Pull from Coverity</strong> to fetch current defects and create the Excel input file.</li>
+  <li>Select the report/Excel file, source root, and output folder in <strong>Setup</strong>.</li>
+  <li>Run <strong>Start Disposition</strong>.</li>
+  <li>Review findings in <strong>Results</strong> and <strong>Full Detail</strong>.</li>
+  <li>Accept valid suggestions or override with reviewer judgment.</li>
+  <li>Push final decisions using <strong>CSV Push</strong> or <strong>Direct Push</strong>.</li>
+</ol>
+
+<h2>Screen Guide</h2>
+<h3>1. Setup Page</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="01_setup_live.png"/></ac:image>
+<p>Use this page to select the input report or pulled Excel file, choose the matching source checkout, and define the output folder. Start analysis only after all required fields are populated.</p>
+
+<h3>2. Commit Defects Dialog</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="02_commit_live.png"/></ac:image>
+<p>Use this dialog only when findings must be committed to Coverity Connect from an existing Coverity intermediate directory. Connect first, choose the project and stream, then commit after validation is clean.</p>
+
+<h3>3. Pull Defects Dialog - Top View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="03a_pull_top_live.png"/></ac:image>
+<p>The top view contains server connection details, project/stream selection, defect limit, and output file path. Test the connection before selecting project and stream.</p>
+
+<h3>4. Pull Defects Dialog - Bottom View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="03b_pull_bottom_live.png"/></ac:image>
+<p>The bottom view contains the pull action, progress area, and log. Use this area to confirm whether the pull completed successfully or failed due to network, credential, or permission issues.</p>
+
+<h3>5. Analysis Progress</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="04_analysis_live.png"/></ac:image>
+<p>The progress page shows processed defect count, percentage, elapsed time, estimated completion time, and detailed analysis messages.</p>
+
+<h3>6. Results Page</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="05_results_live.png"/></ac:image>
+<p>Use the Results page as the main review queue. Select each CID, review rationale and source context, then accept or override the suggested disposition.</p>
+
+<h3>7. Full Detail Window</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="06_detail_live.png"/></ac:image>
+<p>Use the Full Detail window for high-confidence review of one CID. Confirm the checker, classification, rationale, proposed fix, and highlighted source before making a final decision.</p>
+
+<h3>8. CSV Push Dialog - Top View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="07a_push_csv_top_live.png"/></ac:image>
+<p>Use this view to connect to Coverity, choose project/stream/triage store, and load coverity_final_decisions.csv.</p>
+
+<h3>9. CSV Push Dialog - Bottom View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="07b_push_csv_bottom_live.png"/></ac:image>
+<p>Use this view to validate CIDs, review rows, dry run if needed, and push final decisions to Coverity.</p>
+
+<h3>10. Direct Push Dialog - Top View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="08a_direct_push_top_live.png"/></ac:image>
+<p>Use Direct Push when the current in-memory review results should be pushed without exporting and reloading CSV. Choose the push mode according to team policy.</p>
+
+<h3>11. Direct Push Dialog - Bottom View</h3>
+<ac:image ac:width="900"><ri:attachment ri:filename="08b_direct_push_bottom_live.png"/></ac:image>
+<p>Use the lower Direct Push view to validate mapped CIDs, review selected rows, dry run, and submit dispositions.</p>
+
+<h2>Output Files</h2>
+<table><tbody>
+<tr><th>File</th><th>Description</th></tr>
+<tr><td>coverity_pull_&lt;stream&gt;_&lt;timestamp&gt;.xlsx</td><td>Defects pulled from Coverity Connect. Use as Setup input.</td></tr>
+<tr><td>coverity_dispositions.csv</td><td>Tool-generated suggestions for review.</td></tr>
+<tr><td>coverity_final_decisions.csv</td><td>Reviewer-approved decisions for push.</td></tr>
+<tr><td>audit.jsonl</td><td>Decision evidence and traceability log.</td></tr>
+<tr><td>*_pull_log.txt</td><td>Pull diagnostics and troubleshooting log.</td></tr>
+</tbody></table>
+
+<h2>Troubleshooting</h2>
+<table><tbody>
+<tr><th>Issue</th><th>Action</th></tr>
+<tr><td>App does not open</td><td>Keep CoverityTool.exe and _internal together. Try run_tool.bat.</td></tr>
+<tr><td>Cannot connect to Coverity</td><td>Verify VPN/network, host, port, username, password, and permissions.</td></tr>
+<tr><td>No projects or streams visible</td><td>Confirm the user has access to the Coverity project and stream.</td></tr>
+<tr><td>Results do not show local code</td><td>Verify Source Code Root points to the matching source baseline.</td></tr>
+<tr><td>Push fails</td><td>Validate CIDs, confirm triage store, and check project/stream selection.</td></tr>
+</tbody></table>
+
+<h2>Support Information</h2>
+<p>For support, provide the tool package version or zip name, screenshot of the failing screen, pull or push log message, CID, checker name, project, stream, and whether the issue occurs during Pull, Analysis, Review, CSV Push, or Direct Push.</p>
+</confluence-storage>

@@ -24,6 +24,12 @@ if errorlevel 1 (
 
 echo [2/4] Installing dependencies (this may take 1-2 minutes)...
 call .venv_build\Scripts\activate.bat
+
+REM Force valid Tcl/Tk paths for this interpreter to avoid inherited toolchain
+REM variables (for example Tornado) breaking PyInstaller's tkinter probe.
+for /f "delims=" %%P in ('python -c "import os,sys; print(os.path.join(sys.base_prefix, 'tcl', 'tcl8.6'))"') do set "TCL_LIBRARY=%%P"
+for /f "delims=" %%P in ('python -c "import os,sys; print(os.path.join(sys.base_prefix, 'tcl', 'tk8.6'))"') do set "TK_LIBRARY=%%P"
+
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install pyinstaller

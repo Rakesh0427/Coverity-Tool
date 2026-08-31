@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coverity Disposition Tool</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 32px auto; max-width: 1180px; color: #172b4d; line-height: 1.45; }
+    h1 { font-size: 34px; margin-bottom: 8px; }
+    h2 { border-bottom: 1px solid #dfe1e6; padding-bottom: 6px; margin-top: 34px; }
+    h3 { margin-top: 26px; color: #0747a6; }
+    .info { background: #deebff; border-left: 4px solid #2684ff; padding: 12px 16px; margin: 16px 0 22px; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 22px; }
+    th, td { border: 1px solid #dfe1e6; padding: 8px 10px; vertical-align: top; }
+    th { background: #f4f5f7; text-align: left; }
+    img { max-width: 100%; border: 1px solid #dfe1e6; box-shadow: 0 2px 10px rgba(9, 30, 66, .12); }
+    code { background: #f4f5f7; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Coverity Disposition Tool</h1>
+  <div class="info">
+    <p><strong>Parent page:</strong> Datalink Quality Dashboard<br>
+    <strong>Space:</strong> CNSDLK<br>
+    <strong>Current package:</strong> Coverity-Tool-Final-20260831.zip<br>
+    <strong>Manual document:</strong> Coverity_Tool_User_Manual.docx</p>
+  </div>
+
+  <h2>Overview</h2>
+  <p>The Coverity Disposition Tool is a Windows desktop utility for reviewing Coverity findings, checking each finding against local source code, recording reviewer decisions, and pushing final dispositions back to Coverity Connect.</p>
+  <ul>
+    <li>Pull defects from Coverity Connect.</li>
+    <li>Run local disposition analysis against the matching source checkout.</li>
+    <li>Review each CID with source context and suggested disposition.</li>
+    <li>Accept or override decisions.</li>
+    <li>Push approved dispositions back to Coverity Connect.</li>
+  </ul>
+
+  <h2>Downloads</h2>
+  <table><tbody>
+    <tr><th>File</th><th>Purpose</th></tr>
+    <tr><td><a href="attachments/Coverity-Tool-Final-20260831.zip">Coverity-Tool-Final-20260831.zip</a></td><td>Final Windows package containing the executable and required runtime files.</td></tr>
+    <tr><td><a href="attachments/docs/Coverity_Tool_User_Manual.docx">Coverity_Tool_User_Manual.docx</a></td><td>Word user manual with screenshots and workflow explanation.</td></tr>
+  </tbody></table>
+
+  <h2>Package Contents</h2>
+  <table><tbody>
+    <tr><th>Item</th><th>Description</th></tr>
+    <tr><td><code>CoverityTool.exe</code></td><td>Main desktop application.</td></tr>
+    <tr><td><code>_internal</code></td><td>Required runtime libraries. Keep this folder beside the executable.</td></tr>
+    <tr><td><code>docs</code></td><td>User manual, sample report, and sample source files.</td></tr>
+    <tr><td><code>run_tool.bat</code></td><td>Batch launcher for the packaged tool.</td></tr>
+    <tr><td><code>CoverityTool.bat</code></td><td>Alternate launcher.</td></tr>
+    <tr><td><code>README.md</code> / <code>README.txt</code></td><td>Short setup and troubleshooting notes.</td></tr>
+  </tbody></table>
+
+  <h2>Important Usage Notes</h2>
+  <ul>
+    <li>Keep <code>CoverityTool.exe</code> and <code>_internal</code> in the same folder.</li>
+    <li>Do not move only the <code>.exe</code> to another location; the app needs the bundled runtime files.</li>
+    <li>Use the final package zip from this page, not older local builds.</li>
+    <li>Source code is analyzed locally. The tool does not upload local source code.</li>
+    <li>Coverity Connect login requires Honeywell network/SSO access and Coverity project permissions.</li>
+  </ul>
+
+  <h2>End-to-End Workflow</h2>
+  <ol>
+    <li>If defects are not already in Coverity Connect, use <strong>Commit Defects</strong>.</li>
+    <li>Use <strong>Pull from Coverity</strong> to fetch current defects and create the Excel input file.</li>
+    <li>Select the report/Excel file, source root, and output folder in <strong>Setup</strong>.</li>
+    <li>Run <strong>Start Disposition</strong>.</li>
+    <li>Review findings in <strong>Results</strong> and <strong>Full Detail</strong>.</li>
+    <li>Accept valid suggestions or override with reviewer judgment.</li>
+    <li>Push final decisions using <strong>CSV Push</strong> or <strong>Direct Push</strong>.</li>
+  </ol>
+
+  <h2>Screen Guide</h2>
+  <h3>1. Setup Page</h3>
+  <img src="attachments/images/01_setup_live.png" alt="Setup Page">
+  <p>Use this page to select the input report or pulled Excel file, choose the matching source checkout, and define the output folder. Start analysis only after all required fields are populated.</p>
+
+  <h3>2. Commit Defects Dialog</h3>
+  <img src="attachments/images/02_commit_live.png" alt="Commit Defects Dialog">
+  <p>Use this dialog only when findings must be committed to Coverity Connect from an existing Coverity intermediate directory. Connect first, choose the project and stream, then commit after validation is clean.</p>
+
+  <h3>3. Pull Defects Dialog - Top View</h3>
+  <img src="attachments/images/03a_pull_top_live.png" alt="Pull Defects Top">
+  <p>The top view contains server connection details, project/stream selection, defect limit, and output file path. Test the connection before selecting project and stream.</p>
+
+  <h3>4. Pull Defects Dialog - Bottom View</h3>
+  <img src="attachments/images/03b_pull_bottom_live.png" alt="Pull Defects Bottom">
+  <p>The bottom view contains the pull action, progress area, and log. Use this area to confirm whether the pull completed successfully or failed due to network, credential, or permission issues.</p>
+
+  <h3>5. Analysis Progress</h3>
+  <img src="attachments/images/04_analysis_live.png" alt="Analysis Progress">
+  <p>The progress page shows processed defect count, percentage, elapsed time, estimated completion time, and detailed analysis messages.</p>
+
+  <h3>6. Results Page</h3>
+  <img src="attachments/images/05_results_live.png" alt="Results Page">
+  <p>Use the Results page as the main review queue. Select each CID, review rationale and source context, then accept or override the suggested disposition.</p>
+
+  <h3>7. Full Detail Window</h3>
+  <img src="attachments/images/06_detail_live.png" alt="Full Detail Window">
+  <p>Use the Full Detail window for high-confidence review of one CID. Confirm the checker, classification, rationale, proposed fix, and highlighted source before making a final decision.</p>
+
+  <h3>8. CSV Push Dialog - Top View</h3>
+  <img src="attachments/images/07a_push_csv_top_live.png" alt="CSV Push Top">
+  <p>Use this view to connect to Coverity, choose project/stream/triage store, and load <code>coverity_final_decisions.csv</code>.</p>
+
+  <h3>9. CSV Push Dialog - Bottom View</h3>
+  <img src="attachments/images/07b_push_csv_bottom_live.png" alt="CSV Push Bottom">
+  <p>Use this view to validate CIDs, review rows, dry run if needed, and push final decisions to Coverity.</p>
+
+  <h3>10. Direct Push Dialog - Top View</h3>
+  <img src="attachments/images/08a_direct_push_top_live.png" alt="Direct Push Top">
+  <p>Use Direct Push when the current in-memory review results should be pushed without exporting and reloading CSV. Choose the push mode according to team policy.</p>
+
+  <h3>11. Direct Push Dialog - Bottom View</h3>
+  <img src="attachments/images/08b_direct_push_bottom_live.png" alt="Direct Push Bottom">
+  <p>Use the lower Direct Push view to validate mapped CIDs, review selected rows, dry run, and submit dispositions.</p>
+
+  <h2>Output Files</h2>
+  <table><tbody>
+    <tr><th>File</th><th>Description</th></tr>
+    <tr><td><code>coverity_pull_&lt;stream&gt;_&lt;timestamp&gt;.xlsx</code></td><td>Defects pulled from Coverity Connect. Use as Setup input.</td></tr>
+    <tr><td><code>coverity_dispositions.csv</code></td><td>Tool-generated suggestions for review.</td></tr>
+    <tr><td><code>coverity_final_decisions.csv</code></td><td>Reviewer-approved decisions for push.</td></tr>
+    <tr><td><code>audit.jsonl</code></td><td>Decision evidence and traceability log.</td></tr>
+    <tr><td><code>*_pull_log.txt</code></td><td>Pull diagnostics and troubleshooting log.</td></tr>
+  </tbody></table>
+
+  <h2>Troubleshooting</h2>
+  <table><tbody>
+    <tr><th>Issue</th><th>Action</th></tr>
+    <tr><td>App does not open</td><td>Keep <code>CoverityTool.exe</code> and <code>_internal</code> together. Try <code>run_tool.bat</code>.</td></tr>
+    <tr><td>Cannot connect to Coverity</td><td>Verify VPN/network, host, port, username, password, and permissions.</td></tr>
+    <tr><td>No projects or streams visible</td><td>Confirm the user has access to the Coverity project and stream.</td></tr>
+    <tr><td>Results do not show local code</td><td>Verify Source Code Root points to the matching source baseline.</td></tr>
+    <tr><td>Push fails</td><td>Validate CIDs, confirm triage store, and check project/stream selection.</td></tr>
+  </tbody></table>
+
+  <h2>Support Information</h2>
+  <p>For support, provide the tool package version or zip name, screenshot of the failing screen, pull or push log message, CID, checker name, project, stream, and whether the issue occurs during Pull, Analysis, Review, CSV Push, or Direct Push.</p>
+</body>
+</html>
