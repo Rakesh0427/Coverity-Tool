@@ -1,14 +1,13 @@
 """Shared specs for rebuilding Coverity_Final_Slide_Updated.pptx to match
 Coverity_Final_Slide.png exactly.
 
-Coordinate system: pixels of the 1280x768 source PNG.
-Slide is 13.333in x 7.5in  ->  x_in = px/96.0 ; y_in = px/102.4
-Font sizes: vertical px -> pt via 72/102.4.
+Coordinate system: native pixels of the 1376x768 source PNG.
+Slide is 13.333in x 7.5in  ->  x_in = px*13.333/1376 ; y_in = px*7.5/768.
 """
 
-XI = 1.0 / 96.0     # px -> inches (horizontal)
-YI = 1.0 / 102.4    # px -> inches (vertical)
-PT = 72.0 / 102.4   # px (em height, vertical) -> points
+XI = 13.333 / 1376.0   # px -> inches (horizontal)
+YI = 7.5 / 768.0       # px -> inches (vertical)
+PT = 72.0 * YI         # px (vertical) -> points
 
 ORANGE_HDR = (238, 110, 30)     # section headers / CNS AI Day
 ORANGE_LT = (246, 150, 45)      # banner + "hrs SAVED"
@@ -55,7 +54,7 @@ INPAINT_RECTS = [
 # run = (text, em_px, bold, colorkey)  colorkey: W white, O orange, L light orange
 LINES = [
     (42, 23, 368, 52, 'l', [("Honeywell ", 27, True, 'W'), ("Aerospace", 27, False, 'W')]),
-    (1125, 25, 1292, 50, 'l', [("CNS AI Day 2026", 24, True, 'O')]),
+    (1125, 25, 1340, 50, 'l', [("CNS AI Day 2026", 24, True, 'O')]),
     (286, 90, 1177, 132, 'c', [("COVERITY FINDINGS ANALYZER", 56, True, 'W')]),
     (293, 154, 1082, 186, 'c', [("AI-Developed, Rule-Based Static Analysis for Aerospace", 26, False, 'W')]),
     (88, 225, 330, 248, 'l', [("CORE FEATURES", 27, True, 'O')]),
@@ -66,7 +65,7 @@ LINES = [
     (80, 405, 329, 428, 'l', [("No AI Tokens Required", 21, True, 'W')]),
     (79, 434, 270, 452, 'l', [("- Runs 100% offline", 19, False, 'W')]),
     (80, 473, 375, 495, 'l', [("Reduces SME Dependency", 21, True, 'W')]),
-    (79, 498, 272, 520, 'l', [("- 80% reduction", 19, False, 'W')]),
+    (79, 500, 272, 520, 'l', [("- 80% reduction", 19, False, 'W')]),
     (455, 225, 821, 248, 'l', [("MANUAL vs AUTOMATED", 27, True, 'O')]),
     (433, 275, 593, 290, 'l', [("MANUAL PROCESS", 19, True, 'W')]),
     (677, 275, 871, 290, 'l', [("AUTOMATED PROCESS", 19, True, 'W')]),
@@ -74,22 +73,22 @@ LINES = [
     (428, 346, 528, 361, 'l', [("Source Code", 17, False, 'W')]),
     (429, 368, 599, 386, 'l', [("Investigation Required", 17, False, 'W')]),
     (429, 400, 625, 422, 'l', [("Context Analysis Required", 17, False, 'W')]),
-    (428, 435, 545, 455, 'l', [("Disposition &", 16, False, 'W')]),
-    (428, 460, 618, 478, 'l', [("Documentation Required", 17, False, 'W')]),
+    (428, 435, 545, 453, 'l', [("Disposition &", 16, False, 'W')]),
+    (428, 462, 618, 478, 'l', [("Documentation Required", 17, False, 'W')]),
     (683, 314, 857, 332, 'l', [("1-2 minutes per defect", 17, False, 'W')]),
     (681, 356, 835, 374, 'l', [("Automated Analysis", 17, False, 'W')]),
     (682, 397, 841, 412, 'l', [("One Controlled Flow", 17, False, 'W')]),
     (682, 439, 792, 457, 'l', [("Higher Quality", 17, False, 'W')]),
     (450, 498, 815, 527, 'c', [("~90% Time Reduction", 30, True, 'L')]),
-    (1156, 223, 1280, 236, 'l', [("* AI used to DEVELOP,", 16, False, 'W')]),
-    (1156, 242, 1280, 259, 'l', [("analysis is RULE-BASED", 16, False, 'W')]),
+    (1156, 223, 1340, 236, 'l', [("* AI used to DEVELOP,", 16, False, 'W')]),
+    (1156, 242, 1340, 259, 'l', [("analysis is RULE-BASED", 16, False, 'W')]),
     (913, 387, 1014, 402, 'c', [("HTML/Excel", 20, True, 'W')]),
     (930, 410, 997, 429, 'c', [("Reports", 20, True, 'W')]),
-    (1054, 500, 1180, 522, 'c', [("Rules Engine", 20, True, 'W')]),
-    (1059, 523, 1173, 544, 'c', [("AI Developed", 20, True, 'W')]),
+    (1054, 500, 1180, 520, 'c', [("Rules Engine", 20, True, 'W')]),
+    (1059, 526, 1173, 546, 'c', [("AI Developed", 20, True, 'W')]),
     (1044, 548, 1189, 562, 'c', [("20+ Checker Rules", 17, False, 'W')]),
-    (1164, 600, 1277, 622, 'l', [("Smart", 20, True, 'W')]),
-    (1178, 626, 1280, 652, 'l', [("Dispositions", 20, True, 'W')]),
+    (1240, 612, 1310, 636, 'l', [("Smart", 20, True, 'W')]),
+    (1210, 640, 1345, 670, 'l', [("Dispositions", 20, True, 'W')]),
     (995, 628, 1175, 648, 'l', [("AI used to DEVELOP,", 16, False, 'W')]),
     (993, 652, 1180, 672, 'l', [("analysis is RULE-BASED", 16, False, 'W')]),
     (93, 573, 550, 596, 'l', [("COST SAVINGS PER PROGRAM", 27, True, 'O')]),
