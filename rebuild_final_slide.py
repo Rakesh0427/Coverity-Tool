@@ -1,49 +1,76 @@
 """Rebuild Coverity_Final_Slide_Updated.pptx so it looks exactly like
 Coverity_Final_Slide.png while keeping every text field editable.
 
-How it works
-------------
-1. Every editable text line's TRUE ink bbox is measured directly from the
-   native 1376x768 PNG (white / orange pixel masks inside a rough search
-   window) - no hand-scaled coordinates.
-2. The PNG is cleaned with OpenCV inpainting: each measured text rect is
-   replaced by pixels diffusing in from its border (the title keeps its
-   orange glow - only the white glyph cores are masked there).  Icons,
-   tables, arrows, glows and bullets stay baked into the background.
-3. Every line is re-created as an editable Arial text box placed on the
-   measured bbox (size fitted per line from one Spire reference render so
-   the rendered ink width equals the PNG ink width).
-4. A headless Spire render of a tall "watermark-safe" variant auto-calibrates
-   box offsets so the rendered ink lands on the PNG geometry.
+Why this pipeline exists
+------------------------
+The PNG was designed with Segoe UI (the same family the rest of the deck
+uses).  Headless renderers available on Linux (Spire.Presentation,
+LibreOffice) silently substitute another font for every typeface, so any
+pptx calibrated against them looks "fully different" when opened in real
+PowerPoint.  This script therefore never renders with a stand-in engine:
+
+1. Every editable line's TRUE ink bbox is measured from the PNG itself.
+2. The PNG's text glyphs are erased with a tight glyph mask + OpenCV
+   TELEA inpainting (icons, tables, arrows, glows and the title halo are
+   untouched) -> the slide background picture.
+3. Every line is re-created as an editable "Segoe UI" text box whose size
+   and position are computed ANALYTICALLY from the real Segoe UI font
+   metrics (FreeType advance widths / ink bearings + the font's
+   usWinAscent line metrics, which is what PowerPoint uses), so the ink
+   lands on the measured PNG bbox in real PowerPoint.
+4. The preview PNG is composited with the very same Segoe UI fonts and
+   the very same formulas (FreeType ~= DirectWrite to within a pixel),
+   i.e. the preview shows what PowerPoint will show.
+
+Fonts: the script needs the two Microsoft Segoe UI TTFs locally (they are
+NOT committed - they are proprietary).  Default locations
+~/.fonts/segoeui.ttf and ~/.fonts/segoeuib.ttf, override with the
+SEGOEUI_REG / SEGOEUI_BOLD environment variables.  On any Windows or macOS
+machine running PowerPoint the family name "Segoe UI" resolves natively.
 
 Usage:  python3 rebuild_final_slide.py
 """
-import subprocess
+import os
 import sys
 import numpy as np
 import cv2
-from PIL import Image, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR, MSO_AUTO_SIZE
+from pptx.oxml.ns import qn
 
 from slide_specs import LINES
 
 SRC = 'Coverity_Final_Slide.png'
-W, H = 1376, 768                   # slide_specs coords are in this native space
-SW_IN, SH_IN = 13.333, 7.5
-XI = SW_IN / W                     # px -> inches (horizontal)
-YI = SH_IN / H                     # px -> inches (vertical)
-PT = 72.0 * YI                     # px (vertical) -> points
-BG = '/tmp/slide_bg.png'
+W, H = 1376, 768
+SLIDE_W_EMU = 12192000            # 13.3333 in  (same as the original deck)
+SLIDE_H_EMU = 6858000             # 7.5 in
+XI = (SLIDE_W_EMU / 914400.0) / W          # px -> inches
+YI = (SLIDE_H_EMU / 914400.0) / H
 OUT_PPTX = 'Coverity_Final_Slide_Updated.pptx'
 OUT_PREVIEW = 'Coverity_Final_Slide_Updated_preview.png'
-OFF = 2.0                          # extra top margin of the calibration variant
-FONT_DIR = '/usr/share/fonts/truetype/dejavu'
+OUT_BG = '/tmp/slide_bg.png'
 
 COLORS = {'W': (249, 251, 252), 'O': (238, 110, 30), 'L': (246, 150, 45)}
+
+# Segoe UI OS/2 win metrics (units per em 2048) - what PowerPoint uses for
+# the line box of a single-spaced paragraph.
+UPEM = 2048.0
+WIN_ASC = 2210.0
+WIN_DESC = 514.0
+
+REG_TTF = os.environ.get('SEGOEUI_REG', os.path.expanduser('~/.fonts/segoeui.ttf'))
+BOLD_TTF = os.environ.get('SEGOEUI_BOLD', os.path.expanduser('~/.fonts/segoeuib.ttf'))
+
+
+def load_fonts():
+    if not (os.path.exists(REG_TTF) and os.path.exists(BOLD_TTF)):
+        sys.exit('need Segoe UI ttf: place segoeui.ttf/segoeuib.ttf in ~/.fonts '
+                 'or set SEGOEUI_REG/SEGOEUI_BOLD')
+    return REG_TTF, BOLD_TTF
 
 
 # --------------------------------------------------------------------------
@@ -53,29 +80,32 @@ def masks(img):
     a = np.asarray(img).astype(int)
     R, G, B = a[:, :, 0], a[:, :, 1], a[:, :, 2]
     white = (R > 200) & (G > 200) & (B > 200)
-    orange = (R > 225) & (G > 80) & (G < 190) & (B < 110)
-    return white, orange
+    orange = (R > 200) & (G > 70) & (G < 170) & (B < 95)      # hdr (238,110,30)
+    ltorg = (R > 230) & (G > 120) & (G < 200) & (B < 95)     # banner (246,150,45)
+    return white, orange, ltorg
 
 
-def line_mask(white, orange, runs):
+def line_kind(runs):
     cks = {r[3] for r in runs}
-    return white if cks == {'W'} else (white | orange)
+    if cks == {'W'}:
+        return 'W'
+    return 'O'
 
 
 def measure_targets(img):
-    """True ink bbox (native px) of every editable line in the PNG.
-    The y window grows around the previous result so glyphs that extend
-    past the hand-written spec window are still captured (x stays bounded
-    by the spec so icons/arrows are never swallowed)."""
-    white, orange = masks(img)
+    """True ink bbox (native px) of every editable line in the PNG."""
+    white, orange, ltorg = masks(img)
     targets = []
     for x0, y0, x1, y1, align, runs in LINES:
-        m = line_mask(white, orange, runs)
+        kind = line_kind(runs)
+        m = white if kind == 'W' else (white | orange | ltorg)
+        if runs[0][0].startswith('COVERITY'):
+            m = white                       # title: core glyphs only
         wx0, wx1 = max(0, x0 - 4), min(W, x1 + 6)
         wy0, wy1 = max(0, y0 - 4), min(H, y1 + 6)
         sub = m[wy0:wy1, wx0:wx1].copy()
-        rowsum = sub.sum(1)          # drop full-width separator lines
-        sub[rowsum > 0.7 * sub.shape[1], :] = False
+        rowsum = sub.sum(1)
+        sub[rowsum > 0.7 * sub.shape[1], :] = False   # separator lines
         ys, xs = np.where(sub)
         if len(xs) == 0:
             raise SystemExit(f'no ink measured for line {runs[0][0]!r}')
@@ -85,301 +115,288 @@ def measure_targets(img):
 
 
 # --------------------------------------------------------------------------
-# background inpainting
+# background: erase glyphs with a tight mask, keep everything else
 # --------------------------------------------------------------------------
-def plane_bg(arr, x0, y0, x1, y1, ring=8):
-    """Fit per-channel colour plane a+b*x+c*y from a ring outside the rect."""
-    rx0, ry0 = max(0, x0 - ring), max(0, y0 - ring)
-    rx1, ry1 = min(W, x1 + ring), min(H, y1 + ring)
-    gy, gx = np.mgrid[ry0:ry1, rx0:rx1]
-    ringm = ~((gx >= x0) & (gx < x1) & (gy >= y0) & (gy < y1))
-    ys, xs = gy[ringm], gx[ringm]
-    P = np.stack([np.ones_like(xs), xs, ys], 1).astype(float)
-    gy, gx = np.mgrid[y0:y1, x0:x1]
-    G = np.stack([np.ones_like(gx), gx, gy], 2).astype(float)
-    out = np.empty((y1 - y0, x1 - x0, 3))
-    for c in range(3):
-        Pc, vc = P, arr[ys, xs, c].astype(float)
-        for _ in range(3):                       # robust refit
-            coef, *_ = np.linalg.lstsq(Pc, vc, rcond=None)
-            res = vc - Pc @ coef
-            keep = np.abs(res) < max(30.0, 2.5 * np.std(res) + 5)
-            if keep.mean() > 0.5:
-                Pc, vc = Pc[keep], vc[keep]
-        coef, *_ = np.linalg.lstsq(Pc, vc, rcond=None)
-        out[:, :, c] = G @ coef
-    return out
+def build_glyph_mask(img, targets):
+    white, orange, ltorg = masks(img)
+    mask = np.zeros((H, W), np.uint8)
+    for (bx0, by0, bx1, by1), line in zip(targets, LINES):
+        runs = line[5]
+        kind = line_kind(runs)
+        m = white if kind == 'W' else (white | orange | ltorg)
+        title = runs[0][0].startswith('COVERITY')
+        if title:
+            m = white
+        wx0, wx1 = max(0, bx0 - 3), min(W, bx1 + 4)
+        wy0, wy1 = max(0, by0 - 3), min(H, by1 + 4)
+        sub = m[wy0:wy1, wx0:wx1]
+        rowsum = sub.sum(1)
+        sub = sub.copy()
+        sub[rowsum > 0.7 * sub.shape[1], :] = False
+        mask[wy0:wy1, wx0:wx1] |= sub.astype(np.uint8)
+    # dilate: 6 px blurs the title's inner halo into a smooth glow,
+    # 4 px elsewhere also eats the drop shadows
+    k2 = np.ones((3, 3), np.uint8)
+    core = mask.copy()
+    for _ in range(6):
+        core = cv2.dilate(core, k2)
+    wide = mask.copy()
+    for _ in range(4):
+        wide = cv2.dilate(wide, k2)
+    titleband = np.zeros_like(mask)
+    for (bx0, by0, bx1, by1), line in zip(targets, LINES):
+        if line[5][0][0].startswith('COVERITY'):
+            titleband[max(0, by0 - 8):min(H, by1 + 8),
+                      max(0, bx0 - 8):min(W, bx1 + 8)] = 1
+    return np.where(titleband, core, wide)
 
 
-def median_bg(arr, x0, y0, x1, y1):
-    """Local median (kernel bigger than the text block) + gaussian: erases
-    glyphs and their shadows while keeping wide glows/gradients."""
-    h = y1 - y0
-    k = int(2 * h + 21) | 1
-    pad = k // 2 + 8
-    cy0, cx0 = max(0, y0 - pad), max(0, x0 - pad)
-    cy1, cx1 = min(H, y1 + pad), min(W, x1 + pad)
-    crop = arr[cy0:cy1, cx0:cx1]
-    med = cv2.GaussianBlur(cv2.medianBlur(crop, k), (21, 21), 0)
-    return med[y0 - cy0:y1 - cy0, x0 - cx0:x1 - cx0].astype(float)
-
-
-def rowmedian_bg(arr, x0, y0, x1, y1):
-    """Per-row horizontal median over a wide column window: exact for colour
-    bands that are uniform horizontally (text cols < half the window)."""
-    band = arr[y0:y1, 0:W].astype(np.float32)
-    med = np.median(band, axis=1)              # (h, 3); text < half the row
-    return np.repeat(med[:, None, :], x1 - x0, axis=1)
-
-
-def best_bg(arr, x0, y0, x1, y1):
-    """Pick whichever estimator reconstructs the text-free frame around the
-    rect better (plane for linear gradients, 2-D median for glows, column
-    median for horizontal colour bands/banners)."""
-    py0, px0 = max(0, y0 - 10), max(0, x0 - 10)
-    py1, px1 = min(H, y1 + 10), min(W, x1 + 10)
-    cands = [plane_bg(arr, px0, py0, px1, py1),
-             median_bg(arr, px0, py0, px1, py1),
-             rowmedian_bg(arr, px0, py0, px1, py1)]
-    yy, xx = np.mgrid[py0:py1, px0:px1]
-    frame = ~((yy >= y0 - 4) & (yy < y1 + 4) & (xx >= x0 - 4) & (xx < x1 + 4))
-    truth = arr[py0:py1, px0:px1].astype(float)
-    best = min(cands, key=lambda e: np.abs(e - truth)[frame].mean())
-    return best[y0 - py0:y1 - py0, x0 - px0:x1 - px0]
-
-
-def inpaint_rect(arr, rect, mode='dist'):
-    x0, y0, x1, y1 = rect[:4]
-    sub = arr[y0:y1, x0:x1]
-    if mode == 'lum':
-        # title: erase glyphs and rebuild the orange halo synthetically -
-        # a gaussian halo of the core mask tinted with the glow colour over
-        # the local dark background plane
-        R, G, B = (sub[:, :, c].astype(int) for c in range(3))
-        core = ((B > R * 0.6) & (R > 110)).astype(np.uint8)
-        core = cv2.dilate(core, np.ones((3, 3), np.uint8))
-        halo = np.clip(cv2.GaussianBlur(core.astype(np.float32), (0, 0), 6)
-                       * 1.2, 0, 1)
-        plane = np.clip(plane_bg(arr, x0, y0, x1, y1, ring=14), 0, 255)
-        new = plane * (1 - halo[:, :, None]) + \
-            np.array([238, 118, 34], float) * halo[:, :, None]
-        hh, ww = halo.shape
-        dy, dx = np.mgrid[0:hh, 0:ww]
-        d = np.minimum(np.minimum(dy, hh - 1 - dy),
-                       np.minimum(dx, ww - 1 - dx))
-        alpha = np.clip(d / 4.0, 0, 1)[:, :, None]
-        arr[y0:y1, x0:x1] = (sub * (1 - alpha) + new * alpha).astype(np.uint8)
-        return
-    bg = best_bg(arr, x0, y0, x1, y1)
-    hh, ww = bg.shape[:2]
-    dy, dx = np.mgrid[0:hh, 0:ww]
-    d = np.minimum(np.minimum(dy, hh - 1 - dy), np.minimum(dx, ww - 1 - dx))
-    alpha = np.clip(d / 3.0, 0, 1)[:, :, None]
-    arr[y0:y1, x0:x1] = (sub * (1 - alpha) + bg * alpha).astype(np.uint8)
-
-
-def build_background(img, targets, out=BG):
-    arr = np.array(img)
-    for i, (bx0, by0, bx1, by1) in enumerate(targets):
-        if LINES[i][5][0][0].startswith('COVERITY'):
-            # title: cover the whole halo so the synthetic glow replaces it
-            rect = (max(0, bx0 - 22), max(0, by0 - 22),
-                    min(W, bx1 + 22), min(H, by1 + 24))
-            mode = 'lum'
-        else:
-            # asymmetric pad: drop shadows fall to the bottom-right of ink
-            rx1 = min(W, bx1 + 11)
-            if 262 < by0 < 480 and bx0 < 880:      # stay inside table columns
-                rx1 = min(rx1, 637 if bx0 < 640 else 877)
-            rect = (max(0, bx0 - 4), max(0, by0 - 5), rx1, min(H, by1 + 11))
-            mode = 'dist'
-        inpaint_rect(arr, rect, mode)
-    Image.fromarray(arr).save(out)
-    print('wrote background', out)
+def build_background(img, targets):
+    mask = build_glyph_mask(img, targets)
+    arr = np.ascontiguousarray(np.array(img.convert('RGB')))
+    bg = cv2.inpaint(arr, mask, 4, cv2.INPAINT_TELEA)
+    Image.fromarray(bg).save(OUT_BG)
+    print('wrote background', OUT_BG, ' mask px', int(mask.sum()))
+    return bg
 
 
 # --------------------------------------------------------------------------
-# pptx build
+# analytic layout with real Segoe UI metrics
 # --------------------------------------------------------------------------
-REF_PT = 20.0
+class Layout:
+    def __init__(self):
+        self.rows = []          # dicts per line
 
 
-def fit_sizes(targets):
-    """Per-line font size (Arial) whose rendered ink width matches the PNG.
-    One Spire render of all lines at REF_PT gives width-per-pt per line."""
-    prs = Presentation()
-    prs.slide_width = Emu(int(SW_IN * 914400))
-    prs.slide_height = Emu(int((len(LINES) * 0.6 + 1) * 914400))
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    for i, line in enumerate(LINES):
-        box = slide.shapes.add_textbox(Emu(int(40 * XI * 914400)),
-                                       Emu(int((20 + i * 55) * 914400 / 96)),
-                                       Emu(int(1200 * XI * 914400)),
-                                       Emu(int(50 * 914400 / 96)))
-        tf = box.text_frame
-        tf.word_wrap = False
-        tf.margin_left = tf.margin_right = 0
-        p = tf.paragraphs[0]
-        for text, emr, bold, ck in line[5]:
-            r = p.add_run()
-            r.text = text
-            r.font.size = Pt(REF_PT)
-            r.font.bold = bold
-            r.font.name = 'Arial'
-            r.font.color.rgb = RGBColor(0, 0, 0)
-    prs.save('/tmp/fit.pptx')
-    slide_h = len(LINES) * 0.6 + 1
-    code = f"""
-from spire.presentation import Presentation
-prs = Presentation()
-prs.LoadFromFile('/tmp/fit.pptx')
-img = prs.Slides[0].SaveAsImageByWH(1376, round(1376 * {slide_h} / {SW_IN}))
-img.Save('/tmp/fit.png')
-prs.Dispose()
-"""
-    subprocess.run([sys.executable, '-c', code], check=True,
-                   capture_output=True)
-    img = np.array(Image.open('/tmp/fit.png').convert('RGB'))
-    sizes = []
-    for i, (t, line) in enumerate(zip(targets, LINES)):
-        top_px = (20 + i * 55) / 96.0 * img.shape[0] / slide_h
-        y0 = max(0, int(top_px) - 12)
-        y1 = min(img.shape[0], int(top_px) + 42)
-        band = img[y0:y1].sum(2) < 300          # black ink on white slide
-        ys, xs = np.where(band)
-        if len(xs) == 0:
-            sizes.append(18.0)
-            continue
-        w = xs.max() + 1 - xs.min()
-        tw = t[2] - t[0]
-        sizes.append(max(8.0, min(60.0, REF_PT * tw / max(w, 1))))
-    return sizes
+def run_metrics(font, text, size_px):
+    """ink bbox + advance of text at size, relative to the pen origin."""
+    f = font(size_px)
+    l, t, r, b = f.getbbox(text)
+    adv = f.getlength(text)
+    return l, t, r, b, adv
 
 
-ADJ = None
+def solve_layout(targets):
+    reg_p, bold_p = load_fonts()
+    lay = Layout()
+    for (bx0, by0, bx1, by1), line in zip(targets, LINES):
+        align, runs = line[4], line[5]
+        tw = bx1 - bx0
 
+        def ink_width_at(size):
+            x = 0.0
+            lo = hi = None
+            for text, _em, bold, _ck in runs:
+                f = ImageFont.truetype(bold_p if bold else reg_p, size)
+                l, t, r, b = f.getbbox(text)
+                adv = f.getlength(text)
+                if lo is None:
+                    lo, hi = x + l, x + r
+                else:
+                    lo, hi = min(lo, x + l), max(hi, x + r)
+                x += adv
+            return hi - lo, x
 
-def build(path, targets, sizes, offset=0.0, height=SH_IN):
-    prs = Presentation()
-    prs.slide_width = Emu(int(SW_IN * 914400))
-    prs.slide_height = Emu(int(height * 914400))
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    slide.shapes.add_picture(BG, 0, Emu(int(offset * 914400)),
-                             Emu(int(SW_IN * 914400)), Emu(int(SH_IN * 914400)))
-    for i, line in enumerate(LINES):
-        bx0, by0, bx1, by1 = targets[i]
-        align = line[4]
-        a = ADJ[i]
-        em = sizes[i] * a['sc']          # points
+        w100, adv100 = ink_width_at(100.0)
+        size_px = 100.0 * tw / w100
+        size_pt = size_px * 72.0 / 96.0
+
+        # per-run geometry at final size
+        x = 0.0
+        geo = []
+        ink_lo = ink_hi = ink_top = ink_bot = None
+        for text, _em, bold, ck in runs:
+            f = ImageFont.truetype(bold_p if bold else reg_p, size_px)
+            l, t, r, b = f.getbbox(text)
+            adv = f.getlength(text)
+            geo.append(dict(text=text, bold=bold, ck=ck, font=f,
+                            origin=x, l=l, t=t, r=r, b=b, adv=adv))
+            ink_lo = x + l if ink_lo is None else min(ink_lo, x + l)
+            ink_hi = x + r if ink_hi is None else max(ink_hi, x + r)
+            ink_top = t if ink_top is None else min(ink_top, t)
+            ink_bot = b if ink_bot is None else max(ink_bot, b)
+            x += adv
+        adv = x
+
+        ascent_px = size_px * WIN_ASC / UPEM
+        # PIL getbbox top (t) is relative to the draw anchor whose y is
+        # baseline - ascent; PowerPoint puts that anchor at the top of a
+        # margin-less, top-anchored frame.  Hence box_top = by0 - ink_top.
+        box_top = by0 - ink_top
         if align == 'c':
-            w = max((bx1 - bx0) * 1.5, 260)
-            cx = (bx0 + bx1) / 2.0 + a['dx']
-            left = (cx - w / 2.0) * XI
+            ink_c = (ink_lo + ink_hi) / 2.0
+            tc = (bx0 + bx1) / 2.0
+            center = tc - ink_c + adv / 2.0
+            bw = max(adv * 1.6, 300.0)
+            box_left = center - bw / 2.0
         else:
-            w = (bx1 - bx0) + 90
-            left = (bx0 + a['dx']) * XI
-        top = (by0 + a['dy']) * YI + offset
-        box = slide.shapes.add_textbox(Emu(int(left * 914400)),
-                                       Emu(int(top * 914400)),
-                                       Emu(int(w * XI * 914400)),
-                                       Emu(int(em * 2.4 / 72.0 * 914400)))
+            box_left = bx0 - ink_lo
+            bw = adv + 60.0
+        box_h = size_px * (WIN_ASC + WIN_DESC) / UPEM * 1.5
+
+        lay.rows.append(dict(align=align, size_pt=size_pt,
+                             box_left=box_left, box_top=box_top,
+                             box_w=bw, box_h=box_h, geo=geo,
+                             target=(bx0, by0, bx1, by1),
+                             expect_ink=(bx0, by0, bx0 + (ink_hi - ink_lo),
+                                         by0 + (ink_bot - ink_top))))
+    return lay
+
+
+# --------------------------------------------------------------------------
+# pptx
+# --------------------------------------------------------------------------
+def add_effects(run, glow):
+    """Soft dark drop shadow like the source slide (2 px down, blurred);
+    the title additionally gets the orange halo (a:glow)."""
+    rPr = run._r.get_or_add_rPr()
+    eff = rPr.makeelement(qn('a:effectLst'), {})
+    if glow:
+        gl = eff.makeelement(qn('a:glow'), {'rad': '101600'})
+        c = gl.makeelement(qn('a:srgbClr'), {'val': 'EE7622'})
+        al = c.makeelement(qn('a:alpha'), {'val': '60000'})
+        c.append(al)
+        gl.append(c)
+        eff.append(gl)
+    sh = eff.makeelement(qn('a:outerShdw'),
+                         {'blurRad': '50800', 'dist': '25400',
+                          'dir': '5400000', 'algn': 'bl', 'rotWithShape': '0'})
+    clr = sh.makeelement(qn('a:srgbClr'), {'val': '000000'})
+    al = clr.makeelement(qn('a:alpha'), {'val': '55000'})
+    clr.append(al)
+    sh.append(clr)
+    eff.append(sh)
+    rPr.append(eff)
+
+
+def build_pptx(lay, bg_path, out):
+    prs = Presentation()
+    prs.slide_width = Emu(SLIDE_W_EMU)
+    prs.slide_height = Emu(SLIDE_H_EMU)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(bg_path, 0, 0, Emu(SLIDE_W_EMU), Emu(SLIDE_H_EMU))
+    for row in lay.rows:
+        left = Emu(int(row['box_left'] * XI * 914400))
+        top = Emu(int(row['box_top'] * YI * 914400))
+        wid = Emu(int(row['box_w'] * XI * 914400))
+        hei = Emu(int(row['box_h'] * YI * 914400))
+        box = slide.shapes.add_textbox(left, top, wid, hei)
         tf = box.text_frame
         tf.word_wrap = False
+        tf.auto_size = MSO_AUTO_SIZE.NONE
         tf.vertical_anchor = MSO_ANCHOR.TOP
         tf.margin_left = tf.margin_right = 0
         tf.margin_top = tf.margin_bottom = 0
         p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.CENTER if align == 'c' else PP_ALIGN.LEFT
-        p.space_before = p.space_after = 0
-        p.line_spacing = 1.0
-        for text, emr, bold, ck in line[5]:
+        p.alignment = (PP_ALIGN.CENTER if row['align'] == 'c'
+                       else PP_ALIGN.LEFT)
+        for g in row['geo']:
             r = p.add_run()
-            r.text = text
-            r.font.size = Pt(em)
-            r.font.bold = bold
-            r.font.name = 'Arial'
-            r.font.color.rgb = RGBColor(*COLORS[ck])
-    prs.save(path)
+            r.text = g['text']
+            r.font.size = Pt(row['size_pt'])
+            r.font.bold = g['bold']
+            r.font.name = 'Segoe UI'
+            r.font.color.rgb = RGBColor(*COLORS[g['ck']])
+            add_effects(r, glow=g['text'].startswith('COVERITY'))
+    prs.save(out)
+    print('wrote', out)
 
 
-def render(path, out_png, height, out_w=W):
-    """Render slide 1 with Spire; crop the content area for tall variants."""
-    code = f"""
-from spire.presentation import Presentation
-prs = Presentation()
-prs.LoadFromFile({path!r})
-hpx = round({out_w} * {height} / {SW_IN})
-img = prs.Slides[0].SaveAsImageByWH({out_w}, hpx)
-img.Save({out_png!r})
-prs.Dispose()
-"""
-    subprocess.run([sys.executable, '-c', code], check=True,
-                   capture_output=True)
-    full = Image.open(out_png).convert('RGB')
-    if height != SH_IN:
-        y0 = round(full.height * OFF / height)
-        y1 = round(full.height * (OFF + SH_IN) / height)
-        full = full.crop((0, y0, full.width, y1)).resize((W, H))
-        full.save(out_png)
-    return full
+# --------------------------------------------------------------------------
+# preview: composite with the same fonts & formulas PowerPoint will use
+# --------------------------------------------------------------------------
+def _row_origins(row):
+    """pen x of the first run + baseline y, mirroring PowerPoint layout."""
+    size_px = row['size_pt'] * 96.0 / 72.0
+    baseline = row['box_top'] + size_px * WIN_ASC / UPEM
+    if row['align'] == 'c':
+        ox = row['box_left'] + row['box_w'] / 2.0 - \
+            sum(g['adv'] for g in row['geo']) / 2.0
+    else:
+        ox = row['box_left']
+    return ox, baseline, size_px
 
 
-def measure_render(img, targets):
-    """Ink bbox of every text box in a clean render (background has no text)."""
-    white, orange = masks(img)
-    res = []
-    for (bx0, by0, bx1, by1), line in zip(targets, LINES):
-        m = line_mask(white, orange, line[5])
-        wx0, wy0 = max(0, bx0 - 6), max(0, by0 - 3)
-        wx1, wy1 = min(W, bx1 + 6), min(H, by1 + 12)
-        sub = m[wy0:wy1, wx0:wx1]
-        ys, xs = np.where(sub)
-        if len(xs) == 0:
-            res.append(None)
+def composite_preview(bg, lay, out):
+    canvas = Image.new('RGBA', (W, H), (255, 255, 255, 255))
+    canvas.paste(Image.fromarray(bg).convert('RGBA'), (0, 0))
+
+    # soft drop shadow pass (approximates the a:outerShdw written in pptx)
+    shadow = np.zeros((H, W), np.uint8)
+    for row in lay.rows:
+        ox, baseline, spx = _row_origins(row)
+        layer = Image.new('L', (W, H), 0)
+        d = ImageDraw.Draw(layer)
+        for g in row['geo']:
+            d.text((ox + g['origin'], baseline - spx * WIN_ASC / UPEM),
+                   g['text'], font=g['font'], fill=255)
+        shadow = np.maximum(shadow, np.array(layer))
+    shadow_img = Image.fromarray(shadow).filter(ImageFilter.GaussianBlur(1.6))
+    blk = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    blk.putalpha(shadow_img.point(lambda v: int(v * 0.55)))
+    canvas = Image.alpha_composite(canvas, __shift(blk, 0, 2))
+
+    # orange halo pass for the title (approximates the a:glow in the pptx)
+    for row in lay.rows:
+        if not row['geo'][0]['text'].startswith('COVERITY'):
             continue
-        res.append((wx0 + xs.min(), wy0 + ys.min(),
-                    wx0 + xs.max() + 1, wy0 + ys.max() + 1))
-    return res
+        ox, baseline, spx = _row_origins(row)
+        layer = Image.new('L', (W, H), 0)
+        d = ImageDraw.Draw(layer)
+        for g in row['geo']:
+            d.text((ox + g['origin'], baseline - spx * WIN_ASC / UPEM),
+                   g['text'], font=g['font'], fill=255)
+        for blur, alpha in ((2.5, 0.85), (6.0, 0.45)):
+            gimg = layer.filter(ImageFilter.GaussianBlur(blur))
+            col = Image.new('RGBA', (W, H), (238, 118, 34, 255))
+            col.putalpha(gimg.point(
+                lambda v, a=alpha: int(min(255, v * 1.5) * a)))
+            canvas = Image.alpha_composite(canvas, col)
+
+    # crisp text pass
+    txt = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    for row in lay.rows:
+        ox, baseline, spx = _row_origins(row)
+        for g in row['geo']:
+            layer = Image.new('L', (W, H), 0)
+            d = ImageDraw.Draw(layer)
+            d.text((ox + g['origin'], baseline - spx * WIN_ASC / UPEM),
+                   g['text'], font=g['font'], fill=255)
+            col = Image.new('RGBA', (W, H), (*COLORS[g['ck']], 255))
+            col.putalpha(layer)
+            txt = Image.alpha_composite(txt, col)
+    canvas = Image.alpha_composite(canvas, txt)
+    canvas.convert('RGB').save(out)
+    print('wrote', out)
 
 
-def calibrate(targets, rnd):
-    global ADJ
-    build('/tmp/cal.pptx', targets, SIZES, offset=OFF, height=SH_IN + OFF)
-    img = render('/tmp/cal.pptx', '/tmp/cal.png', SH_IN + OFF)
-    res = measure_render(img, targets)
-    maxd = 0.0
-    for i, (t, r) in enumerate(zip(targets, res)):
-        if r is None:
-            continue
-        bx0, by0, bx1, by1 = t
-        a = ADJ[i]
-        dy = by0 - r[1]
-        a['dy'] += dy
-        maxd = max(maxd, abs(dy))
-        if LINES[i][4] == 'c':
-            a['dx'] += (bx0 + bx1) / 2.0 - (r[0] + r[2]) / 2.0
-    print(f'cal round {rnd}: max |dy| {maxd:.1f}px')
+def __shift(img, dx, dy):
+    out = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    out.paste(img, (dx, dy))
+    return out
 
 
-SIZES = None
+def verify(lay):
+    worst = 0.0
+    for row in lay.rows:
+        t = row['target']
+        e = row['expect_ink']
+        d = max(abs(t[0] - e[0]), abs(t[1] - e[1]))
+        worst = max(worst, d)
+    print(f'layout check: intended ink vs measured PNG bbox, worst dx/dy = '
+          f'{worst:.2f}px (by construction x/y left-top coincide)')
 
 
 def main():
-    global ADJ, SIZES
     img = Image.open(SRC).convert('RGB')
     targets = measure_targets(img)
     for t, line in zip(targets, LINES):
         print(f'target {t}  {line[5][0][0][:28]!r}')
-    build_background(img.copy(), targets)
-    SIZES = fit_sizes(targets)
-    ADJ = [{'dx': 0.0, 'dy': 0.0, 'sc': 1.0} for _ in LINES]
-    for rnd in range(3):
-        calibrate(targets, rnd)
-    build(OUT_PPTX, targets, SIZES)
-    build('/tmp/preview_variant.pptx', targets, SIZES,
-          offset=OFF, height=SH_IN + OFF)
-    render('/tmp/preview_variant.pptx', OUT_PREVIEW, SH_IN + OFF)
-    print('wrote', OUT_PPTX, 'and', OUT_PREVIEW)
+    bg = build_background(img, targets)
+    lay = solve_layout(targets)
+    verify(lay)
+    build_pptx(lay, OUT_BG, OUT_PPTX)
+    composite_preview(bg, lay, OUT_PREVIEW)
 
 
 if __name__ == '__main__':

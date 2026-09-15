@@ -32,9 +32,13 @@ pygments==2.18.0
 python-docx==1.1.2
 
 # Dev-only: rebuilds the pixel-faithful editable slide replica
-# (rebuild_final_slide.py / make_slide_background.py). Not needed at runtime.
+# (rebuild_final_slide.py). Not needed at runtime.  The rebuild also needs
+# the two Microsoft Segoe UI TTFs locally (~/.fonts/segoeui.ttf and
+# segoeuib.ttf, or SEGOEUI_REG/SEGOEUI_BOLD env vars) - they are proprietary
+# and therefore NOT vendored in this repo; PowerPoint resolves the family
+# name natively on Windows/macOS.
 python-pptx==1.0.2
 Pillow==12.3.0
 numpy==2.4.6
 opencv-python-headless==5.0.0.93
-Spire.Presentation==11.8.1
+fonttools==4.65.0
