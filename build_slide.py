@@ -1,11 +1,10 @@
 """
 Generate Coverity Findings Analyzer slide as an editable PowerPoint.
-Fixes applied:
-  1. Cost rate corrected from $30/hr -> $35/hr (matches $7,595 and $30,345 figures)
-  2. Cost line labeled: RL1: $7,595 | Program: $30,345
-  3. Stage 3 label simplified: "AI-Optimized Analysis" (removed redundant "AI-Developed")
-  4. Added icons to comparison table rows
-  5. Footer split into two lines for readability
+Updates applied:
+  1. Removed Honeywell Aerospace and CNS AI Day 2026 at the top
+  2. Removed "for Aerospace" from subtitle
+  3. Removed Processing Stage 3 fully and adjusted flow: Rule Engine -> Smart Dispositions
+  4. Removed footer with Rakesh Boya and other metadata
 """
 
 from pptx import Presentation
@@ -90,41 +89,27 @@ def add_rect_straight(left, top, width, height, fill_color, border_color=None, b
         shape.line.fill.background()
     return shape
 
-# ═════════════════════════════════════════════
+# ══════════════════════════════════════════════
 # TITLE AREA
 # ══════════════════════════════════════════════
 
-# Honeywell Aerospace label
-add_text(0.4, 0.15, 2.5, 0.4, "Honeywell", font_size=18,
-         color=WHITE, bold=True, font_name='Calibri')
-add_text(0.4, 0.5, 2.5, 0.3, "Aerospace", font_size=14,
-         color=WHITE_DIM, font_name='Calibri')
-
 # Robot emoji placeholder - use a circle shape as icon
-icon = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(3.0), Inches(0.1),
+icon = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(2.6), Inches(0.12),
                               Inches(0.45), Inches(0.45))
 icon.fill.solid()
 icon.fill.fore_color.rgb = ORANGE
 icon.line.fill.background()
 
-# Main title
-add_text(3.5, 0.05, 7.0, 0.5, "COVERITY FINDINGS ANALYZER",
+# Main title (centered horizontally)
+add_text(3.1, 0.05, 7.5, 0.5, "COVERITY FINDINGS ANALYZER",
          font_size=26, color=ORANGE, bold=True,
          alignment=PP_ALIGN.LEFT, font_name='Calibri')
 
-# Subtitle
-add_text(2.2, 0.55, 9.0, 0.4,
-         "AI-Developed, Rule-Based Static Analysis for Aerospace",
+# Subtitle (without "for Aerospace", centered)
+add_text(2.0, 0.55, 9.333, 0.4,
+         "AI-Developed, Rule-Based Static Analysis",
          font_size=14, color=WHITE_DIM,
          alignment=PP_ALIGN.CENTER, font_name='Calibri')
-
-# CNS AI Day 2026 badge (top right)
-badge = add_rect(10.2, 0.08, 2.8, 0.45, BG_CARD, ORANGE, 1.5)
-badge.text_frame.text = "CNS AI Day 2026"
-badge.text_frame.paragraphs[0].font.size = Pt(13)
-badge.text_frame.paragraphs[0].font.color.rgb = ORANGE
-badge.text_frame.paragraphs[0].font.bold = True
-badge.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
 # ── Horizontal divider ──
 divider = add_rect_straight(0.3, 0.95, 12.7, 0.02, ORANGE)
@@ -230,13 +215,12 @@ for item in cost_items:
              font_size=12, color=ORANGE, bold=True)
     y += 0.3
 
-# FIXED: cost line with correct rate and labeled
 add_text(0.5, y + 0.02, 6.5, 0.28,
          "RL1: $7,595  |  Program: $30,345  per release (at $35/hr)",
          font_size=12, color=YELLOW, bold=True)
 
-# ═════════════════════════════════════════════
-# RIGHT SIDE: FLOW DIAGRAM
+# ══════════════════════════════════════════════
+# RIGHT SIDE: FLOW DIAGRAM (Adjusted: Stage 1 -> Stage 2 -> Smart Dispositions)
 # ══════════════════════════════════════════════
 
 flow_left = 8.2
@@ -300,7 +284,7 @@ arrow2.fill.fore_color.rgb = ORANGE
 arrow2.line.fill.background()
 
 # --- Stage 2: Rule Engine ---
-stage2_x = flow_left + 2.3
+stage2_x = flow_left + 2.1
 s2 = add_rect(stage2_x, 3.0, 2.4, 1.2, BG_CARD, ORANGE, 1.5)
 tf = s2.text_frame
 tf.vertical_anchor = MSO_ANCHOR.MIDDLE
@@ -323,49 +307,17 @@ p3.alignment = PP_ALIGN.CENTER
 add_text(stage2_x - 0.3, 2.7, 3.0, 0.25, "Processing Stage 2",
          font_size=9, color=WHITE_DIM, alignment=PP_ALIGN.CENTER)
 
-# Curved arrow: Rule Engine → Stage 3 (down-left)
-arrow3 = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW,
-                                Inches(stage2_x + 0.1), Inches(4.15),
-                                Inches(0.5), Inches(0.3))
+# Adjusted flow: Rule Engine → Smart Dispositions (direct curve/down-right into Output)
+arrow3 = slide.shapes.add_shape(MSO_SHAPE.DOWN_ARROW,
+                                Inches(stage2_x + 1.0), Inches(4.2),
+                                Inches(0.35), Inches(0.5))
 arrow3.fill.solid()
 arrow3.fill.fore_color.rgb = ORANGE
 arrow3.line.fill.background()
 
-# --- Stage 3: AI-Optimized Analysis ---
-stage3_x = flow_left + 0.3
-s3 = add_rect(stage3_x, 4.4, 2.2, 1.2, BG_CARD, ORANGE_LIGHT, 1.5)
-tf = s3.text_frame
-tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-p = tf.paragraphs[0]
-p.text = "🧠"
-p.font.size = Pt(20)
-p.alignment = PP_ALIGN.CENTER
-p2 = tf.add_paragraph()
-p2.text = "AI-Optimized"
-p2.font.size = Pt(11)
-p2.font.color.rgb = ORANGE_LIGHT
-p2.font.bold = True
-p2.alignment = PP_ALIGN.CENTER
-p3 = tf.add_paragraph()
-p3.text = "Analysis"
-p3.font.size = Pt(11)
-p3.font.color.rgb = ORANGE_LIGHT
-p3.alignment = PP_ALIGN.CENTER
-
-add_text(stage3_x - 0.3, 4.1, 2.8, 0.25, "Processing Stage 3",
-         font_size=9, color=WHITE_DIM, alignment=PP_ALIGN.CENTER)
-
-# Arrow: Stage 3 → Smart Dispositions
-arrow4 = slide.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW,
-                                Inches(stage3_x + 2.15), Inches(4.85),
-                                Inches(0.6), Inches(0.3))
-arrow4.fill.solid()
-arrow4.fill.fore_color.rgb = ORANGE
-arrow4.line.fill.background()
-
 # --- Output: Smart Dispositions ---
-out_x = stage3_x + 2.7
-out_box = add_rect(out_x, 4.4, 1.8, 1.2, BG_CARD, GREEN, 1.5)
+out_x = flow_left + 2.3
+out_box = add_rect(out_x, 4.8, 2.0, 1.2, BG_CARD, GREEN, 1.5)
 tf = out_box.text_frame
 tf.vertical_anchor = MSO_ANCHOR.MIDDLE
 p = tf.paragraphs[0]
@@ -385,28 +337,16 @@ p3.font.color.rgb = GREEN
 p3.alignment = PP_ALIGN.CENTER
 
 # ─ Key message below flow ──
-add_text(flow_left - 0.5, 5.95, 5.5, 0.3,
+add_text(flow_left - 0.5, 6.2, 5.5, 0.3,
          "AI used to DEVELOP, analysis is RULE-BASED",
          font_size=13, color=WHITE_DIM, bold=True,
-         alignment=PP_ALIGN.LEFT, font_name='Calibri')
-
-# ══════════════════════════════════════════════
-# FOOTER
-# ══════════════════════════════════════════════
-
-footer_line1 = add_text(0.3, 7.0, 12.5, 0.22,
-    "Rakesh Boya  |  Tool Owner & Developer  |  Honeywell Aerospace  |  CNS AI Day 2026",
-    font_size=9, color=GRAY, alignment=PP_ALIGN.CENTER)
-
-footer_line2 = add_text(0.3, 7.2, 12.5, 0.22,
-    "Confidential",
-    font_size=9, color=GRAY, bold=True, alignment=PP_ALIGN.CENTER)
+         alignment=PP_ALIGN.CENTER, font_name='Calibri')
 
 # ══════════════════════════════════════════════
 # SAVE
 # ══════════════════════════════════════════════
 
-output_path = "/home/user/Coverity-Tool/Coverity_Final_Slide_Updated.pptx"
+output_path = "/home/user/Coverity-Tool/Coverity_Findings_Analyzer.pptx"
 prs.save(output_path)
 print(f"✅ Saved: {output_path}")
 print(f"   File size: {os.path.getsize(output_path)} bytes")
