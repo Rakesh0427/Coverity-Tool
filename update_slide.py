@@ -1,9 +1,23 @@
+"""
+Generate Coverity_latest_slide.png respecting all user instructions:
+  1. Reduced CORE FEATURES and WORK DETAILS sections proportionally.
+  2. Section headers (CORE FEATURES, WORK DETAILS, COST SAVINGS PER PROGRAM)
+     share the exact same font size (25px Bold Orange with matching drop shadow).
+  3. Under CORE FEATURES and COST SAVINGS PER PROGRAM, fonts match harmoniously
+     (18.5px bold titles, 17.5px semibold/regular body).
+  4. "Deployed in — NG-FMS ATS Core EPP" replaces "Real Saving".
+  5. "143 defects pushed in the EPP" (removed "analysed +").
+  6. $7k, $30k, and $84 are prominently highlighted in gold pill badges with star accents.
+  7. Last line reviewed and properly formatted:
+     "Future Targeted Programs: Datalink (787, AIMS, EPIC), TXD across all CNS products, and all other HonAero Departments..."
+"""
+
 import subprocess
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-def build_slide():
+def build_slide(output_path='Coverity_latest_slide.png'):
     # 1. Load pristine base image from commit f41bb9358b5775fb68762bc2110851f7a281e1b3
     proc = subprocess.run(
         ['git', 'show', 'f41bb9358b5775fb68762bc2110851f7a281e1b3:Coverity_latest_slide.png'],
@@ -12,16 +26,10 @@ def build_slide():
     orig_bgr = cv2.imdecode(np.frombuffer(proc.stdout, np.uint8), cv2.IMREAD_COLOR)
 
     # 2. Extract crops
-    # CORE FEATURES: y: 168 to 522, x: 40 to 375
     core_crop = orig_bgr[168:522, 40:375].copy()
-
-    # WORK DETAILS: y: 168 to 586, x: 388 to 738
     work_crop = orig_bgr[168:586, 388:738].copy()
-    # Clean the bottom-left of work_crop where stray ROGRAM was
     bg_color = np.array([47, 23, 4], dtype=np.uint8)
     work_crop[365:, :160] = bg_color
-
-    # Money bag icon: y: 554 to 585, x: 50 to 78
     money_bag_crop = orig_bgr[554:585, 50:78].copy()
 
     # Scale factor: 0.81
@@ -41,36 +49,28 @@ def build_slide():
     clean_bgr = cv2.inpaint(clean_bgr, mask, 7, cv2.INPAINT_TELEA)
 
     # 4. Paste scaled CORE FEATURES and WORK DETAILS
-    # Place CORE FEATURES at x=42, y=168
     clean_bgr[168:168+core_scaled.shape[0], 42:42+core_scaled.shape[1]] = core_scaled
+    clean_bgr[168:168+work_scaled.shape[0], 415:415+work_scaled.shape[1]] = work_scaled
 
-    # Place WORK DETAILS at x=415, y=168
-    work_x = 415
-    clean_bgr[168:168+work_scaled.shape[0], work_x:work_x+work_scaled.shape[1]] = work_scaled
-
-    # Place money bag at y=517, x=42
     mb_h, mb_w, _ = money_bag_scaled.shape
     clean_bgr[517:517+mb_h, 42:42+mb_w] = money_bag_scaled
 
     # 5. Convert to PIL for text rendering
     canvas = Image.fromarray(cv2.cvtColor(clean_bgr, cv2.COLOR_BGR2RGB))
 
-    # Fonts
+    # Fonts matching CORE FEATURES
     bold_p = '/usr/local/lib/python3.11/dist-packages/font_source_sans_pro/files/SourceSansPro-Bold.ttf'
     semi_p = '/usr/local/lib/python3.11/dist-packages/font_source_sans_pro/files/SourceSansPro-Semibold.ttf'
     reg_p = '/usr/local/lib/python3.11/dist-packages/font_source_sans_pro/files/SourceSansPro-Regular.ttf'
     dejavu_bold = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
     # Font sizes:
-    # Header: 25px (EXACT match to scaled CORE FEATURES & WORK DETAILS headers)
-    f_header = ImageFont.truetype(bold_p, 25)
-    f_body_bold = ImageFont.truetype(bold_p, 17.5)
-    f_body_semi = ImageFont.truetype(semi_p, 17.5)
+    f_header = ImageFont.truetype(bold_p, 25)         # Matches scaled CORE FEATURES & WORK DETAILS headers
+    f_title = ImageFont.truetype(bold_p, 18.5)        # Matches CORE FEATURES feature title size
+    f_body_bold = ImageFont.truetype(bold_p, 17.5)    # Matches CORE FEATURES bold text
+    f_body_semi = ImageFont.truetype(semi_p, 17.5)    # Matches CORE FEATURES subtext
     f_body_reg = ImageFont.truetype(reg_p, 17)
-    
-    # Highlighted enlarged badge fonts for $7k and $30k
     f_badge_star = ImageFont.truetype(dejavu_bold, 20)
-    f_badge_text = ImageFont.truetype(bold_p, 22)
 
     # Colors
     C_ORANGE_HDR = (250, 112, 36)
@@ -127,18 +127,18 @@ def build_slide():
     t_draw.rounded_rectangle([x, y2 - 5, x + bw2 + 14, y2 + 27], radius=6, fill=(35, 28, 5, 240), outline=(255, 215, 0, 255), width=2)
     t_draw.text((x + 7, y2 - 2), badge_txt2, fill=C_GOLD, font=f_badge_star)
 
-    # Line 3: Real Saving — NG-FMS ATS Core EPP
+    # Line 3: Deployed in — NG-FMS ATS Core EPP
     y3 = 622
-    draw_shadowed(t_draw, (42, y3), "Real Saving — NG-FMS ATS Core EPP", f_body_bold, C_CYAN)
+    draw_shadowed(t_draw, (42, y3), "Deployed in — NG-FMS ATS Core EPP", f_title, C_CYAN)
 
-    # Line 4: • 143 defects analysed + pushed in the EPP
+    # Line 4: • 143 defects pushed in the EPP
     y4 = 652
     x = 42
     draw_shadowed(t_draw, (x, y4), "•", f_body_bold, C_BULLET)
     x += int(t_draw.textlength("•  ", font=f_body_bold))
     draw_shadowed(t_draw, (x, y4), "143 defects", f_body_bold, C_WHITE)
     x += int(t_draw.textlength("143 defects ", font=f_body_bold))
-    draw_shadowed(t_draw, (x, y4), "analysed + pushed in the EPP", f_body_semi, C_WHITE_DIM)
+    draw_shadowed(t_draw, (x, y4), "pushed in the EPP", f_body_semi, C_WHITE_DIM)
 
     # Line 5: • Manual push: 143 min (≈1 min per defect)   →   Tool push: ~3 min (one batch)
     y5 = 680
@@ -157,27 +157,39 @@ def build_slide():
     x += int(t_draw.textlength("~3 min ", font=f_body_bold))
     draw_shadowed(t_draw, (x, y5), "(one batch)", f_body_reg, C_WHITE_DIM)
 
-    # Line 6: • Saved on push: ~140 min ($84) (≈99% faster, 2.4 hrs)
+    # Line 6: • Saved on push: ~140 min  ★ ($84) ★  (≈99% faster, 2.4 hrs)
     y6 = 708
     x = 42
     draw_shadowed(t_draw, (x, y6), "•", f_body_bold, C_BULLET)
     x += int(t_draw.textlength("•  ", font=f_body_bold))
     draw_shadowed(t_draw, (x, y6), "Saved on push: ", f_body_semi, C_WHITE_DIM)
     x += int(t_draw.textlength("Saved on push: ", font=f_body_semi))
-    draw_shadowed(t_draw, (x, y6), "~140 min ($84)", f_body_bold, C_GREEN)
-    x += int(t_draw.textlength("~140 min ($84) ", font=f_body_bold))
+    draw_shadowed(t_draw, (x, y6), "~140 min", f_body_bold, C_GREEN)
+    x += int(t_draw.textlength("~140 min ", font=f_body_bold)) + 6
+
+    # Highlighted dollar number for $84 like above
+    badge_txt_84 = "★ ($84) ★"
+    bw_84 = int(t_draw.textlength(badge_txt_84, font=f_badge_star))
+    t_draw.rounded_rectangle([x, y6 - 5, x + bw_84 + 14, y6 + 27], radius=6, fill=(35, 28, 5, 240), outline=(255, 215, 0, 255), width=2)
+    t_draw.text((x + 7, y6 - 2), badge_txt_84, fill=C_GOLD, font=f_badge_star)
+    x += bw_84 + 20
+
     draw_shadowed(t_draw, (x, y6), "(≈99% faster, 2.4 hrs)", f_body_bold, C_GREEN)
 
-    # Line 7: Future Targeted programs are  Datalink(787,AIMS,EPIC), TXD along all CNS products and all other HonAero Departments....
+    # Line 7: Reviewed & properly formatted last line
     y7 = 736
     x = 42
-    draw_shadowed(t_draw, (x, y7), "Future Targeted programs are  ", f_body_bold, C_CYAN)
-    x += int(t_draw.textlength("Future Targeted programs are  ", font=f_body_bold))
-    draw_shadowed(t_draw, (x, y7), "Datalink(787,AIMS,EPIC), TXD along all CNS products and all other HonAero Departments....", f_body_semi, C_WHITE_DIM)
+    t_prog_hdr = "Future Targeted Programs: "
+    draw_shadowed(t_draw, (x, y7), t_prog_hdr, f_title, C_CYAN)
+    x += int(t_draw.textlength(t_prog_hdr, font=f_title))
+
+    t_prog_body = "Datalink (787, AIMS, EPIC), TXD across all CNS products, and all other HonAero Departments..."
+    draw_shadowed(t_draw, (x, y7), t_prog_body, f_body_semi, C_WHITE_DIM)
 
     # Composite text layer onto canvas
     final_img = Image.alpha_composite(canvas.convert('RGBA'), text_layer).convert('RGB')
-    final_img.save('Coverity_latest_slide.png')
-    print('✅ Saved Coverity_latest_slide.png')
+    final_img.save(output_path)
+    print(f'✅ Saved {output_path}')
 
-build_slide()
+if __name__ == '__main__':
+    build_slide('Coverity_latest_slide.png')

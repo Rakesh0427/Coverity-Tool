@@ -1,12 +1,15 @@
 """
 Generate Coverity Findings Analyzer slide as an editable PowerPoint.
 Updates applied:
-  1. Reduced CORE FEATURES section and WORK DETAILS section proportionally.
-  2. Main section headers (CORE FEATURES, WORK DETAILS, COST SAVINGS PER PROGRAM)
-     all share the exact same font size (15pt Bold Orange).
-  3. Content under all sections scaled accordingly and proportionally.
-  4. Enlarged and highlighted $7k and $30k with gold badge and star accents.
-  5. Architecture diagram preserved: Rule Engine -> Smart Dispositions.
+  1. Reduced CORE FEATURES and WORK DETAILS sections proportionally.
+  2. Section headers (CORE FEATURES, WORK DETAILS, COST SAVINGS PER PROGRAM)
+     share the exact same font size (15pt Bold Orange).
+  3. Typography under COST SAVINGS PER PROGRAM matches CORE FEATURES.
+  4. "Deployed in — NG-FMS ATS Core EPP" replaces "Real Saving".
+  5. "143 defects pushed in the EPP" (removed "analysed +").
+  6. $7k, $30k, and $84 are prominently highlighted in gold pill badges with star accents.
+  7. Last line reviewed and properly formatted:
+     "Future Targeted Programs: Datalink (787, AIMS, EPIC), TXD across all CNS products, and all other HonAero Departments..."
 """
 
 from pptx import Presentation
@@ -234,14 +237,14 @@ b2.text_frame.paragraphs[0].font.color.rgb = GOLD_YELLOW
 b2.text_frame.paragraphs[0].font.bold = True
 b2.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
-# Line 3: Real Saving — NG-FMS ATS Core EPP
+# Line 3: Deployed in — NG-FMS ATS Core EPP
 y_c += 0.32
-add_text(0.4, y_c, 6.5, 0.25, "Real Saving — NG-FMS ATS Core EPP",
+add_text(0.4, y_c, 6.5, 0.25, "Deployed in — NG-FMS ATS Core EPP",
          font_size=11.5, color=CYAN_GLOW, bold=True)
 
-# Line 4: • 143 defects analysed + pushed in the EPP
+# Line 4: • 143 defects pushed in the EPP
 y_c += 0.26
-add_text(0.4, y_c, 6.5, 0.22, "• 143 defects analysed + pushed in the EPP",
+add_text(0.4, y_c, 6.5, 0.22, "• 143 defects pushed in the EPP",
          font_size=10.5, color=WHITE)
 
 # Line 5: • Manual push vs Tool push
@@ -249,15 +252,25 @@ y_c += 0.24
 add_text(0.4, y_c, 7.5, 0.22, "• Manual push: 143 min (≈1 min per defect)   →   Tool push: ~3 min (one batch)",
          font_size=10.5, color=WHITE_DIM)
 
-# Line 6: • Saved on push
+# Line 6: • Saved on push: ~140 min  ★ ($84) ★  (≈99% faster, 2.4 hrs)
 y_c += 0.24
-add_text(0.4, y_c, 6.5, 0.22, "• Saved on push: ~140 min ($84) (≈99% faster, 2.4 hrs)",
+add_text(0.4, y_c, 2.5, 0.22, "• Saved on push: ~140 min",
+         font_size=10.5, color=GREEN_LIGHT, bold=True)
+# Highlighted dollar number for $84 like above
+b3 = add_rect(2.9, y_c - 0.04, 1.1, 0.26, GOLD_BG, GOLD_YELLOW, 1.5)
+b3.text_frame.text = "★ ($84) ★"
+b3.text_frame.paragraphs[0].font.size = Pt(11)
+b3.text_frame.paragraphs[0].font.color.rgb = GOLD_YELLOW
+b3.text_frame.paragraphs[0].font.bold = True
+b3.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+
+add_text(4.1, y_c, 3.5, 0.22, "(≈99% faster, 2.4 hrs)",
          font_size=10.5, color=GREEN_LIGHT, bold=True)
 
-# Line 7: Future Targeted programs
-y_c += 0.26
-add_text(0.4, y_c, 12.0, 0.25,
-         "Future Targeted programs are  Datalink(787,AIMS,EPIC), TXD along all CNS products and all other HonAero Departments....",
+# Line 7: Future Targeted programs (Reviewed & properly formatted)
+y_c += 0.28
+add_text(0.4, y_c, 12.5, 0.25,
+         "Future Targeted Programs: Datalink (787, AIMS, EPIC), TXD across all CNS products, and all other HonAero Departments...",
          font_size=10.5, color=CYAN_GLOW, bold=True)
 
 # ══════════════════════════════════════════════
