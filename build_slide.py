@@ -1,14 +1,16 @@
 """
 Generate Coverity Findings Analyzer slide as an editable PowerPoint.
 Updates applied:
-  1. Removed Honeywell Aerospace and CNS AI Day 2026 at the top
-  2. Removed "for Aerospace" from subtitle
-  3. Removed Processing Stage 3 fully and adjusted flow: Rule Engine -> Smart Dispositions
-  4. Removed footer with Rakesh Boya and other metadata
+  1. Reduced CORE FEATURES section and WORK DETAILS section proportionally.
+  2. Main section headers (CORE FEATURES, WORK DETAILS, COST SAVINGS PER PROGRAM)
+     all share the exact same font size (15pt Bold Orange).
+  3. Content under all sections scaled accordingly and proportionally.
+  4. Enlarged and highlighted $7k and $30k with gold badge and star accents.
+  5. Architecture diagram preserved: Rule Engine -> Smart Dispositions.
 """
 
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
@@ -22,18 +24,19 @@ prs.slide_height = Inches(7.5)
 # ── Color palette (aerospace dark theme) ──
 BG_DARK      = RGBColor(0x0A, 0x0E, 0x1A)   # deep navy-black
 BG_CARD      = RGBColor(0x11, 0x18, 0x2E)   # slightly lighter card
-ORANGE       = RGBColor(0xFF, 0x6B, 0x00)   # accent orange
+ORANGE       = RGBColor(0xFA, 0x70, 0x24)   # accent orange
 ORANGE_LIGHT = RGBColor(0xFF, 0x99, 0x33)
 GREEN        = RGBColor(0x00, 0xCC, 0x66)   # accent green
-GREEN_LIGHT  = RGBColor(0x33, 0xFF, 0x88)
+GREEN_LIGHT  = RGBColor(0x32, 0xFF, 0x82)
 WHITE        = RGBColor(0xFF, 0xFF, 0xFF)
-WHITE_DIM    = RGBColor(0xCC, 0xCC, 0xDD)
+WHITE_DIM    = RGBColor(0xD7, 0xDE, 0xEB)
 GRAY         = RGBColor(0x88, 0x88, 0xAA)
 RED_BG       = RGBColor(0x3A, 0x15, 0x15)   # red-tinted cell
 GREEN_BG     = RGBColor(0x0F, 0x2E, 0x1A)   # green-tinted cell
-RED_TEXT     = RGBColor(0xFF, 0x44, 0x44)
-CYAN_GLOW    = RGBColor(0x00, 0xCC, 0xFF)
-YELLOW       = RGBColor(0xFF, 0xCC, 0x00)
+RED_TEXT     = RGBColor(0xFF, 0x55, 0x55)
+CYAN_GLOW    = RGBColor(0x00, 0xE5, 0xFF)
+GOLD_YELLOW  = RGBColor(0xFF, 0xE1, 0x14)
+GOLD_BG      = RGBColor(0x23, 0x1C, 0x05)
 
 slide_layout = prs.slide_layouts[6]  # blank
 slide = prs.slides.add_slide(slide_layout)
@@ -93,34 +96,36 @@ def add_rect_straight(left, top, width, height, fill_color, border_color=None, b
 # TITLE AREA
 # ══════════════════════════════════════════════
 
-# Robot emoji placeholder - use a circle shape as icon
+# Robot icon placeholder
 icon = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(2.6), Inches(0.12),
                               Inches(0.45), Inches(0.45))
 icon.fill.solid()
 icon.fill.fore_color.rgb = ORANGE
 icon.line.fill.background()
 
-# Main title (centered horizontally)
+# Main title
 add_text(3.1, 0.05, 7.5, 0.5, "COVERITY FINDINGS ANALYZER",
          font_size=26, color=ORANGE, bold=True,
          alignment=PP_ALIGN.LEFT, font_name='Calibri')
 
-# Subtitle (without "for Aerospace", centered)
+# Subtitle
 add_text(2.0, 0.55, 9.333, 0.4,
          "AI-Developed, Rule-Based Static Analysis",
          font_size=14, color=WHITE_DIM,
          alignment=PP_ALIGN.CENTER, font_name='Calibri')
 
-# ── Horizontal divider ──
+# Divider
 divider = add_rect_straight(0.3, 0.95, 12.7, 0.02, ORANGE)
 
+# Common section header font size
+SECTION_HDR_SIZE = 15
+
 # ══════════════════════════════════════════════
-# LEFT COLUMN: CORE FEATURES
+# LEFT COLUMN: CORE FEATURES (Reduced & Compact)
 # ══════════════════════════════════════════════
 
-# Section header
-hdr = add_text(0.4, 1.15, 4.0, 0.35, "  CORE FEATURES",
-               font_size=16, color=ORANGE, bold=True, font_name='Calibri')
+hdr1 = add_text(0.4, 1.15, 3.6, 0.35, "🎯  CORE FEATURES",
+                font_size=SECTION_HDR_SIZE, color=ORANGE, bold=True, font_name='Calibri')
 
 features = [
     ("Aerospace Compliance", "DO-178C, MISRA, CERT"),
@@ -131,110 +136,132 @@ features = [
 
 y = 1.55
 for title, desc in features:
-    add_text(0.5, y, 3.8, 0.22, title, font_size=11, color=WHITE, bold=True)
-    add_text(0.5, y + 0.2, 3.8, 0.22, f"  {desc}", font_size=10, color=WHITE_DIM)
-    y += 0.6
+    add_text(0.5, y, 3.5, 0.22, title, font_size=10.5, color=WHITE, bold=True)
+    add_text(0.5, y + 0.18, 3.5, 0.20, f"- {desc}", font_size=9.5, color=WHITE_DIM)
+    y += 0.50
 
 # ══════════════════════════════════════════════
-# MIDDLE COLUMN: WORK DETAILS TABLE
+# MIDDLE COLUMN: WORK DETAILS TABLE (Reduced & Compact)
 # ══════════════════════════════════════════════
 
-hdr2 = add_text(4.6, 1.15, 3.5, 0.35, "⚖  WORK DETAILS",
-                font_size=16, color=ORANGE, bold=True)
+hdr2 = add_text(4.2, 1.15, 3.5, 0.35, "⚖  WORK DETAILS",
+                font_size=SECTION_HDR_SIZE, color=ORANGE, bold=True)
 
 table_top = 1.55
-col_w = 2.3
-row_h = 0.42
-tbl_left = 4.6
+col_w = 1.85
+row_h = 0.36
+tbl_left = 4.2
 
 # Table header row
 manual_hdr = add_rect(tbl_left, table_top, col_w, row_h, RED_BG, ORANGE, 1)
 manual_hdr.text_frame.text = "MANUAL"
-manual_hdr.text_frame.paragraphs[0].font.size = Pt(11)
+manual_hdr.text_frame.paragraphs[0].font.size = Pt(10)
 manual_hdr.text_frame.paragraphs[0].font.color.rgb = RED_TEXT
 manual_hdr.text_frame.paragraphs[0].font.bold = True
 manual_hdr.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
 tool_hdr = add_rect(tbl_left + col_w + 0.05, table_top, col_w, row_h, GREEN_BG, ORANGE, 1)
 tool_hdr.text_frame.text = "WITH TOOL"
-tool_hdr.text_frame.paragraphs[0].font.size = Pt(11)
+tool_hdr.text_frame.paragraphs[0].font.size = Pt(10)
 tool_hdr.text_frame.paragraphs[0].font.color.rgb = GREEN
 tool_hdr.text_frame.paragraphs[0].font.bold = True
 tool_hdr.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
 # Table rows
 rows = [
-    ("⏱ 10-15 min / defect",    "⚡ 1-2 min / defect"),
-    ("🔍 Source Code Investigation Required", "🤖 Automated Analysis"),
-    ("🧠 Context Analysis Required",         "✅ One Controlled Flow"),
-    ("📝 Disposition & Documentation Required", "📊 Higher Quality"),
+    ("10-15 minutes\nper defect",               "1-2 minutes\nper defect"),
+    ("Source Code Investigation\nRequired",     "Automated\nAnalysis"),
+    ("Context Analysis\nRequired",              "One Controlled\nFlow"),
+    ("Disposition &\nDocumentation Required",    "Higher\nQuality"),
 ]
 
-y = table_top + row_h + 0.04
+y_row = table_top + row_h + 0.04
 for manual, tool in rows:
-    r1 = add_rect(tbl_left, y, col_w, row_h, RED_BG)
+    r1 = add_rect(tbl_left, y_row, col_w, row_h, RED_BG)
     r1.text_frame.text = manual
-    r1.text_frame.paragraphs[0].font.size = Pt(9)
+    r1.text_frame.paragraphs[0].font.size = Pt(8.5)
     r1.text_frame.paragraphs[0].font.color.rgb = WHITE_DIM
     r1.text_frame.word_wrap = True
 
-    r2 = add_rect(tbl_left + col_w + 0.05, y, col_w, row_h, GREEN_BG)
+    r2 = add_rect(tbl_left + col_w + 0.05, y_row, col_w, row_h, GREEN_BG)
     r2.text_frame.text = tool
-    r2.text_frame.paragraphs[0].font.size = Pt(9)
+    r2.text_frame.paragraphs[0].font.size = Pt(8.5)
     r2.text_frame.paragraphs[0].font.color.rgb = WHITE
     r2.text_frame.word_wrap = True
-    y += row_h + 0.04
+    y_row += row_h + 0.04
 
 # ~90% Time Reduction callout
-callout_y = y + 0.08
-add_text(tbl_left + 0.3, callout_y, 2.5, 0.5, "~90%",
-         font_size=28, color=ORANGE, bold=True, font_name='Calibri')
-add_text(tbl_left + 0.3, callout_y + 0.38, 2.5, 0.3, "Time Reduction",
-         font_size=11, color=WHITE_DIM)
+callout_y = y_row + 0.04
+add_text(tbl_left + 1.2, callout_y, 2.5, 0.4, "~90%",
+         font_size=24, color=ORANGE, bold=True, font_name='Calibri')
+add_text(tbl_left + 1.2, callout_y + 0.32, 2.5, 0.25, "Time Reduction",
+         font_size=10, color=WHITE_DIM)
 
 # ══════════════════════════════════════════════
-# BOTTOM LEFT: COST SAVINGS
+# BOTTOM LEFT: COST SAVINGS PER PROGRAM
 # ══════════════════════════════════════════════
 
-cost_top = 4.85
-add_text(0.4, cost_top, 4.5, 0.35, "💰  COST SAVINGS PER PROGRAM",
-         font_size=14, color=ORANGE, bold=True)
+cost_top = 4.80
+# EXACT same font size as CORE FEATURES and WORK DETAILS
+add_text(0.4, cost_top, 5.5, 0.35, "💰  COST SAVINGS PER PROGRAM",
+         font_size=SECTION_HDR_SIZE, color=ORANGE, bold=True)
 
-cost_items = [
-    ("RL1 (1,000 defects): 250 hrs → 33 hrs = ", "217 hrs SAVED ", "*($7k)*"),
-    ("Program (4,000 defects): 1,000 hrs → 133 hrs = ", "867 hrs SAVED ", "*($30k)*"),
-]
-y = cost_top + 0.30
-for prefix, saved, cost in cost_items:
-    add_text(0.5, y, 5.0, 0.25, prefix, font_size=12, color=WHITE)
-    add_text(4.8, y, 1.8, 0.25, saved, font_size=12, color=ORANGE, bold=True)
-    add_text(6.1, y, 1.5, 0.25, cost, font_size=12, color=YELLOW, bold=True)
-    y += 0.26
-
-# Real Saving — NG-FMS ATS Core EPP
-add_text(0.5, y + 0.02, 6.5, 0.25, "Real Saving — NG-FMS ATS Core EPP",
-         font_size=12, color=CYAN_GLOW, bold=True)
-y += 0.28
-
-add_text(0.5, y, 6.5, 0.22, "• 143 defects analysed + pushed in the EPP",
+# Line 1: RL1
+y_c = cost_top + 0.36
+add_text(0.4, y_c, 3.4, 0.25, "RL1 (1,000 defects): 250 hrs → 33 hrs =",
          font_size=11, color=WHITE)
-y += 0.24
+add_text(3.7, y_c, 1.5, 0.25, "217 hrs SAVED",
+         font_size=11, color=ORANGE, bold=True)
+# Highlighted enlarged badge for $7k
+b1 = add_rect(5.2, y_c - 0.04, 1.2, 0.28, GOLD_BG, GOLD_YELLOW, 1.5)
+b1.text_frame.text = "★ ($7k) ★"
+b1.text_frame.paragraphs[0].font.size = Pt(12)
+b1.text_frame.paragraphs[0].font.color.rgb = GOLD_YELLOW
+b1.text_frame.paragraphs[0].font.bold = True
+b1.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
-add_text(0.5, y, 7.5, 0.22, "• Manual push: 143 min (≈1 min per defect)   →   Tool push: ~3 min (one batch)",
-         font_size=11, color=WHITE_DIM)
-y += 0.24
+# Line 2: Program
+y_c += 0.32
+add_text(0.4, y_c, 3.7, 0.25, "Program (4,000 defects): 1000 hrs → 133 hrs =",
+         font_size=11, color=WHITE)
+add_text(4.0, y_c, 1.5, 0.25, "867 hrs SAVED",
+         font_size=11, color=ORANGE, bold=True)
+# Highlighted enlarged badge for $30k
+b2 = add_rect(5.5, y_c - 0.04, 1.3, 0.28, GOLD_BG, GOLD_YELLOW, 1.5)
+b2.text_frame.text = "★ ($30k) ★"
+b2.text_frame.paragraphs[0].font.size = Pt(12)
+b2.text_frame.paragraphs[0].font.color.rgb = GOLD_YELLOW
+b2.text_frame.paragraphs[0].font.bold = True
+b2.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
 
-add_text(0.5, y, 6.5, 0.22, "• Saved on push: ~140 min ($84) (≈99% faster, 2.4 hrs)",
-         font_size=11, color=GREEN_LIGHT, bold=True)
-y += 0.28
+# Line 3: Real Saving — NG-FMS ATS Core EPP
+y_c += 0.32
+add_text(0.4, y_c, 6.5, 0.25, "Real Saving — NG-FMS ATS Core EPP",
+         font_size=11.5, color=CYAN_GLOW, bold=True)
 
-# Future Targeted programs
-add_text(0.5, y, 12.0, 0.25,
+# Line 4: • 143 defects analysed + pushed in the EPP
+y_c += 0.26
+add_text(0.4, y_c, 6.5, 0.22, "• 143 defects analysed + pushed in the EPP",
+         font_size=10.5, color=WHITE)
+
+# Line 5: • Manual push vs Tool push
+y_c += 0.24
+add_text(0.4, y_c, 7.5, 0.22, "• Manual push: 143 min (≈1 min per defect)   →   Tool push: ~3 min (one batch)",
+         font_size=10.5, color=WHITE_DIM)
+
+# Line 6: • Saved on push
+y_c += 0.24
+add_text(0.4, y_c, 6.5, 0.22, "• Saved on push: ~140 min ($84) (≈99% faster, 2.4 hrs)",
+         font_size=10.5, color=GREEN_LIGHT, bold=True)
+
+# Line 7: Future Targeted programs
+y_c += 0.26
+add_text(0.4, y_c, 12.0, 0.25,
          "Future Targeted programs are  Datalink(787,AIMS,EPIC), TXD along all CNS products and all other HonAero Departments....",
-         font_size=11, color=ORANGE_LIGHT, bold=True)
+         font_size=10.5, color=CYAN_GLOW, bold=True)
 
 # ══════════════════════════════════════════════
-# RIGHT SIDE: FLOW DIAGRAM (Adjusted: Stage 1 -> Stage 2 -> Smart Dispositions)
+# RIGHT SIDE: FLOW DIAGRAM (Stage 1 -> Stage 2 -> Smart Dispositions)
 # ══════════════════════════════════════════════
 
 flow_left = 8.2
@@ -289,7 +316,7 @@ add_text(stage1_x - 0.3, 1.0, 2.6, 0.2, "Processing Stage 1",
 add_text(stage1_x - 0.3, 1.15, 2.6, 0.3, "Source Parser",
          font_size=12, color=WHITE, bold=True, alignment=PP_ALIGN.CENTER)
 
-# Curved arrow: Source Parser → Rule Engine (down-right)
+# Curved arrow: Source Parser → Rule Engine
 arrow2 = slide.shapes.add_shape(MSO_SHAPE.DOWN_ARROW,
                                 Inches(stage1_x + 0.9), Inches(2.55),
                                 Inches(0.3), Inches(0.5))
@@ -321,7 +348,7 @@ p3.alignment = PP_ALIGN.CENTER
 add_text(stage2_x - 0.3, 2.7, 3.0, 0.25, "Processing Stage 2",
          font_size=9, color=WHITE_DIM, alignment=PP_ALIGN.CENTER)
 
-# Adjusted flow: Rule Engine → Smart Dispositions (direct curve/down-right into Output)
+# Flow: Rule Engine → Smart Dispositions
 arrow3 = slide.shapes.add_shape(MSO_SHAPE.DOWN_ARROW,
                                 Inches(stage2_x + 1.0), Inches(4.2),
                                 Inches(0.35), Inches(0.5))
