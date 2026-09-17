@@ -201,23 +201,37 @@ add_text(0.4, cost_top, 4.5, 0.35, "💰  COST SAVINGS PER PROGRAM",
          font_size=14, color=ORANGE, bold=True)
 
 cost_items = [
-    "RL1 (1,000 defects): 250 hrs → 33 hrs = 217 hrs SAVED",
-    "Program (4,000 defects): 1,000 hrs → 133 hrs = 867 hrs SAVED",
+    ("RL1 (1,000 defects): 250 hrs → 33 hrs = ", "217 hrs SAVED ", "*($7k)*"),
+    ("Program (4,000 defects): 1,000 hrs → 133 hrs = ", "867 hrs SAVED ", "*($30k)*"),
 ]
-y = cost_top + 0.35
-for item in cost_items:
-    # Split by "=" for coloring
-    parts = item.split(" = ")
-    add_text(0.5, y, 6.5, 0.28, parts[0] + " = ",
-             font_size=12, color=WHITE)
-    saved_text = parts[1]
-    add_text(5.0, y, 3.0, 0.28, saved_text,
-             font_size=12, color=ORANGE, bold=True)
-    y += 0.3
+y = cost_top + 0.32
+for prefix, saved, cost in cost_items:
+    add_text(0.5, y, 4.8, 0.25, prefix, font_size=11, color=WHITE)
+    add_text(4.4, y, 1.8, 0.25, saved, font_size=11, color=ORANGE, bold=True)
+    add_text(5.6, y, 1.5, 0.25, cost, font_size=11, color=YELLOW, bold=True)
+    y += 0.25
 
-add_text(0.5, y + 0.02, 6.5, 0.28,
-         "RL1: $7,595  |  Program: $30,345  per release (at $35/hr)",
-         font_size=12, color=YELLOW, bold=True)
+# Real Saving — NG-FMS ATS Core EPP
+add_text(0.5, y + 0.05, 6.5, 0.25, "Real Saving — NG-FMS ATS Core EPP",
+         font_size=12, color=CYAN_GLOW, bold=True)
+y += 0.30
+
+add_text(0.5, y, 6.5, 0.22, "• 143 defects analysed + pushed in the EPP",
+         font_size=10, color=WHITE)
+y += 0.22
+
+add_text(0.5, y, 6.5, 0.22, "• Manual push: 143 min (≈1 min per defect)   →   Tool push: ~3 min (one batch)",
+         font_size=10, color=WHITE_DIM)
+y += 0.22
+
+add_text(0.5, y, 6.5, 0.22, "• Saved on push: ~140 min ($84) (≈99% faster, 2.4 hrs)",
+         font_size=10, color=GREEN_LIGHT, bold=True)
+y += 0.28
+
+# Future Targeted programs
+add_text(0.5, y, 12.0, 0.25,
+         "Future Targeted programs are  Datalink(787,AIMS,EPIC), TXD along all CNS products and all other HonAero Departments....",
+         font_size=10, color=ORANGE_LIGHT, bold=True)
 
 # ══════════════════════════════════════════════
 # RIGHT SIDE: FLOW DIAGRAM (Adjusted: Stage 1 -> Stage 2 -> Smart Dispositions)
