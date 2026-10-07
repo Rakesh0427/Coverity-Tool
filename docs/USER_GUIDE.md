@@ -43,7 +43,10 @@ its evidence was.
 
 **Step 2 — decide how to run it:** as **MCP tools** (works with every agent in
 VS Code, recommended) or as the **extension** (adds Problems-panel entries).
-[VSCODE_INTEGRATION.md](VSCODE_INTEGRATION.md) has both, in 3 minutes each.
+For the agent route — the prompts that get good results, and how to read
+the answer — see [AGENT_USER_MANUAL.md](AGENT_USER_MANUAL.md).
+[VSCODE_INTEGRATION.md](VSCODE_INTEGRATION.md) has the engine routes, in 3
+minutes each.
 For MCP you need `.vscode/mcp.json` (already committed here) and then:
 
 > `Ctrl+Shift+P` → **MCP: List Servers** → `coverity` → **Start Server**

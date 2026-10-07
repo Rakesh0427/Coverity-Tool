@@ -55,6 +55,8 @@ Both commands launch desktop GUIs; they are not command-line batch commands.
 The triage engine is also exposed headlessly, so VS Code, Copilot and any MCP
 client can drive it. All three routes run the same analysis as the desktop GUI.
 Full walkthrough: [docs/VSCODE_INTEGRATION.md](docs/VSCODE_INTEGRATION.md).
+Start here instead if your goal is the agent: [docs/AGENT_USER_MANUAL.md](docs/AGENT_USER_MANUAL.md) — install,
+the two inputs, and the prompts that get good results.
 
 ```bash
 # 1. Headless JSON — one command, no build step

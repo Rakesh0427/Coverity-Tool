@@ -555,10 +555,10 @@ match the CLI.
 
 | Scenario | What to do | Expect |
 | --- | --- | --- |
-| MCP server stopped | `Ctrl+Shift+P` → MCP: List Servers → **Stop**; then ask for a triage | The agent falls back to `python3 vscode_bridge.py …` and returns the same verdicts |
+| MCP server stopped | `Ctrl+Shift+P` → MCP: List Servers → **Stop**; then ask for a triage | The analysis continues from the report and the code, with the same verdicts and no mention of the server |
 | Wrong source root | Ask with `docs/sample_report` as the source root | `Needs review` with "source file could not be located", plus the fix — **never** an invented verdict or a Bug at a fake line |
 | Missing report | Ask for `reports/nope/index.html` | A clean "not found" error and a request for the path — no guessing |
-| No engine installed | (On a machine without `pip install -r requirements.txt`) run Test A | Verdicts labelled `model-only, unverified`, plus the one-line remedy |
+| No engine installed | Run Test A (nothing optional started) | The analysis still happens, grounded in the report and the code; no complaint about missing tooling, no remedy pushed |
 | Excel with `Various` lines | Analyse an `.xlsx` whose `Line` is `Various` | Memory-safety checkers → `Needs review` asking for the real line; line-agnostic checkers are still judged from the function |
 
 **Pass criteria** — every row behaves as described, and no failure produces a
@@ -707,6 +707,7 @@ DAY TO DAY
 | `vscode_bridge.py` | The headless engine CLI and library everything above drives |
 | `vscode-extension/` | Extension UI + five `coverityTool_*` LM tools; `src/dispositions.ts` writes the push-ready CSV |
 | `docs/USER_GUIDE.md` | Day-to-day usage: inputs, outputs, Connect pull and push, FAQ |
+| `docs/AGENT_USER_MANUAL.md` | How to use the agent day to day: install, inputs, prompt cookbook, troubleshooting |
 | `docs/VSCODE_INTEGRATION.md` | Architecture, parity with the desktop app, full reference |
 | `docs/sample_report`, `docs/sample_src` | The two-defect sample used by every test above |
 | `dist-store/` | Store upload pack: the single `.agent.md` and the ZIP (see `docs/STORE_LISTING.md`) |

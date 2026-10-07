@@ -73,15 +73,15 @@ defect, is where triage time goes.
 
 `.github/agents/coverity-finding-analyzer.agent.md` — the agent itself, one file.
 
-This project also contains the **Coverity Tool** engine (`vscode_bridge.py` and
-its dependencies), and the agent's *capability* comes from it: the engine reads
-the Coverity report and the C/C++ tree and returns deterministic facts — event
-traces, source anchoring, checker mechanics, CWE/CERT references and a first-pass
-verdict. Those facts are the agent's evidence base. The agent may confirm them,
-and it may overrule them with code it has read, but it never invents what it
-could not see. Install the engine's requirements for the deepest analysis
-(`python capabilities.py` → `analysis depth: FULL`); without them the agent still
-analyses, and labels its verdicts *model-only, unverified*.
+**Nothing else is needed.** The agent is self-contained: the VS Code model reads
+the report and the code.
+
+This project *also* contains the optional **Coverity Tool** engine
+(`vscode_bridge.py` and `coverity_mcp_server.py`) — a separate capability, not
+this download. When a workspace has it, the agent can call it (via MCP or the
+bundled extension) for exact line numbers, an AST-anchored first pass and
+CWE/CERT references — a precision and speed upgrade, never a requirement. When it is absent the agent neither blocks on it nor
+mentions it, and it never presents its own reading as the engine's output.
 
 ## Tags
 
@@ -118,7 +118,7 @@ project (create the folder if needed), and reload VS Code. The agent appears in
 the chat agent picker as **Coverity Finding Analyzer**.
 
 **Option 2 — the ZIP.** Download
-`coverity-finding-analyzer-v1.0.0.zip`; its root already contains
+`coverity-finding-analyzer-v1.1.0.zip`; its root already contains
 `.github/agents/coverity-finding-analyzer.agent.md`. Unzip it over the root of
 your project (or your user profile) and reload VS Code. `README.md` inside the
 ZIP is this file.

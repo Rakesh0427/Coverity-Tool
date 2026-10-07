@@ -1,4 +1,15 @@
-# Using the Coverity Tool from VS Code (and from an AI agent)
+# Optional engine routes: MCP server, extension and CLI
+
+> **You do not need anything on this page to analyse a Coverity report.** The
+> **Coverity Finding Analyzer** agent runs on the VS Code model you select and
+> reads the report and your source by itself — see
+> [`docs/AGENT_USER_MANUAL.md`](AGENT_USER_MANUAL.md) to start, and
+> [`docs/VSCODE_AGENTS.md`](VSCODE_AGENTS.md) for the test runbook.
+>
+> This page covers the **optional accelerator**: three ways to drive the local
+> triage engine from VS Code. When it is available the agent uses it for exact
+> line numbers, an AST-anchored first pass and CWE/CERT references. It is a
+> speed and precision upgrade, never a requirement.
 
 This repository ships three ways to drive the triage engine from VS Code. They
 all run the **same Python analysis** (`context_builder` → `heuristic_analyzer`,
@@ -11,15 +22,18 @@ result is presented.
 | **2. Native extension** | Everything from route 1 **plus** a Findings view, Problems-panel squiggles with CWE links, status bar, commands, `#`-references in chat | `npm install && npm run compile` (one command) |
 | **3. CLI / task** | JSON on stdout for scripts, CI and `.vscode/tasks.json` | None |
 
-> Whichever route you choose, install the Python dependencies first —
-> without them the analysis silently degrades (it still runs, but says so in
-> every comment it produces):
->
-> ```bash
-> python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
-> pip install -r requirements.txt
-> python capabilities.py          # should print "analysis depth: FULL"
-> ```
+To get the most out of this optional path, install the Python dependencies: with
+them the engine reaches `analysis depth: FULL` and every comment it produces says
+what the depth was.
+
+```bash
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python capabilities.py          # should print "analysis depth: FULL"
+```
+
+Without them the routes still work, and the agent still analyses — from the
+report and the code, which is all it ever needs.
 
 ---
 
