@@ -1,0 +1,382 @@
+{
+  "name": "coverity-tool",
+  "displayName": "Coverity Tool — AI Triage",
+  "description": "Triage Coverity C/C++ defects with the local Coverity Tool engine: evidence-based dispositions, CWE-cited rationale, suggested fixes, a findings view, and tools for GitHub Copilot agent mode.",
+  "version": "1.0.0",
+  "publisher": "rakesh0427",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "coverity",
+    "static analysis",
+    "triage",
+    "cwe",
+    "copilot",
+    "security"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "out",
+    "resources",
+    "README.md"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "coverityTool.runAnalysis",
+        "title": "Coverity: Analyse Report",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "coverityTool.refresh",
+        "title": "Coverity: Reload Cached Triages",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "coverityTool.showCapabilities",
+        "title": "Coverity: Show Analysis Capabilities"
+      },
+      {
+        "command": "coverityTool.exportTriage",
+        "title": "Coverity: Export Triage JSON…"
+      },
+      {
+        "command": "coverityTool.openFinding",
+        "title": "Coverity: Open Finding"
+      },
+      {
+        "command": "coverityTool.copyRationale",
+        "title": "Coverity: Copy Rationale"
+      },
+      {
+        "command": "coverityTool.analyzeAtCursor",
+        "title": "Coverity: Show Finding Under Cursor"
+      }
+    ],
+    "configuration": {
+      "title": "Coverity Tool",
+      "properties": {
+        "coverityTool.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter used to run `vscode_bridge.py`. Leave empty to auto-detect (a `.venv` next to the tool, then `python3`/`python`)."
+        },
+        "coverityTool.bridgePath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to `vscode_bridge.py`. Leave empty to auto-detect: `<workspace>/Coverity-Tool/vscode_bridge.py`, `<workspace>/vscode_bridge.py`, then the copy shipped next to this extension."
+        },
+        "coverityTool.reportPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Coverity report to analyse: `index.html`, the report **folder**, an `.xlsx` export, or a `.triage.json`. Relative paths are resolved against the workspace folder."
+        },
+        "coverityTool.sourceRoot": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "markdownDescription": "Root of the analysed C/C++ checkout. Verdicts are far more accurate when the source is available, because the analyser reads the real code instead of only the report's event trace."
+        },
+        "coverityTool.language": {
+          "type": "string",
+          "enum": [
+            "c",
+            "cpp"
+          ],
+          "default": "c",
+          "description": "Source language of the analysed tree."
+        },
+        "coverityTool.maxDefects": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "description": "Maximum defects analysed per run (keeps a 4000-finding report from stalling the editor)."
+        },
+        "coverityTool.timeoutSeconds": {
+          "type": "number",
+          "default": 900,
+          "minimum": 10,
+          "description": "Kill the analysis if it runs longer than this."
+        },
+        "coverityTool.publishDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show analysed defects as Problems (squiggles + Problems panel) in files that are open in the workspace."
+        },
+        "coverityTool.diagnosticDispositions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Bug",
+              "False positive",
+              "Intentional",
+              "Needs review"
+            ]
+          },
+          "default": [
+            "Bug",
+            "Needs review"
+          ],
+          "description": "Which dispositions become Problems entries."
+        },
+        "coverityTool.serverUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional Coverity Connect URL, recorded only so `coverityTool.covCli` style workflows can find it. This extension never stores credentials."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "coverityTool",
+          "title": "Coverity Tool",
+          "icon": "resources/coverity.svg"
+        }
+      ]
+    },
+    "views": {
+      "coverityTool": [
+        {
+          "id": "coverityTool.findings",
+          "name": "Findings",
+          "icon": "resources/coverity.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "coverityTool.runAnalysis",
+          "when": "view == coverityTool.findings",
+          "group": "navigation@1"
+        },
+        {
+          "command": "coverityTool.refresh",
+          "when": "view == coverityTool.findings",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "coverityTool.copyRationale",
+          "when": "view == coverityTool.findings && viewItem == coverityFinding",
+          "group": "inline"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "coverityTool.analyzeAtCursor",
+          "when": "editorLangId == c || editorLangId == cpp",
+          "group": "navigation@9"
+        }
+      ]
+    },
+    "languageModelTools": [
+      {
+        "name": "coverityTool_capabilities",
+        "displayName": "Coverity: Analysis Capabilities",
+        "userDescription": "Check which Coverity analysis backends are available.",
+        "modelDescription": "Report which optional analysis backends (tree-sitter AST, libclang types, z3 path proofs, cppcheck corroboration) are available in the Coverity Tool's Python environment and the resulting analysis depth. Call this before presenting triage numbers as authoritative, or when explaining a 'Needs review' verdict.",
+        "toolReferenceName": "coverityCapabilities",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(shield)",
+        "tags": [
+          "coverity",
+          "static-analysis"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "coverityTool_listDefects",
+        "displayName": "Coverity: List Defects",
+        "userDescription": "List the defects in a Coverity report.",
+        "modelDescription": "List the defects in a Coverity HTML report (.html or the folder containing index.html) or Excel export (.xlsx) without analysing them: CID, checker, severity, file, line, function. Use it to see what is in the report before picking a CID to analyse.",
+        "toolReferenceName": "coverityListDefects",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(list-unordered)",
+        "tags": [
+          "coverity",
+          "static-analysis"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "report": {
+              "type": "string",
+              "description": "Report path. Defaults to the coverityTool.reportPath setting."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum rows to return (default 25)."
+            },
+            "checker": {
+              "type": "string",
+              "description": "Only this checker, e.g. BUFFER_SIZE."
+            },
+            "severity": {
+              "type": "string",
+              "description": "Only this severity, e.g. High."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "coverityTool_analyzeDefect",
+        "displayName": "Coverity: Analyse Defect",
+        "userDescription": "Analyse one Coverity defect and get a disposition, rationale and fix.",
+        "modelDescription": "Analyse a single Coverity defect CID with the local Coverity Tool engine. Returns the disposition (Bug / False positive / Intentional / Needs review), confidence, a senior-engineer rationale citing CWE/CERT, a suggested minimal code fix, the Coverity event trace and the source window the verdict used. Use it to justify a triage decision or to decide whether a finding is worth fixing.",
+        "toolReferenceName": "coverityAnalyzeDefect",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(bug)",
+        "tags": [
+          "coverity",
+          "static-analysis",
+          "triage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cid": {
+              "type": "number",
+              "description": "Coverity defect id (CID)."
+            },
+            "report": {
+              "type": "string",
+              "description": "Report path. Defaults to the coverityTool.reportPath setting."
+            },
+            "src_root": {
+              "type": "string",
+              "description": "Root of the analysed C/C++ checkout. Defaults to the coverityTool.sourceRoot setting."
+            },
+            "language": {
+              "type": "string",
+              "enum": [
+                "c",
+                "cpp"
+              ]
+            },
+            "context_lines": {
+              "type": "number",
+              "description": "Source lines shown around the defect (default 25)."
+            }
+          },
+          "required": [
+            "cid"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "coverityTool_triageReport",
+        "displayName": "Coverity: Triage Report",
+        "userDescription": "Triage a whole Coverity report and get dispositions for every finding.",
+        "modelDescription": "Analyse every defect in a Coverity report and return a disposition table, per-defect rationale/suggested fixes and roll-up statistics (Bug / False positive / Intentional / Needs review). Slow and thorough: pass `limit` or narrow with `checker`/`severity` for large reports. The result is cached as a .triage.json so the Problems panel and later questions reuse it.",
+        "toolReferenceName": "coverityTriageReport",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(checklist)",
+        "tags": [
+          "coverity",
+          "static-analysis",
+          "triage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "report": {
+              "type": "string",
+              "description": "Report path. Defaults to the coverityTool.reportPath setting."
+            },
+            "src_root": {
+              "type": "string",
+              "description": "Root of the analysed C/C++ checkout."
+            },
+            "language": {
+              "type": "string",
+              "enum": [
+                "c",
+                "cpp"
+              ]
+            },
+            "limit": {
+              "type": "number",
+              "description": "Maximum defects to analyse in this call."
+            },
+            "checker": {
+              "type": "string",
+              "description": "Only this checker."
+            },
+            "severity": {
+              "type": "string",
+              "description": "Only this severity."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "coverityTool_sourceContext",
+        "displayName": "Coverity: Source Context",
+        "userDescription": "Show the source a Coverity defect was judged against.",
+        "modelDescription": "Return the exact numbered source window, local file path, line and suggested fix for a Coverity defect CID. Use this when the user asks to see the code behind a finding or when preparing a patch.",
+        "toolReferenceName": "coveritySourceContext",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(code)",
+        "tags": [
+          "coverity",
+          "static-analysis"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cid": {
+              "type": "number",
+              "description": "Coverity defect id (CID)."
+            },
+            "report": {
+              "type": "string",
+              "description": "Report path. Defaults to the coverityTool.reportPath setting."
+            },
+            "src_root": {
+              "type": "string",
+              "description": "Root of the analysed C/C++ checkout."
+            },
+            "context_lines": {
+              "type": "number",
+              "description": "Lines shown each side of the defect (default 40)."
+            }
+          },
+          "required": [
+            "cid"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Rakesh0427/Coverity-Tool.git"
+  }
+}

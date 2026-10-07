@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "coverity: compile extension",
+      "type": "shell",
+      "command": "npm --prefix vscode-extension install --no-audit --no-fund && npm --prefix vscode-extension run compile",
+      "problemMatcher": "$tsc",
+      "group": "build"
+    },
+    {
+      "label": "coverity: triage sample report",
+      "type": "shell",
+      "command": "python3 vscode_bridge.py analyze --report docs/sample_report --src docs --out .coverity/sample.triage.json --pretty",
+      "problemMatcher": []
+    },
+    {
+      "label": "coverity: list sample defects",
+      "type": "shell",
+      "command": "python3 vscode_bridge.py list --report docs/sample_report --pretty",
+      "problemMatcher": []
+    },
+    {
+      "label": "coverity: analysis capabilities",
+      "type": "shell",
+      "command": "python3 capabilities.py",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+// Coverity tool set — TEMPLATE (user-profile file, not a workspace file).
+//
+// Tool sets live in your USER profile, so this file cannot be picked up from the
+// repository. To install it:
+//
+//   1. Ctrl+Shift+P -> "Chat: Configure Tool Sets" -> "Create new tool sets file"
+//      VS Code opens/creates e.g. <User>/prompts/toolsets.jsonc
+//   2. Merge the "coverity" object below into that file and save.
+//   3. In agent mode type "#coverity" in a prompt, or tick the "coverity" group
+//      in the tools picker, to enable the whole set at once.
+//
+// Names for tools from an MCP server use the <server>/<tool> form. The server is
+// named "coverity" in .vscode/mcp.json, hence the doubled prefix.
+//
+// NOTE: if "#coverity" does not enable the MCP tools, VS Code is hitting a known
+// name-qualification issue (microsoft/vscode#271589). Workaround: open the tools
+// picker, enable the five tools manually, then add the group with
+// "Create from current selection".
+//
+// If you installed the VS Code EXTENSION instead of (or as well as) the MCP
+// server, the names are the extension tools — swap the tools array for:
+//   "coverityTool_capabilities", "coverityTool_listDefects",
+//   "coverityTool_analyzeDefect", "coverityTool_triageReport",
+//   "coverityTool_sourceContext"
+{
+  "coverity": {
+    "tools": [
+      "coverity/coverity_capabilities",
+      "coverity/coverity_list_defects",
+      "coverity/coverity_analyze_defect",
+      "coverity/coverity_triage_report",
+      "coverity/coverity_export_results",
+      "coverity/coverity_source_context",
+      "search/codebase",
+      "search/usages",
+      "read/problems"
+    ],
+    "description": "Coverity Tool: triage, deep-dive, fix and verify Coverity C/C++ findings",
+    "icon": "shield"
+  }
+}
+
