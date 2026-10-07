@@ -205,7 +205,7 @@ class TestCli:
         assert "CID 1001" in target.read_text(encoding="utf-8")
 
     def test_missing_report_is_a_clean_error(self):
-        proc = self._run(str(tmp_path) if False else "/nope/nope")
+        proc = self._run("/nope/nope")
         assert proc.returncode == 2
         assert "not found" in proc.stderr.lower()
 
