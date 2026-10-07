@@ -1,0 +1,26 @@
+{
+  // F5 -> runs the Coverity Tool extension in an Extension Development Host.
+  // The preLaunchTask compiles vscode-extension/src/*.ts to out/.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Coverity Tool extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension",
+        "${workspaceFolder}"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/vscode-extension/out/**/*.js"
+      ],
+      "preLaunchTask": "coverity: compile extension"
+    },
+    {
+      "name": "Attach to MCP server (debugpy)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 }
+    }
+  ]
+}

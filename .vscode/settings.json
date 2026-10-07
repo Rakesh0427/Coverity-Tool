@@ -1,0 +1,7 @@
+{
+  // Workspace defaults so the extension finds the engine and the source tree
+  // without any manual setup. Point coverityTool.reportPath at your real
+  // Coverity report (or use "Coverity: Analyse Report", which asks for it).
+  "coverityTool.sourceRoot": "${workspaceFolder}",
+  "coverityTool.language": "c"
+}

@@ -1,7 +1,18 @@
 ### AL ###
 #Template for AL projects for Dynamics 365 Business Central
 #launch.json folder
+# VS Code workspace folder is ignored as a whole, then the shared integration
+# files (.vscode/mcp.json, launch.json, tasks.json, settings.json) are put back
+# so the MCP server, F5 debugging and the sample tasks work straight after a
+# clone. Personal/per-machine files stay untracked.
 .vscode/
+!.vscode/
+.vscode/*
+!.vscode/mcp.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
 #Cache folder
 .alcache/
 #Symbols folder
@@ -30,5 +41,11 @@ _ev_diag.txt
 # PyInstaller output (built CI artifacts; the committed dist/Coverity-Tool-Setup skeleton is kept)
 build/
 dist/CoverityTool/
+# VS Code extension: local npm install and compiled output (rebuild with `npm run compile`)
+vscode-extension/node_modules/
+vscode-extension/out/
+*.vsix
+# Analysis cache written by the bridge/extension (`--out`, coverity_triage_report)
+.coverity/
 #Test results file
 TestResults.xml

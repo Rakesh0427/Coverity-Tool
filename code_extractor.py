@@ -228,6 +228,13 @@ def find_function_line_by_name(filepath: str, func_name: str, language: str = 'c
     if not source or not func_name:
         return 0
 
+    # tree-sitter is optional: without it _parse_file returns tree=None, and
+    # extract_enclosing_function() already degrades to a fixed line window.
+    # Name resolution has no such fallback, so report "not found" instead of
+    # raising AttributeError on the None tree.
+    if tree is None:
+        return 0
+
     root = tree.root_node
 
     def _scan(node):
