@@ -38,7 +38,10 @@ python-docx==1.1.2
 # and therefore NOT vendored in this repo; PowerPoint resolves the family
 # name natively on Windows/macOS.
 python-pptx==1.0.2
-Pillow==12.3.0
-numpy==2.4.6
+# Pillow 12 and fontTools 4.65 dropped Python 3.9; numpy 2.4 needs 3.11+.
+# Pinned per interpreter so `pip install -r requirements.txt` succeeds across
+# the whole CI matrix (3.9/3.10/3.11) — the engine itself needs none of these.
+Pillow==12.3.0; python_version >= "3.10"
+numpy==2.4.6; python_version >= "3.11"
 opencv-python-headless==5.0.0.93
-fonttools==4.65.0
+fonttools==4.65.0; python_version >= "3.10"
