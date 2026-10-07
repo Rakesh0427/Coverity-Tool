@@ -80,11 +80,14 @@ tells any agent when to reach for them, and `docs/coverity.toolsets.jsonc` makes
 one `#coverity` reference enable the whole set.
 
 For the whole job — analyse every finding in a report against the source, decide
-per defect, write the reviewer comment and the proposed fix, then re-analyse to
-prove each fix — install the **Coverity Finding Analyzer** agent:
+per defect, write the reviewer comment and the proposed fix — install the
+**Coverity Finding Analyzer** agent:
 `.github/agents/coverity-finding-analyzer.agent.md` (that file is the store
-upload). It runs on the VS Code model you select and uses the engine above for
-its facts. Step-by-step VS Code test runbook — any-agent path first,
+upload). **It runs on the VS Code model you select and needs nothing installed**:
+the model reads the report's event traces and your source files. The engine above
+is an optional accelerator it will use when present (exact line numbers,
+AST-anchored first pass), and `coverity_report_text.py` — stdlib only, no
+dependencies — flattens a large HTML report into text a model can read cheaply. Step-by-step VS Code test runbook — any-agent path first,
 > **New to this?** Start with [docs/USER_GUIDE.md](docs/USER_GUIDE.md) — inputs, source-root placement,
 > outputs, how the analysis works, pulling from Coverity Connect and pushing dispositions back.
 

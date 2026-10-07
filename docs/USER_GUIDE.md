@@ -23,7 +23,13 @@ If you are wondering "can I trust it?", read
 
 ## 1. Quick start (10 minutes)
 
-**Step 1 — install the engine** (once per machine):
+**Step 0 — you need nothing installed.** The **Coverity Finding Analyzer** agent
+runs on the VS Code model you select: it reads the report and your source code
+itself. Install the optional engine (Step 1) only if you want exact line numbers
+and an AST-anchored first pass on top of that — it makes big reports cheaper, not
+possible.
+
+**Step 1 — optional: install the engine** (once per machine):
 
 ```bash
 cd <this repo>
@@ -31,8 +37,9 @@ pip install -r requirements.txt
 python capabilities.py          # must print: analysis depth: FULL
 ```
 
-If it prints `minimal`, install the missing backends it lists — `minimal` means
-report-only verdicts, which are shallower than the desktop app's.
+If it prints `minimal`, install the missing backends it lists. Skipping this step
+entirely is fine: the agent analyses from the report and the code, and says what
+its evidence was.
 
 **Step 2 — decide how to run it:** as **MCP tools** (works with every agent in
 VS Code, recommended) or as the **extension** (adds Problems-panel entries).
@@ -192,10 +199,10 @@ travels with the verdict, so the agent judges from the same code the engine read
 The verdict is derived from the code it actually read — which is why passing the
 source root matters, and why an agent can quote the line back to you.
 
-**Who decided?** Each verdict is labelled with its source: `engine` (the tool's
-analysis, AST-anchored), `degraded` (the tool, with backends missing), or
-`model-only, unverified` (no engine installed — the model read the report and the
-code itself). Install `requirements.txt` to move everything onto the first level.
+**Where the answer came from.** Each finding says what the agent read: the report
+facts it used (event trace, line) and the exact source range it opened. If the
+optional engine is present and was used, the answer says so too. Nothing is ever
+presented as verified by a tool that did not run.
 
 **Re-analysis after a fix.** Change the code, then ask:
 

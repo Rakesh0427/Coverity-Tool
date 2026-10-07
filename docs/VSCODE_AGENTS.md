@@ -8,7 +8,7 @@ Two ways to work, and you can use both:
 
 | Route | What it is | Best for |
 | --- | --- | --- |
-| **The agent** — *Coverity Finding Analyzer* | Reads the report **and your code**, decides each defect, writes the comment and the fix | "Analyse this report and tell me what to do" |
+| **The agent** — *Coverity Finding Analyzer* | **Runs on your VS Code model.** Reads the report **and your code**, decides each defect, writes the comment and the fix. **Nothing to install.** | "Analyse this report and tell me what to do" |
 | **The tools** — `coverity_*` (MCP) / `coverityTool_*` (extension) | The same engine, callable from any agent you already use | Ad-hoc questions, embedding in your own agent |
 | **The extension UI** | Findings view, Problems panel, status bar, commands | Click-through review inside the editor |
 
@@ -33,7 +33,40 @@ Two ways to work, and you can use both:
 | This repository | `git clone https://github.com/Rakesh0427/Coverity-Tool` | The engine lives here |
 | Git | `git --version` | Used to prove the agent did not touch your code |
 
-## 1.2 Install and verify the engine
+## 1.2 Start with no installation at all (the normal path)
+
+The agent needs nothing: the model you select in VS Code reads the Coverity
+report and your source files. So before installing anything, do the two-minute
+check:
+
+1. Copy `.github/agents/coverity-finding-analyzer.agent.md` into your project's
+   `.github/agents/` folder (or install it from the store), and reload VS Code.
+2. Open your project, and in Agent mode pick **Coverity Finding Analyzer**.
+3. Ask it with the sample in this repo, or with your own report:
+
+   > Analyse `docs/sample_report/index.html` against the source root `docs`.
+
+**Expected** — it reads `index.html`, opens the two detail pages under
+`Code/`, reads the two source files, and reports CID 1001 `BUFFER_SIZE` and CID
+1002 `USE_AFTER_FREE` with their locations, dispositions, rationale and proposed
+fixes — and it does **not** mention any tool, server or installation.
+
+**Pass criteria**
+
+- [ ] The analysis appears with no MCP server running and no Python packages
+      beyond the interpreter your editor already uses.
+- [ ] Each finding names the report facts it used (event trace / line) and the
+      source lines it read.
+- [ ] Nothing in the answer implies a tool verified it when no tool ran.
+
+If that works, everything else in this guide is optional speed, not a
+requirement. Skip to [Part 2](#part-2--tests-do-these-in-order) and run Tests
+A–E, H, K — they are all model-only. The engine improves exactness (line
+numbers, AST facts) and is what makes the parse of a *huge* report cheap.
+
+## 1.3 Optional accelerators
+
+### 1.3.1 Install and verify the engine
 
 ```bash
 cd Coverity-Tool
@@ -60,7 +93,7 @@ Analysis backends:
 > withheld. Install what's missing before drawing conclusions. The agent is told
 > to warn you when this happens, but fix it anyway — it is one command.
 
-## 1.3 Smoke-test the engine *without* VS Code first
+### 1.3.2 Smoke-test the engine *without* VS Code first
 
 Two minutes here saves an hour of confusion later, because it proves the engine
 works independently of the editor.
@@ -99,7 +132,7 @@ coverity_triage_report, coverity_export_results, coverity_source_context
 proposed fixes, and the six tools are listed. If this fails, nothing in VS Code
 will work; fix it here first ([§4](#part-4--troubleshooting)).
 
-## 1.4 Open the right folder in VS Code
+## 1.4 Open your project in VS Code
 
 **File → Open Folder → the `Coverity-Tool` folder itself** (not its parent).
 
@@ -162,7 +195,7 @@ Example `.vscode/mcp.json` for your own project:
 > it cannot. Verify once with `coverity_source_context` on any CID: if the file it
 > shows is the right file, the root is right for every defect in that report.
 
-## 1.6 Start the MCP server
+### 1.3.3 Start the MCP server (optional)
 
 ```
 Ctrl+Shift+P  →  MCP: List Servers  →  coverity  →  Start Server
@@ -180,7 +213,7 @@ script; nothing leaves your machine).
 If it shows a spawn error, see [§4](#part-4--troubleshooting) — usually the
 `python3` name (Windows: `python`) or a missing dependency.
 
-## 1.7 Use the agent
+## 1.6 Use the agent
 
 The agent file is already in `.github/agents/`. If you are installing it
 somewhere else, copy `coverity-finding-analyzer.agent.md` into that project's
@@ -189,7 +222,7 @@ somewhere else, copy `coverity-finding-analyzer.agent.md` into that project's
 `Ctrl+Alt+I` to open Chat → switch the mode selector to **Agent mode** → open the
 **agent dropdown** → pick **Coverity Finding Analyzer**.
 
-## 1.8 Optional extras
+## 1.7 More optional extras
 
 **a) The extension UI** (Findings view + Problems panel + status bar):
 
@@ -247,57 +280,64 @@ earlier ones passed.
 
 **Expected**
 
-- A depth line first, e.g. `Analysis depth: FULL (mode: engine)`.
+- It reads the report without asking for anything you already gave it: index,
+  then the two detail pages, then the two source files.
 - Then two findings, each in this shape:
 
 ```markdown
-### CID 1002 — USE_AFTER_FREE (Use after free) · High · Bug (95%)
+### CID 1002 — USE_AFTER_FREE (Use after free) · · Bug (95%)
 **Location:** `docs/sample_src/utils.c:10` in `get_value()`
-**Source:** engine (depth: full)
-**Engine:** Bug (100%) — agrees; the code confirms the freed pointer is returned
+**Evidence read:** report `docs/sample_report` (event trace, 1 step) + `docs/sample_src/utils.c:3-11`
 **Why:** `get_value()` frees `p` at line 9 on the `flag == 0` path and then
 returns it at line 10, so the caller receives a dangling pointer …
 **Fix:** ```diff -    return p; +    p = NULL; +    return p; ``` — closes the use-after-free
-**Evidence:** numbered excerpt with lines 3–11 …
-**Impact:** heap use-after-free (CWE-416) on the failure path · reachable from a caller that
-passes a false flag
+**Impact:** heap use-after-free (CWE-416) on the failure path · reachable from a
+caller that passes a false flag
 **Would change my mind:** a caller that never uses the returned pointer when flag is false
 ```
 
 **Pass criteria**
 
 - [ ] The agent appears in the dropdown and its hint mentions report + source root.
-- [ ] It analyses **both** CIDs — 1001 `BUFFER_SIZE` (CWE-120) and 1002
-      `USE_AFTER_FREE` (CWE-416).
-- [ ] Every finding has a `**Source:**` line naming the mode.
+- [ ] It analyses **both** CIDs — 1001 `BUFFER_SIZE` and 1002 `USE_AFTER_FREE`.
+- [ ] Every finding states the report facts and the source range it read
+      (`**Evidence read:**`), with no claim of tool verification unless a tool
+      actually ran.
 - [ ] The rationales quote real code (a size, a line, a guard), not just the
       checker name.
 - [ ] It does **not** ask you for one input at a time; if something is missing it
       asks for both together.
 
-## Test B — Capability gate and mode labelling
+## Test B — It really works with no tooling at all
 
-**Steps** — send:
+**Steps**
 
-> What analysis backends are available, and which mode are you in?
+1. Stop everything optional: `Ctrl+Shift+P` → **MCP: List Servers** → `coverity` →
+   **Stop** (and if the extension is installed, disable it for this test).
+2. Ask, in a plain project with only the agent installed:
 
-**Expected** — the depth (`full` / `partial` / `minimal`), the mode
-(`engine` / `degraded` / `engine_missing`), a per-backend list (tree-sitter,
-libclang, z3, flow_analysis, cppcheck, lxml, openpyxl, zeep), and — if anything
-critical is missing — the `pip install -r requirements.txt` remedy.
+   > Analyse `<your report>` against the source root `<your src>`.
 
-**Verify independently** (that is the point of the test):
+**Expected** — the same analysis as Test A: defects enumerated from the report,
+code read, dispositions and fixes given, with no complaint about missing tools
+and no fabricated tool output.
 
-```bash
-python3 capabilities.py
-```
+**Verify independently** (the report is the only source of truth here):
+
+* open one of the detail pages yourself and confirm the event trace the agent
+  quoted is really in it;
+* open the source file and confirm the line it cited is the line it described.
 
 **Pass criteria**
 
-- [ ] The agent's depth and mode match `capabilities.py` (`FULL` → `engine`).
-- [ ] If they differ, the editor and your shell use **different interpreters** —
-      set `coverityTool.pythonPath` (or an absolute venv path in `mcp.json`) so
-      they agree.
+- [ ] The analysis is complete with the MCP server stopped.
+- [ ] Every claim traces back to the report or to a file you can open.
+- [ ] If you *do* have the engine running instead, the agent's answer says so —
+      and its verdicts match `python3 vscode_bridge.py analyze --report <report> --src <src>`.
+
+**Optional accelerator check** (only if you installed it): with the server
+started, ask the same question — the answer should be faster and quote exact line
+numbers, and it should say the engine was used.
 
 ## Test C — Triage a whole report (Job 1, read-only)
 
@@ -620,7 +660,12 @@ Nothing is written to your source tree, and `.coverity/` is git-ignored. Add you
 # Part 5 — One-page checklist
 
 ```
-SETUP
+SETUP — no-install path first
+[ ] Agent file in .github/agents/         → appears in the agent dropdown
+[ ] Test A with NO MCP server             → full analysis, no tooling mentioned
+[ ] Test B (server stopped)               → claims trace to report + code only
+
+SETUP — optional accelerator (skip if you do not want it)
 [ ] python3 --version                     → 3.10+
 [ ] pip install -r requirements.txt
 [ ] python3 capabilities.py               → analysis depth: FULL
@@ -632,7 +677,7 @@ SETUP
 
 TESTS
 [ ] A  analyse sample                     → 2 findings, Source: engine (depth: full)
-[ ] B  capability gate                    → depth+mode match capabilities.py
+[ ] B  server stopped, plain project     → analysis still complete and grounded
 [ ] C  triage (Job 1)                     → counts match the CLI, git status clean
 [ ] D  deep dive CID 1002                 → dossier facts + exploitability + diff
 [ ] E  propose-only                       → diff in chat, no file changed

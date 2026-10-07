@@ -12,7 +12,7 @@ So this script emits both, from the single canonical agent definition, so the
 uploaded copy can never drift from the one VS Code actually loads:
 
     dist-store/coverity-finding-analyzer.agent.md          ← drag this to the store
-    dist-store/coverity-finding-analyzer-v1.0.0.zip        ← or drag this (agent + README)
+    dist-store/coverity-finding-analyzer-v1.1.0.zip        ← or drag this (agent + README)
 
 Usage
 -----
@@ -47,7 +47,7 @@ LISTING = os.path.join(HERE, "docs", "STORE_LISTING.md")
 #: Output directory (committed, because the user must be able to download it).
 DIST = os.path.join(HERE, "dist-store")
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 
 #: Path *inside the ZIP*. The store requires one of these two layouts at the
 #: archive root; nesting it under a repo folder name would not be detected.

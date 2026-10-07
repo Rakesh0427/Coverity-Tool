@@ -5,10 +5,11 @@ written into the upload bundle as `README.md`.
 
 > **What this upload is.** One agent that takes a Coverity report plus your
 > source tree and produces, per defect, a disposition, a reviewer-grade comment
-> and a proposed fix. The agent's own model does the analysis; the bundled
-> **Coverity Tool** engine supplies the facts it reasons over (event traces,
-> exact file/line, numbered source, checker evidence). The agent is the
-> deliverable; the engine is its instrument.
+> and a proposed fix. **It runs on the language model you already have in VS
+> Code — install nothing.** The model reads the report's detail pages (event
+> trace, code excerpt) and your source files, and decides. If your project also
+> contains the optional Coverity Tool engine, the agent will use it to fetch
+> exact line numbers faster — never as a requirement.
 
 ---
 
@@ -30,27 +31,29 @@ defect, is where triage time goes.
 
 **Coverity Finding Analyzer** does that pass for you:
 
-- **You supply two things** — the Coverity report (`index.html` folder, `.xlsx`
-  export, or a previous run's JSON) and the root of the source tree. If the
-  report's paths do not line up with your checkout, the agent resolves the
-  correct root (or tells you which files are missing) instead of guessing.
-- **It reads your code, not just the report.** One tool call hands it an
-  **evidence dossier** — the line the verdict hangs on, the declarations that
-  fix capacities, the guards already in the function, the callers that supply
-  the data, the callees that decide the size or the lock — and it reads those
-  files itself. The checker's question — is the bound right, is the object still
-  alive, can this pointer be null — is answered from the code.
+- **No installation.** It works in any project with a Coverity HTML or CSV
+  export: no Python, no engine, no MCP server, no Coverity licence.
+- **You supply two things** — the Coverity report (`index.html` folder, a single
+  HTML page, or a CSV export) and the root of the source tree. If the report's
+  paths do not line up with your checkout, the agent resolves the correct root
+  (or tells you which files are missing) instead of guessing. `.xlsx` exports
+  need one conversion step, which the agent spells out.
+- **It reads your code, not just the report.** For each defect it opens the
+  enclosing function, the callees the event trace names, the callers that supply
+  the data, the guards and the sizes — and quotes the lines it relied on. The
+  checker's question — is the bound right, is the object still alive, can this
+  pointer be null — is answered from the code.
 - **It decides, and shows its work.** One of four dispositions, with the
   evidence quoted by line: `Bug`, `False positive`, `Intentional`, or
   `Needs review` when a human genuinely has to decide. Disagreement with the
   underlying engine is allowed — but only with code to back it, never by
   assertion.
-- **It says where every verdict came from.** Each finding is labelled
-  `engine (depth: full)`, `degraded`, or `model-only, unverified`, so you always
-  know whether a claim was checked by the analyser or read by the model.
-- **It works on machines with no engine installed.** If the Python backend is
-  missing, it degrades honestly: still analyses the report and the code, labels
-  every verdict as unverified, and tells you the one command that upgrades it.
+- **It says what its evidence was.** Each finding states the report and the
+  exact source range it read, and when the optional engine was used it says so —
+  so you can always tell tool-verified facts from the model's reading.
+- **It never stalls on a missing tool.** No engine, no server, no problem: the
+  analysis still happens, and the agent does not mention tooling you never
+  installed.
 - **It writes the comment a reviewer needs** — what is wrong, the numbers that
   prove it, what happens at runtime — instead of restating the checker's name.
 - **It writes the fix**: minimal, compilable, in your file's own style, with one
@@ -58,11 +61,12 @@ defect, is where triage time goes.
   trade-off.
 - **It proposes; you decide.** By default it hands you the comment and the diff
   as text and never touches the working tree. It edits only when you ask it to
-  change the code — then one defect per run, followed by re-analysis through the
-  engine to prove the fix, with the before/after dispositions and the diff.
-- **It prepares the write-back.** Paste-ready Coverity Connect text, and a
-  dispositions CSV your existing push tooling can load — with the standard
-  mapping (`Bug` → Fix Required, `False positive` / `Intentional` → Ignore,
+  change the code — one defect per run — and then re-checks that defect and says
+  plainly that only a fresh Coverity scan re-certifies it.
+- **It prepares the write-back.** Paste-ready Coverity Connect text, and it
+  writes the dispositions CSV itself — same 13 columns the desktop Coverity
+  Findings Analyzer loads on its Push page, with the standard mapping
+  (`Bug` → Fix Required, `False positive` / `Intentional` → Ignore,
   `Needs review` → Undecided). It never asks for your Connect credentials.
 
 ## What is in the bundle
@@ -90,8 +94,8 @@ analyses, and labels its verdicts *model-only, unverified*.
 | --- | --- |
 | Editor | VS Code with a language model available in agent mode |
 | Model | Any model in the picker — the agent runs on your selection |
-| Engine checkout | This repository, installed with `pip install -r requirements.txt` |
-| Without the engine | Still works, in `engine_missing` mode: every verdict is labelled *model-only, unverified* |
+| Engine checkout | **Not required.** Optional accelerator: this repository with `pip install -r requirements.txt` |
+| Coverity export | An HTML folder/`index.html`, a single HTML page, or a CSV (`.xlsx` needs one conversion) |
 | Coverity licence | **Not required** to analyse an existing report |
 | Coverity Connect access | **Not required** by the agent; only for pulling or pushing in your own tooling |
 
@@ -119,14 +123,13 @@ the chat agent picker as **Coverity Finding Analyzer**.
 your project (or your user profile) and reload VS Code. `README.md` inside the
 ZIP is this file.
 
-**Then connect it to the engine** (so the facts are real, not modelled):
+That is all — there is nothing else to install. If you also keep a checkout of
+this project in the workspace and want the faster, line-exact route, install its
+requirements and start the MCP server once per session:
 
 ```bash
 pip install -r requirements.txt      # in the Coverity Tool checkout
-python capabilities.py               # expect: analysis depth: FULL
 ```
-
-and start the MCP server once per session:
 
 > `Ctrl+Shift+P` → **MCP: List Servers** → `coverity` → **Start Server**
 
@@ -139,14 +142,20 @@ In agent mode, pick **Coverity Finding Analyzer**, then:
 
 > Analyse `docs/sample_report/index.html` against the source root `docs`.
 
-Expected: it reports the analysis depth, then two defects — CID 1001
-(`BUFFER_SIZE`) and CID 1002 (`USE_AFTER_FREE`) — each with a location, a
-disposition and confidence, a rationale citing CWE-120 / CWE-416, and a proposed
-fix. Ask "fix CID 1002 and verify" and it should patch the copy, re-analyse that
-defect, and report the disposition moving off `Bug`.
+Expected: it reads the report's two detail pages, then reports two defects — CID
+1001 (`BUFFER_SIZE`, `sample.c`) and CID 1002 (`USE_AFTER_FREE`, `utils.c`) —
+each with the location, the code lines it read, a disposition, a rationale, and
+a proposed fix. Nothing needs to be installed for this, and the agent should not
+mention any tooling. Ask "fix CID 1002 and verify" and it patches a copy,
+re-reads the changed code, walks the original event trace through it, and states
+that a re-scan is what re-certifies the defect.
 
 ## Version history
 
+- **1.1.0** — model-driven by default: the VS Code LLM reads the report and the
+  code and does the analysis with nothing installed; the engine becomes an
+  optional accelerator; the agent writes the push-ready CSV itself; adds
+  `coverity_report_text.py`, a dependency-free report digest.
 - **1.0.0** — first release: report + source as input; model-driven analysis
   loop with checker-family playbooks; disposition comment and fix quality bars;
   fix-and-verify through engine re-analysis; Connect write-back mapping and

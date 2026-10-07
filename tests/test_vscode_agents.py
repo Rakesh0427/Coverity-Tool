@@ -87,33 +87,74 @@ class TestAgentFiles:
         assert sorted(os.listdir(AGENTS_DIR)) == [AGENT_NAME], \
             "only the agent file may live in .github/agents/"
 
-    def test_agent_is_the_analyst_and_names_the_engine_as_its_instrument(self):
-        """The division of labour is the product — do not let it erode.
+    def test_agent_needs_nothing_installed(self):
+        """The correction: the VS Code model does the work, not a local tool.
 
-        The user asked for an agent that uses the VS Code model to analyse the
-        defect against the code. If the body ever reads as "call the tools and
-        transcribe the answer", the agent is worse than the CLI it wraps.
+        The agent must run in a bare project — no engine, no MCP server, no
+        Python packages. If this framing erodes, users without the toolchain
+        will believe the agent cannot work for them.
         """
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        assert re.search(r"You are the analyst", body), \
+        assert re.search(r"You are the analyser", body), \
             "the agent no longer states that it is the one analysing"
-        assert re.search(r"evidence, not the answer", body), \
-            "the engine's verdict must be framed as evidence the model judges"
-        assert re.search(r"model-only, unverified", body), \
-            "without that label, an engine-less analysis reads as verified"
-        # And it must actually tell the model to read the code itself.
-        for instruction in ("Read the code yourself", "callers", "callee",
-                            "invariants", "Never invent"):
-            assert instruction in body, f"analysis loop is missing: {instruction}"
+        assert re.search(r"Nothing needs to be installed", body), \
+            "the no-installation promise is gone"
+        assert re.search(r"no local tool|no server|No Python package", body, re.I)
+        # The engine may only ever appear as optional.
+        assert re.search(r"Optional accelerator", body)
+        assert re.search(r"Never required", body), \
+            "the accelerator must be explicitly optional"
+
+    def test_agent_can_read_a_report_without_any_tooling(self):
+        """Reading the report is the model's job: index, detail pages, traces."""
+        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
+        for step in ("index.html", "detail page", "event trace", "code excerpt",
+                     "Strategy for a small or medium report", "large report"):
+            assert step.lower() in body.lower(), f"no report-reading guidance: {step}"
+        # Every non-HTML format the user might hand over needs a route.
+        for fmt in (".xlsx", "CSV", "HTML"):
+            assert fmt in body, f"no guidance for {fmt} reports"
+        assert "openpyxl" in body and "html.unescape" in body, \
+            "the flattening recipes (no local tool required) are missing"
+
+    def test_agent_writes_the_push_file_itself(self):
+        """Export must work with no engine: the model writes the CSV."""
+        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
+        assert re.search(r"write the CSV yourself", body, re.I)
+        header = ('"CID","Checker","Type","Severity","Action","File","Line",'
+                  '"Function","Classification","Comment","Fix","Timestamp","Category"')
+        assert header in body, \
+            "the exact push-ready header must be in the instructions for the model to emit"
+        for mapping in ("Fix Required", "False Positive", "Ignore", "Pending",
+                        "Undecided"):
+            assert mapping in body, f"missing Connect mapping value: {mapping}"
+
+    def test_agent_verifies_without_an_engine_and_says_what_that_means(self):
+        """Re-reading the code is the check; a re-scan is the certification."""
+        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
+        assert re.search(r"Verifying a fix \(no engine needed\)", body)
+        assert re.search(r"only a fresh Coverity scan re-certifies", body, re.I), \
+            "the agent must not claim a fix is certified without a re-scan"
+
+    def test_agent_never_claims_accelerator_output_it_did_not_get(self):
+        """If the optional tools were not called, their output cannot be cited."""
+        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
+        assert re.search(r"Never invent their output", body), \
+            "the agent could attribute invented results to the optional tools"
+        assert re.search(r"If you did not call them", body)
+        assert re.search(r"do not describe their\s+verdicts", body) or \
+               "do not describe their verdicts" in body
 
     def test_agent_takes_the_two_inputs_the_user_named(self):
         """Report + source code. Both, asked for together, before analysing."""
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        assert re.search(r"Collect the inputs", body), "no input-collection step"
+        assert re.search(r"Collect the two inputs", body), "no input-collection step"
         assert "source root" in body and "report" in body
         assert re.search(r"one\*\* question|\*\*one\*\* question", body, re.I), \
             "inputs must be requested in a single question, not drip-fed"
-        assert re.search(r"Resolving a source root that does not line up", body), \
+        assert re.search(r"Paths in the report are from the build machine", body), \
+            "the build-machine-vs-local path mapping is not explained"
+        assert re.search(r"corrected root", body), \
             "the commonest setup failure has no recovery procedure"
 
     def test_agent_carries_the_checker_playbook(self):
@@ -129,20 +170,19 @@ class TestAgentFiles:
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
         for heading in ("The disposition comment — the bar", "The proposed fix — the bar"):
             assert heading in body, f"missing quality bar: {heading}"
-        # The comment bar must demand evidence, not adjectives.
         for rule in ("The verdict in one sentence", "The evidence",
                      "The consequence", "Banned"):
             assert rule in body, f"comment bar is missing: {rule}"
-        # The fix bar must demand a patch, not a description of one.
-        for rule in ("Minimal", "Compilable", "in the file’s own style"
-                     if "in the file’s own style" in body else "In the file's own style",
+        for rule in ("Minimal", "Compilable",
+                     "the file’s own style" if "the file’s own style" in body
+                     else "the file's own style",
                      "With an alternative when there is a real trade-off"):
             assert rule in body, f"fix bar is missing: {rule}"
         assert re.search(r"A wrong fix is worse than a flagged defect", body), \
             "the fix bar must permit honestly declining to patch"
 
     def test_agent_proposes_by_default_and_edits_only_when_asked(self):
-        """The user chose propose-only: a diff in chat, not a changed working tree."""
+        """Propose-only: a diff in chat, not a changed working tree."""
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
         assert re.search(r"Default: propose", body), "no stated default"
         assert re.search(r"opt-in", body, re.I), \
@@ -153,33 +193,19 @@ class TestAgentFiles:
         assert '"What\'s the fix?" is a request for the diff' in body, \
             "the commonest ambiguity (asking for the fix vs asking for an edit) is unaddressed"
 
-    def test_agent_labels_which_mode_produced_each_verdict(self):
-        """engine / degraded / engine_missing — the three trust levels."""
+    def test_agent_reads_the_code_before_judging(self):
+        """No engine to lean on: the model must read functions, callers, callees."""
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        for mode in ("`engine`", "`degraded`", "`engine_missing`"):
-            assert mode in body, f"mode {mode} is not described"
-        assert "**Source:** engine (depth:" in body, \
-            "the per-defect shape must state where the verdict came from"
-        assert re.search(r"model-only, unverified", body)
-        assert re.search(r"Never present a model-only\s+verdict as the tool's", body) or \
-               "never present a model-only" in body.lower(), \
-            "the two claims must be kept apart explicitly"
-
-    def test_agent_reads_the_evidence_dossier_before_judging(self):
-        """One call must be enough — callers, declarations, guards travel with it."""
-        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        assert "evidence dossier" in body.lower()
-        for field in ("callers", "callees", "declarations", "guards", "defect_line",
-                      "globals"):
-            assert field in body, f"the dossier field {field} is not explained"
-        assert re.search(r"one call is enough", body, re.I), \
-            "the agent should know it does not need to re-derive the context"
+        assert re.search(r"Read the code yourself", body)
+        for item in ("callers", "callee", "invariants", "enclosing function"):
+            assert item in body, f"the analysis loop omits {item}"
+        assert re.search(r"Quote the lines you rely on", body)
+        assert re.search(r"Never invent a CID", body), "no anti-hallucination rule"
 
     def test_agent_offers_the_improvements_it_advertises(self):
         """The analysis-improvement levers the user can ask for."""
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        for lever in ("self-audit", "Disagreement", "exploitability",
-                      "representative", "Model-only"):
+        for lever in ("self-audit", "exploitability", "sibling", "Clusters"):
             assert lever.lower() in body.lower(), f"missing improvement lever: {lever}"
 
     @pytest.mark.parametrize("path", AGENT_FILES, ids=os.path.basename)
@@ -225,8 +251,9 @@ class TestAgentFiles:
     def test_agent_covers_every_job_without_losing_a_feature(self):
         """The single file is the product: every capability must stay in it.
 
-        Consolidated agents rot by omission — a job or the write-back mapping
-        disappears in an edit and the uploaded file quietly loses a feature.
+        Consolidated agents rot by omission — a job disappears in an edit and the
+        uploaded file quietly loses a feature. Note what is *not* required here:
+        any mention of the optional engine. The jobs must stand on their own.
         """
         fm, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
 
@@ -235,112 +262,108 @@ class TestAgentFiles:
                     "Job 5 — Diagnose and improve"):
             assert job in body, f"missing {job}"
 
-        # The closed disposition set and the engine's own vocabulary.
-        for rule in ("src_root", "Needs review", "Bug", "False positive",
-                     "Intentional"):
+        # The closed disposition set, in the agent's own vocabulary.
+        for rule in ("Needs review", "Bug", "False positive", "Intentional"):
             assert rule in body, f"missing rule/reference: {rule}"
 
         # The Connect mapping the push tooling uses, verbatim.
         for mapping in ("Fix Required", "False Positive", "Ignore", "Pending",
                         "Undecided"):
             assert mapping in body, f"missing Connect mapping value: {mapping}"
-        assert "coverity_export_results" in body and "--csv" in body, \
-            "the write-back job no longer produces the pushable file"
 
-        # Fixing must be verified through the engine, not asserted.
-        assert "vscode_bridge.py context" in body, "no re-analysis verification step"
+        # Fixing is one CID per run and verified by re-reading the code.
         assert re.search(r"one cid per run", body, re.I), \
             "no single-CID guard in the fix job"
+        assert re.search(r"Verifying a fix \(no engine needed\)", body)
 
         # The editor is needed to apply a fix; read-only must be stated for the rest.
         assert "edit" in (fm.get("tools") or []), "the fix job cannot apply changes"
         assert re.search(r"read-only", body), "the read-only mark on triage is missing"
 
-    def test_agent_degrades_instead_of_guessing(self):
-        """No MCP tools → the CLI; no engine at all → labelled model-only."""
+    def test_agent_treats_an_absent_engine_as_normal(self):
+        """No engine must be an ordinary path, not an error state."""
         _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
-        assert "vscode_bridge.py" in body and "mcp" in body.lower(), \
-            "the agent must degrade to the CLI instead of guessing"
-        assert re.search(r"model-only, unverified", body), \
-            "an engine-less analysis must be labelled as unverified"
+        assert re.search(r"If the tools are absent", body), \
+            "the agent does not say what to do when the optional tools are missing"
+        assert re.search(r"just do the analysis yourself", body, re.I), \
+            "an absent accelerator must not block the analysis"
         assert "Never invent" in body, "no anti-hallucination rule"
 
 
 # --------------------------------------------------------------------------- #
 # 2. The instructions actually work
 # --------------------------------------------------------------------------- #
-CLI_COMMAND = re.compile(r"^\s*python3? (\S*vscode_bridge\.py\s+.*)$")
+#: Any shell command in the agent body that runs a script from this repo.
+REPO_COMMAND = re.compile(
+    r"^\s*python3? (\S*(?:coverity_report_text|vscode_bridge|capabilities)\.py[^\n]*)$")
 
 
-def cli_commands_in(text: str):
-    """Every `python vscode_bridge.py <subcommand> …` line an agent is told to run.
+def repo_commands_in(text: str) -> list[str]:
+    """Commands the agent tells a user or model to run, restricted to this repo.
 
-    Lines that merely mention the file (``pytest tests/test_vscode_bridge.py``)
-    are not invocations and are skipped, as are the placeholders the agents use
-    for the reader's own report/CID.
+    The agent is model-driven, so its recipes are mostly for *reading* a report.
+    Anything it names here must actually work when copied out of the markdown —
+    a broken copy-paste costs the user the whole first experience.
     """
     found = []
     for line in text.splitlines():
-        match = CLI_COMMAND.match(line)
+        match = REPO_COMMAND.match(line)
         if not match:
             continue
-        invocation = match.group(1).strip()
-        if not invocation.split()[0].endswith("vscode_bridge.py"):
-            continue                      # e.g. `-m pytest tests/test_vscode_bridge.py`
-        found.append(invocation)
+        # A shell would treat a trailing "# …" as a comment, so do the same.
+        command = re.split(r"\s+#", match.group(1))[0].strip()
+        found.append(command)
     return found
 
 
 class TestInstructionsAreTrue:
-    def test_agents_only_reference_working_cli_commands(self):
-        """Run the bridge commands the agents promise, with the sample data.
+    def test_documented_report_commands_actually_run(self, tmp_path):
+        """Every repo command in the agent must work as written.
 
-        Report/CID arguments are normalised to the committed sample so the test
-        does not depend on the reader's real Coverity report.
+        `<report-folder>` placeholders are substituted with the committed sample
+        so the check does not depend on the reader's own Coverity export.
         """
         commands = []
         for path in AGENT_FILES:
             _, body = frontmatter(path)
-            commands.extend(cli_commands_in(body))
-        assert len(commands) >= 5, \
-            f"expected the agent to document the CLI fallback; found {commands}"
+            commands.extend(repo_commands_in(body))
+        assert commands, \
+            "the agent documents no readable way to get at a report — the LLM path is broken"
 
-        exercised = 0
+        ran = 0
         for command in commands:
-            # Drop the script name: the bridge is invoked as an argument to python.
-            tokens = command.split()[1:]
-            args = []
-            skip_next = False
-            for token in tokens:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if token in ("--report", "--src", "--cid"):
-                    args.append(token)
-                    if token == "--report":
-                        args.append(SAMPLE_REPORT)
-                    elif token == "--src":
-                        args.append(SAMPLE_SRC)
-                    else:
-                        args.append("1002")
-                    skip_next = True
-                else:
-                    args.append(token)
+            argv = command.split()
+            script = argv[0]
+            assert os.path.isfile(os.path.join(REPO_ROOT, script)), \
+                f"the agent documents a script that does not exist: {script}"
+            args = [a.replace("<report-folder>", SAMPLE_REPORT)
+                     .replace("<report>", SAMPLE_REPORT)
+                     .replace("<report-folder-or-index.html>", SAMPLE_REPORT)
+                    for a in argv[1:]]
+            if "<" in " ".join(args):
+                continue                        # still a placeholder for the user's own input
+            proc = subprocess.run([sys.executable, script, *args], cwd=REPO_ROOT,
+                                  capture_output=True, text=True, timeout=600)
+            assert proc.returncode == 0, f"{script} {' '.join(args)} failed: {proc.stderr}"
+            assert "CID" in proc.stdout or "ok" in proc.stdout, \
+                f"{script} {' '.join(args)} produced nothing useful"
+            ran += 1
+        assert ran >= 1, "no documented command was actually executed"
 
-            subcommand = args[0] if args else ""
-            if subcommand not in ("capabilities", "list", "analyze", "context"):
-                continue
-            if "--pretty" in args:
-                args.remove("--pretty")       # pretty is fine, but keep output compact
-            payload = run_bridge(*args)
-            assert payload["schema"] == 1, command
-            exercised += 1
-
-        assert exercised >= 5, \
-            f"only {exercised} documented command(s) were executed — the extraction "            f"is not actually checking the agent instructions"
+    def test_the_flat_reading_recipes_work_without_any_packages(self):
+        """The dependency-free recipes in the agent are the LLM-only path."""
+        _, body = frontmatter(os.path.join(AGENTS_DIR, AGENT_NAME))
+        assert "html.unescape" in body, "the stdlib flattening recipe is gone"
+        assert "coverity_report_text.py" in body, \
+            "the shipped digest script is no longer offered"
+        assert "openpyxl" in body, "the spreadsheet conversion recipe is gone"
 
     def test_triage_agent_sample_expectations_hold(self):
-        """The verdicts the triage agent promises for the shipped sample."""
+        """The verdicts the optional accelerator promises for the shipped sample.
+
+        These also pin the values the agent's own tests in docs/VSCODE_AGENTS.md
+        tell a user to expect, so the two cannot drift apart.
+        """
         payload = run_bridge("analyze", "--report", SAMPLE_REPORT, "--src", SAMPLE_SRC)
         by_cid = {d["cid"]: d for d in payload["defects"]}
         assert set(by_cid) == {1001, 1002}
