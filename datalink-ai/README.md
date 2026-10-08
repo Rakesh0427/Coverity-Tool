@@ -43,6 +43,15 @@ That is essentially elements 1–4 of your idea (server-side live datalink monit
 | `INVENTION_DISCLOSURE.md` | Pre-filled invention disclosure (problem, elements, inventive concept, embodiments, inventorship prompts) | You, to sign and file internally |
 | `SEARCH_PROTOCOL.md` | Exact queries, CPC classes, databases, and a watch list | Reproducibility / follow-on searches |
 
+### Companion engineering and business material (outside this patent package)
+
+| File | What it is | Who uses it |
+|---|---|---|
+| `../Patent_Worthy_Idea_Datalink_AI.docx` | The patent-worthy idea as a single document (Revision 2) | You + patent counsel |
+| `../Datalink_AI_Live_Architecture.docx` | Live-data architecture, pattern detection, dashboard, worked example (flight AI102), and the benefits/business case — Revision 3 | Engineering, product, commercial |
+| `figures/` | Eight figures used by the architecture document: end-to-end architecture, data availability, signal fusion, sample dashboard, detection layers and label flywheel, predictive findings and coverage account, value map, cost and revenue scenarios | Documents, decks, filings |
+| `dashboard/sample_dashboard.html` | Interactive, self-contained sample of the operations console with illustrative data | Demos, customer conversations |
+
 ---
 
 ## The one-line answer to “does this exist in patents?”
