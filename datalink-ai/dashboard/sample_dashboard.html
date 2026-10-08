@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Datalink AI — Requirements-Conformance Operations Console (sample)</title>
+<style>
+  :root{
+    --bg:#0E1626; --card:#16223A; --card2:#1B2942; --bord:#24344F; --txt:#E8EEF7; --mut:#93A4BC;
+    --blue:#5FB3F0; --teal:#1F9E8F; --green:#2E9E5B; --amber:#E8A33D; --red:#C0392B; --violet:#8E44AD;
+    --navy:#1F3355;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 Calibri,"Segoe UI",Arial,sans-serif}
+  .wrap{max-width:1560px;margin:0 auto;padding:0 16px 28px}
+  header{background:#111C30;border-bottom:1px solid var(--bord);position:sticky;top:0;z-index:20}
+  .hrow{max-width:1560px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+  .brand{font-weight:700;letter-spacing:.4px;font-size:18px}
+  .brand small{color:var(--mut);font-weight:400;font-size:12px;margin-left:10px;letter-spacing:0}
+  nav{display:flex;gap:4px;flex-wrap:wrap}
+  nav button{background:none;border:0;color:var(--mut);font:inherit;padding:8px 12px;cursor:pointer;border-bottom:2px solid transparent}
+  nav button.on{color:#fff;font-weight:700;border-bottom-color:var(--teal)}
+  nav button:hover{color:#fff}
+  .user{margin-left:auto;color:var(--mut);font-size:12px}
+  .pane{display:none}.pane.on{display:block}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:10px;padding:12px 14px;margin-top:12px}
+  .card h3{margin:0 0 10px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .grid{display:grid;gap:12px}
+  .k6{grid-template-columns:repeat(6,1fr)}
+  .main2{grid-template-columns:1.72fr 1fr}
+  .bot2{grid-template-columns:1.72fr 1fr}
+  @media (max-width:1150px){.k6{grid-template-columns:repeat(3,1fr)}.main2,.bot2{grid-template-columns:1fr}}
+  .kpi .v{font-size:30px;font-weight:700;line-height:1.1;margin-top:2px}
+  .kpi .l{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);font-weight:700}
+  .kpi .s{font-size:11px;color:var(--mut);margin-top:4px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:6px 8px;border-bottom:1px solid var(--bord)}
+  td{padding:7px 8px;border-bottom:1px solid #1D2B44}
+  tr.sel td{background:var(--card2)}
+  tr.click{cursor:pointer}tr.click:hover td{background:#1E2C46}
+  .pill{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:700}
+  .p-g{background:rgba(46,158,91,.16);color:#5FD08A}.p-r{background:rgba(192,57,43,.18);color:#F0837A}
+  .p-a{background:rgba(232,163,61,.16);color:#F2BE74}.p-v{background:rgba(142,68,173,.2);color:#C79BDF}
+  .live{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block}
+  .mut{color:var(--mut)}.mono{font-family:Consolas,Menlo,monospace;font-size:12px}
+  .sym{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #1D2B44}
+  .sym:last-child{border-bottom:0}
+  .bar{width:4px;border-radius:2px;flex:0 0 4px}
+  .sym .t{font-size:12.6px}.sym .d{font-size:11.4px;color:var(--mut)}
+  .grid16{display:grid;grid-template-columns:repeat(16,1fr);gap:3px}
+  .cell{height:15px;border-radius:2px;cursor:pointer}
+  .c-g{background:var(--green)}.c-r{background:var(--red)}.c-a{background:var(--amber)}.c-v{background:var(--violet)}
+  .legend{display:flex;gap:16px;font-size:11.5px;color:var(--mut);margin-top:8px;flex-wrap:wrap}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:middle}
+  #tip{position:fixed;pointer-events:none;background:#0B1424;border:1px solid var(--bord);border-radius:8px;
+       padding:8px 10px;font-size:12px;max-width:420px;display:none;z-index:40;box-shadow:0 8px 22px rgba(0,0,0,.45)}
+  .tl{position:relative;margin:6px 0 0;padding-left:22px}
+  .tl:before{content:"";position:absolute;left:6px;top:4px;bottom:4px;width:2px;background:var(--bord)}
+  .tl .ev{position:relative;padding:6px 0}
+  .tl .ev:before{content:"";position:absolute;left:-20px;top:11px;width:9px;height:9px;border-radius:50%;background:var(--blue);border:2px solid var(--bg)}
+  .tl .ev.bad:before{background:var(--red)}.tl .ev.ok:before{background:var(--green)}.tl .ev.warn:before{background:var(--amber)}
+  .tl .t1{font-size:12.8px}.tl .t2{font-size:11.4px;color:var(--mut)}
+  .hb{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--mut)}
+  .hb b{color:var(--txt)}
+  .block{padding:10px 12px;border-radius:8px;margin-top:10px;font-size:12.6px}
+  .b-warn{background:rgba(232,163,61,.12);border:1px solid rgba(232,163,61,.5)}
+  .b-ok{background:rgba(46,158,91,.12);border:1px solid rgba(46,158,91,.45)}
+  .b-bad{background:rgba(192,57,43,.13);border:1px solid rgba(192,57,43,.5)}
+  footer{color:var(--mut);font-size:11.8px;padding:16px 2px 0;border-top:1px solid var(--bord);margin-top:16px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12.6px}
+  .kv div:nth-child(odd){color:var(--mut)}
+  select,input{background:#0B1424;color:var(--txt);border:1px solid var(--bord);border-radius:6px;padding:5px 8px;font:inherit}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+</style>
+</head>
+<body>
+<header>
+  <div class="hrow">
+    <div class="brand">DATALINK AI<small>Requirements-Conformance Operations Console · sample data</small></div>
+    <nav id="nav">
+      <button data-p="fleet" class="on">Fleet board</button>
+      <button data-p="flight">Flight</button>
+      <button data-p="reqs">Requirements</button>
+      <button data-p="syms">Symptoms</button>
+      <button data-p="cov">Coverage</button>
+      <button data-p="eq">Equipment</button>
+    </nav>
+    <div class="user">VK · VT-XXX &nbsp;|&nbsp; illustrative data, not a real flight</div>
+  </div>
+</header>
+<div class="wrap">
+
+  <!-- ================= FLEET ================= -->
+  <section class="pane on" id="p-fleet">
+    <div class="card">
+      <div class="live">
+        <span style="color:var(--teal);font-weight:700;font-size:12px;letter-spacing:.06em">LIVE · CONFORMANCE SESSION OPEN</span>
+        <span><b>AI102</b></span><span class="mut">VT-XXX</span><span class="mut">MAA → LHR</span>
+        <span class="mut">cruise FL350</span><span class="mut">A350-900</span>
+        <span class="mut mono">CMU SW PN-1234-05 · HW PN-9876-01 · DB-2026-07</span>
+        <span class="mut">session 03:42 elapsed</span>
+        <span style="margin-left:auto" class="mut"><span class="dot"></span> messages 13 s ago · ACMS 4 min ago · QAR post-flight</span>
+      </div>
+    </div>
+
+    <div class="grid k6">
+      <div class="card kpi"><div class="l">Requirements in scope</div><div class="v">128</div><div class="s">certified baseline, this config</div></div>
+      <div class="card kpi"><div class="l">Conforming</div><div class="v" style="color:var(--green)">119</div><div class="s">verified in service</div></div>
+      <div class="card kpi"><div class="l">Non-conforming</div><div class="v" style="color:var(--red)">3</div><div class="s">distinct requirement IDs, fleet window</div></div>
+      <div class="card kpi"><div class="l">Not exercised</div><div class="v" style="color:var(--amber)">4</div><div class="s">never triggered on these routes</div></div>
+      <div class="card kpi"><div class="l">Indeterminate</div><div class="v" style="color:var(--violet)">2</div><div class="s">triggered, evidence insufficient</div></div>
+      <div class="card kpi"><div class="l">Coverage YTD</div><div class="v" style="color:var(--teal)">91.4%</div><div class="s">evidence-complete requirements</div></div>
+    </div>
+
+    <div class="grid main2">
+      <div class="card">
+        <h3>Active flights · conformance state updates as evidence arrives</h3>
+        <table id="fleetTable">
+          <thead><tr><th>Tail</th><th>Flight</th><th>Route</th><th>Phase</th><th>Conf</th><th>Non-conf</th><th>Indet</th><th>Fresh</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="mut" style="font-size:11.6px;margin-top:8px">Click a row to open the flight view. Counts are requirements, not messages; a requirement that is non-conforming for two flights is still one requirement ID.</div>
+      </div>
+      <div class="card">
+        <h3>Symptoms · severity-sorted, with probable domain</h3>
+        <div id="symptomList"></div>
+      </div>
+    </div>
+
+    <div class="grid bot2">
+      <div class="card">
+        <h3>Requirement verdict grid · per requirement, per flight</h3>
+        <div class="grid16" id="grid"></div>
+        <div class="legend">
+          <span><i class="sw" style="background:var(--green)"></i>conforming</span>
+          <span><i class="sw" style="background:var(--red)"></i>non-conforming</span>
+          <span><i class="sw" style="background:var(--amber)"></i>not exercised</span>
+          <span><i class="sw" style="background:var(--violet)"></i>indeterminate</span>
+          <span>SRS-DL-0100 … 0227 · hover any cell for the criterion, the measured value and the margin</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Uplink → crew response · last 30 min (requirement limit 180 s)</h3>
+        <div id="chart1"></div>
+      </div>
+    </div>
+
+    <div class="grid bot2">
+      <div class="card">
+        <h3>Comms partition execution vs budget (80 ms) · by flight phase</h3>
+        <div id="chart2"></div>
+      </div>
+      <div class="card">
+        <h3>Evidence, freshness and revision rules</h3>
+        <div class="kv">
+          <div>Freshness is per source and always shown</div><div>messages s · ACMS min · QAR post-flight</div>
+          <div>Late data revises, never overwrites</div><div>a new verdict version with a stated reason</div>
+          <div>Provenance is total</div><div>requirement → criterion → value → observation → record hash</div>
+          <div>Verdict authority</div><div>deterministic rules decide · AI only proposes hypotheses</div>
+        </div>
+      </div>
+    </div>
+    <footer>Every number is clickable through to the evidence. The console is flight-keyed; verdict deltas stream in over SSE/WebSocket so only the affected requirement cells change. Data shown is illustrative.</footer>
+  </section>
+
+  <!-- ================= FLIGHT ================= -->
+  <section class="pane" id="p-flight">
+    <div class="card">
+      <h3>Flight AI102 · VT-XXX · A350-900 · MAA → LHR · 8 October 2026</h3>
+      <div class="hb">
+        <span>CMU <b>SW PN-1234-05</b> / <b>HW PN-9876-01</b></span><span>DB <b>2026-07</b></span>
+        <span>session <b>03:42</b></span><span>clock offset <b>±0.08 s</b> (propagated uncertainty)</span>
+        <span>sources: <b>CSP</b> · <b>ACMS</b> · <b>OEM partition events</b></span>
+      </div>
+      <div class="block b-bad"><b>SRS-DL-0142 rev C — NON-CONFORMING.</b> Crew response to the uplink measured at
+        <b>242 s</b> against a 180 s acceptance criterion (margin <b>−62 s</b>). Cause domain <b>HOST_PLATFORM</b>:
+        two partition overruns in the window that overlapped message receipt and display, on an otherwise clean link.</div>
+    </div>
+
+    <div class="grid main2">
+      <div class="card">
+        <h3>Event timeline · one uplink, one verdict</h3>
+        <div class="tl" id="timeline"></div>
+      </div>
+      <div class="card">
+        <h3>Transaction record T-2026-10-08-4f9a</h3>
+        <div class="kv" id="txrec"></div>
+        <div class="mut" style="font-size:11.6px;margin-top:10px">Six independent observations of one transaction, each with its own
+          source and clock offset, fused into a single measured value with a stated uncertainty. Content hash
+          <span class="mono">9c1f…b47e</span>.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Requirement verdicts for this flight</h3>
+      <table id="flightReqs">
+        <thead><tr><th>Requirement</th><th>Class</th><th>Acceptance criterion</th><th>Measured</th><th>Margin</th><th>Verdict</th><th>Cause domain</th><th>Observations relied on</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="grid bot2">
+      <div class="card">
+        <h3>What the AI proposed, and what the deterministic layer decided</h3>
+        <div id="aiNotes"></div>
+      </div>
+      <div class="card">
+        <h3>Cause attribution sketch</h3>
+        <div id="attrib"></div>
+      </div>
+    </div>
+    <footer>Selecting a different flight on the fleet board re-renders this view from that flight's own evidence set; nothing here is shared across tails.</footer>
+  </section>
+
+  <!-- ================= REQUIREMENTS ================= -->
+  <section class="pane" id="p-reqs">
+    <div class="card">
+      <h3>Requirement register · evidence-class mapped (excerpt)</h3>
+      <div class="row">
+        <label class="mut">Verdict filter
+          <select id="verdictFilter">
+            <option value="">all</option><option value="CONFORMING">conforming</option>
+            <option value="NON-CONFORMING">non-conforming</option>
+            <option value="NOT-EXERCISED">not exercised</option>
+            <option value="INDETERMINATE">indeterminate</option>
+          </select></label>
+        <span class="mut" style="font-size:12px">Each criterion is compiled into an executable monitor; the monitor keeps the link back to the requirement revision it came from.</span>
+      </div>
+      <table id="reqTable">
+        <thead><tr><th>ID</th><th>Rev</th><th>Class</th><th>Acceptance criterion</th><th>Evidence class</th><th>Verdict</th><th>Measured / limit</th><th>Margin</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <footer>4 requirements are NOT-EXERCISED on this configuration and 2 are INDETERMINATE. Neither state is a pass:
+      not-exercised is verification credit still owed, indeterminate triggers an instrumentation request.</footer>
+  </section>
+
+  <!-- ================= SYMPTOMS ================= -->
+  <section class="pane" id="p-syms">
+    <div class="card">
+      <h3>Active symptoms, fleet-wide (last 24 h)</h3>
+      <div id="symFull"></div>
+    </div>
+    <div class="card">
+      <h3>Symptom catalogue · what the pattern engine watches for</h3>
+      <table id="symCat">
+        <thead><tr><th>Symptom</th><th>Severity</th><th>Domain</th><th>Requirement class it points at</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <footer>Every symptom carries the requirement IDs it implicates and the evidence references behind it. Symptoms open
+      work; they do not close verdicts.</footer>
+  </section>
+
+  <!-- ================= COVERAGE ================= -->
+  <section class="pane" id="p-cov">
+    <div class="grid main2">
+      <div class="card">
+        <h3>Operational coverage account · MAA→LHR, software load PN-1234-05</h3>
+        <div id="covBars"></div>
+        <div class="mut" style="font-size:11.8px;margin-top:10px">17 of 191 requirements on this pairing have never been demonstrated
+          in service. That set is the coverage gap — reportable evidence of where verification credit is still owed, and the
+          reason a green dashboard is not the same thing as a verified system.</div>
+      </div>
+      <div class="card">
+        <h3>Never-exercised requirements (excerpt)</h3>
+        <table id="neverTable"><thead><tr><th>ID</th><th>Class</th><th>Why it never triggers here</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Coverage trend · last 12 months</h3>
+      <div id="covTrend"></div>
+    </div>
+  </section>
+
+  <!-- ================= EQUIPMENT ================= -->
+  <section class="pane" id="p-eq">
+    <div class="card">
+      <h3>Tail configuration database · the denominator of every verdict</h3>
+      <table id="eqTable">
+        <thead><tr><th>Tail</th><th>Type</th><th>CMU SW</th><th>CMU HW</th><th>Database</th><th>Modem / subnetwork</th><th>Subscription</th><th>Config drift watch</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="mut" style="font-size:11.8px;margin-top:10px">No conformance claim means anything without this table: the same
+        measurement is conforming on one software load and non-conforming on another, and a database update can silently change
+        which requirements are even exercisable on a route.</div>
+    </div>
+    <div class="card">
+      <h3>Partition budget and observed execution · VT-XXX cruise</h3>
+      <div id="partTable"></div>
+    </div>
+  </section>
+
+  <div id="tip"></div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ data */
+const FLEET=[
+ {tail:'VT-XXX',flight:'AI102',route:'MAA→LHR',phase:'CRUISE',conf:96,nc:3,ind:2,fresh:'13 s',sel:true},
+ {tail:'VT-ABC',flight:'AI104',route:'DEL→FRA',phase:'CRUISE',conf:100,nc:0,ind:0,fresh:'9 s'},
+ {tail:'VT-XYZ',flight:'AI441',route:'BLR→DXB',phase:'CLIMB',conf:98,nc:1,ind:0,fresh:'21 s'},
+ {tail:'VT-DEF',flight:'AI202',route:'BOM→LHR',phase:'GATE',conf:100,nc:0,ind:0,fresh:'2 min'},
+ {tail:'VT-GHI',flight:'AI671',route:'MAA→SIN',phase:'DESCENT',conf:94,nc:2,ind:1,fresh:'17 s'},
+ {tail:'VT-JKL',flight:'AI930',route:'HYD→AUH',phase:'CRUISE',conf:99,nc:0,ind:0,fresh:'12 s'}
+];
+const SYMPTOMS=[
+ {sev:'CRITICAL',c:'red',t:'Uplink not acknowledged — 1 occurrence',d:'probable domain: CMU handling / crew omission'},
+ {sev:'CRITICAL',c:'red',t:'Partition overrun during transmit window',d:'probable domain: host platform'},
+ {sev:'HIGH',c:'red',t:'CPDLC response window exceeded — 242 s vs 180 s',d:'probable domain: crew / host platform'},
+ {sev:'HIGH',c:'amber',t:'Subnetwork handover failure — VDL2 → SATCOM',d:'probable domain: interface / link'},
+ {sev:'MEDIUM',c:'amber',t:'Noise-floor rise, Chennai FIR, 20 min window',d:'probable domain: interference'},
+ {sev:'MEDIUM',c:'amber',t:'Req SRS-DL-0142 margin decaying over 3 flights',d:'probable domain: trend / maintenance'}
+];
+const TIMELINE=[
+ {t:'04:12:03.22 UTC',k:'',a:'ATC uplink issued at the ground station',b:'transaction T-2026-10-08-4f9a opens · CSP feed, latency 1–30 s'},
+ {t:'+03.48 s',k:'',a:'Ground station egress recorded',b:'source: ANSP/ground network status'},
+ {t:'+06.10 s',k:'',a:'Aircraft receipt confirmed at the CMU',b:'source: CSP message feed · content hash captured'},
+ {t:'+06.4 s',k:'bad',a:'Host partition overrun begins (overrun 1 of 2)',b:'source: OEM partition-health event · execution 71.4 ms vs 80 ms budget'},
+ {t:'+28.10 s',k:'warn',a:'Crew begins handling the message',b:'source: crew action events · response 242 s against a 180 s criterion'},
+ {t:'+31.00 s',k:'',a:'WILCO transmitted by the crew',b:'source: downlink record'},
+ {t:'+31.55 s',k:'ok',a:'Ground receipt of the response',b:'measured round trip 28.33 s against the 210 s operational limit — conforming'},
+ {t:'+242 s',k:'bad',a:'Response decision completes beyond the 180 s criterion',b:'requirement SRS-DL-0142 rev C non-conforming · margin −62 s'}
+];
+const REQS=[
+ {id:'SRS-DL-0142',rev:'C',cls:'Timing / performance',crit:'Crew response to a CPDLC uplink ≤ 180 s (95th percentile, per message)',ev:'timing + partition',
+  v:'NON-CONFORMING',m:'242 s',lim:'180 s',margin:'−62 s',cause:'HOST_PLATFORM',obs:'6 · ledger 9c1f…b47e'},
+ {id:'SRS-DL-0107',rev:'B',cls:'Functional',crit:'Uplink message shall be acknowledged and the acknowledgement received on the ground',ev:'message flow',
+  v:'NON-CONFORMING',m:'1 occurrence of no acknowledgement',lim:'0 occurrences',margin:'—',cause:'CMU handling / crew omission',obs:'4 · ledger 44a0…19c2'},
+ {id:'SRS-DL-0131',rev:'D',cls:'Resource / partition',crit:'Host partition execution ≤ 80 ms budget, no overrun in a transmit window',ev:'partition budget / OS',
+  v:'NON-CONFORMING',m:'2 overruns (71.4 ms peak, window 2.8 s)',lim:'0 overruns',margin:'budget 80 ms',cause:'HOST_PLATFORM',obs:'11 · ledger 5d33…2f80'},
+ {id:'SRS-DL-0155',rev:'B',cls:'Interface',crit:'Subnetwork handover shall complete within 45 s without message loss',ev:'radio / bus',
+  v:'INDETERMINATE',m:'loss suspected, timing not resolvable on live feeds',lim:'0 losses, 45 s',margin:'unknown',cause:'interface / link',obs:'2 · instrumentation requested'},
+ {id:'SRS-DL-0156',rev:'A',cls:'Interface',crit:'Handover shall not corrupt message sequencing',ev:'radio / bus',
+  v:'INDETERMINATE',m:'sequence gap observed, no QAR yet',lim:'no gaps',margin:'unknown',cause:'interface / link',obs:'1 · pending QAR'},
+ {id:'SRS-DL-0173',rev:'B',cls:'Robustness',crit:'The CMU shall recover from a fault without operator action',ev:'fault observations',
+  v:'NOT-EXERCISED',m:'no fault observed on this route',lim:'recovery ≤ 30 s when faulted',margin:'—',cause:'—',obs:'0'},
+ {id:'SRS-DL-0204',rev:'A',cls:'Human factors',crit:'Crew workload indicator stays within the defined band during high message rate',ev:'crew actions',
+  v:'NOT-EXERCISED',m:'message rate never exceeded 4 per 10 min here',lim:'band defined in rev A',margin:'—',cause:'—',obs:'0'},
+ {id:'SRS-DL-0118',rev:'C',cls:'Functional',crit:'Correct routing of a downlink to the addressed addressee',ev:'message flow',
+  v:'CONFORMING',m:'100 % (412 routed, 0 misrouted)',lim:'0 misroutes',margin:'full margin',cause:'—',obs:'412 · ledger 7b21…aa04'},
+ {id:'SRS-DL-0140',rev:'C',cls:'Timing / performance',crit:'End-to-end uplink delivery ≤ 210 s operational limit',ev:'timing',
+  v:'CONFORMING',m:'28.33 s (p95 in window 41 s)',lim:'210 s',margin:'+181.7 s',cause:'—',obs:'96 · ledger 9c1f…b47e'},
+ {id:'HW-0031',rev:'B',cls:'Hardware',crit:'CMU hardware PN shall match the certified configuration for the database in use',ev:'interface / hardware',
+  v:'CONFORMING',m:'PN-9876-01 matches',lim:'exact match',margin:'n/a',cause:'—',obs:'1 · config snapshot'}
+];
+const NEVER=[
+ {id:'SRS-DL-0173',cls:'Robustness',why:'no CMU fault occurred on this route in 9 months'},
+ {id:'SRS-DL-0175',cls:'Robustness',why:'requires a dual-subnetwork failure that has never been induced'},
+ {id:'SRS-DL-0181',cls:'Robustness',why:'requires a database rollback scenario'},
+ {id:'SRS-DL-0204',cls:'Human factors',why:'message rate never reached the scenario threshold'},
+ {id:'SRS-DL-0207',cls:'Human factors',why:'requires a diversion with retransmission burst'},
+ {id:'SRS-DL-0211',cls:'Human factors',why:'requires a two-crew simultaneous-response case'}
+];
+const COV=[['Message handling (SRS 0100–0139)',38,2],['Timing / performance (SRS 0140–0159)',19,1],
+ ['Robustness (SRS 0160–0179)',17,3],['Interface / hardware (HW 0020–0049)',24,6],['Human factors (SRS 0200–0219)',14,5]];
+const TREND=[[0,86.2],[1,86.9],[2,87.4],[3,88.0],[4,88.6],[5,89.1],[6,89.4],[7,90.1],[8,90.6],[9,90.9],[10,91.1],[11,91.4]];
+const TMPART=[['TAXI',52],['T/O',63],['CLIMB',66],['CRUISE',71.4],['DESC',69],['LAND',60]];
+const TXSER=[48,49,52,47,51,55,50,53,58,54,49,52,56,60,242,55,52,58,54,51,53,57,52,49,61,54,50,52,56,53];
+const EQUIP=[
+ ['VT-XXX','A350-900','PN-1234-05','PN-9876-01','DB-2026-07','VDL2 + SATCOM','ATN-B1 / FANS-1A','none — stable'],
+ ['VT-ABC','A350-900','PN-1234-05','PN-9876-01','DB-2026-07','VDL2 + SATCOM','ATN-B1','none — stable'],
+ ['VT-XYZ','B787-9','PN-2211-03','PN-5540-02','DB-2026-05','VDL2','FANS-1A','DB behind fleet baseline'],
+ ['VT-DEF','B787-9','PN-2211-03','PN-5540-02','DB-2026-07','VDL2','FANS-1A','modem FW revision differs'],
+ ['VT-GHI','A321neo','PN-1180-07','PN-3320-11','DB-2026-06','VDL2','FANS-1A','none — stable'],
+ ['VT-JKL','A350-900','PN-1234-04','PN-9876-01','DB-2026-07','VDL2 + SATCOM','ATN-B1 / FANS-1A','SW one revision behind']
+];
+/* ------------------------------------------------------------------ utils */
+const $=s=>document.querySelector(s);
+function tip(e,html){const t=$('#tip');t.innerHTML=html;t.style.display='block';
+  const pad=14;let x=e.clientX+pad,y=e.clientY+pad;
+  if(x+430>innerWidth)x=innerWidth-440; if(y+140>innerHeight)y=innerHeight-150;
+  t.style.left=x+'px';t.style.top=y+'px';}
+function untip(){$('#tip').style.display='none';}
+function sv(v){return v==='CONFORMING'?'p-g':v==='NON-CONFORMING'?'p-r':v==='NOT-EXERCISED'?'p-a':'p-v';}
+
+/* ------------------------------------------------------------------- nav */
+document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');
+  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
+  $('#p-'+b.dataset.p).classList.add('on');
+  window.scrollTo({top:0});
+});
+
+/* ----------------------------------------------------------------- fleet */
+(function(){
+  const tb=$('#fleetTable tbody');
+  tb.innerHTML=FLEET.map((f,i)=>`<tr class="click ${f.sel?'sel':''}" data-i="${i}">
+    <td><b>${f.tail}</b></td><td>${f.flight}</td><td>${f.route}</td><td class="mut">${f.phase}</td>
+    <td style="font-weight:700;color:${f.conf===100?'var(--green)':'var(--amber)'}">${f.conf}%</td>
+    <td style="color:${f.nc?'#F0837A':'var(--mut)'};font-weight:${f.nc?700:400}">${f.nc||'—'}</td>
+    <td style="color:${f.ind?'#C79BDF':'var(--mut)'}">${f.ind||'—'}</td>
+    <td class="mut">${f.fresh}</td></tr>`).join('');
+  tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>{
+    tb.querySelectorAll('tr').forEach(x=>x.classList.remove('sel'));tr.classList.add('sel');
+    const f=FLEET[tr.dataset.i];
+    if(f.flight!=='AI102'){tip({clientX:innerWidth/2,clientY:180},
+      `<b>${f.flight} · ${f.tail}</b><br>This sample carries the full evidence set for AI102 only. In the real console this row opens the same flight view, rendered from that aircraft's own evidence.`);
+      setTimeout(untip,3200);}
+  });
+})();
+(function(){
+  $('#symptomList').innerHTML=SYMPTOMS.map(s=>`<div class="sym"><div class="bar" style="background:var(--${s.c})"></div>
+    <div><div class="t"><span class="mut" style="font-size:10.6px;font-weight:700;letter-spacing:.05em">${s.sev}</span> &nbsp;${s.t}</div>
+    <div class="d">${s.d}</div></div></div>`).join('');
+  $('#symFull').innerHTML=SYMPTOMS.map(s=>`<div class="sym"><div class="bar" style="background:var(--${s.c})"></div>
+    <div><div class="t"><span class="mut" style="font-size:10.6px;font-weight:700;letter-spacing:.05em">${s.sev}</span> &nbsp;${s.t}</div>
+    <div class="d">${s.d} · raised as a hypothesis, admitted through the gate, recorded in the ledger</div></div></div>`).join('');
+})();
+(function(){
+  const g=$('#grid');let html='';
+  for(let r=0;r<11;r++)for(let c=0;c<16;c++){
+    let v='CONFORMING';
+    if((r===2&&c===9)||(r===6&&c===5)||(r===6&&c===12))v='NON-CONFORMING';
+    else if((r===4&&c===7)||(r===8&&c===3))v='INDETERMINATE';
+    else if(((r*37+c*11)%53)<3)v='NOT-EXERCISED';
+    const id='SRS-DL-'+(100+r*11+c).toString().padStart(4,'0');
+    html+=`<div class="cell ${v==='CONFORMING'?'c-g':v==='NON-CONFORMING'?'c-r':v==='NOT-EXERCISED'?'c-a':'c-v'}"
+      data-id="${id}" data-v="${v}"></div>`;
+  }
+  g.innerHTML=html;
+  g.querySelectorAll('.cell').forEach(c=>{
+    c.onmousemove=e=>{
+      const id=c.dataset.id,v=c.dataset.v;
+      const r=REQS.find(x=>x.id===id);
+      tip(e,`<b>${id}</b> · verdict <span class="pill ${sv(v)}">${v}</span><br>`+
+        (r?`criterion: ${r.crit}<br>measured: <b>${r.m}</b> · limit: ${r.lim} · margin: ${r.margin}<br>evidence class: ${r.ev} · observations: ${r.obs}`
+          :`criterion: see requirement register · evidence class depends on the requirement's own monitoring intent`));
+    };
+    c.onmouseleave=untip;
+  });
+})();
+/* ----------------------------------------------------------------- charts */
+function lineChart(host,series,limit,unit,annot){
+  const w=560,h=230,pl=44,pb=26,pt=12,pr=14,ma=320;
+  const X=i=>pl+(w-pl-pr)*i/(series.length-1), Y=v=>h-pb-(h-pb-pt)*v/ma;
+  let path='';series.forEach((v,i)=>path+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' ');
+  const yl=Y(limit);
+  let s=`<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto">`;
+  s+=`<line x1="${pl}" y1="${h-pb}" x2="${w-pr}" y2="${h-pb}" stroke="#24344F"/><line x1="${pl}" y1="${pt}" x2="${pl}" y2="${h-pb}" stroke="#24344F"/>`;
+  [0,80,160,240,320].forEach(v=>{s+=`<text x="${pl-6}" y="${Y(v)+4}" fill="#93A4BC" font-size="10" text-anchor="end">${v}</text>`;});
+  s+=`<line x1="${pl}" y1="${yl}" x2="${w-pr}" y2="${yl}" stroke="#C0392B" stroke-dasharray="4 4"/>`;
+  s+=`<text x="${w-pr}" y="${yl-5}" fill="#F0837A" font-size="10" text-anchor="end">limit ${limit} ${unit}</text>`;
+  s+=`<path d="${path}" fill="none" stroke="#5FB3F0" stroke-width="1.6"/>`;
+  series.forEach((v,i)=>{if(v>limit){s+=`<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3.4" fill="#C0392B"/>`;}});
+  s+=`<text x="${pl}" y="${h-8}" fill="#93A4BC" font-size="10">0 min</text><text x="${w-pr}" y="${h-8}" fill="#93A4BC" font-size="10" text-anchor="end">30 min</text>`;
+  s+=`<text x="${pl+2}" y="${pt+12}" fill="#F0837A" font-size="10">${annot}</text></svg>`;
+  host.innerHTML=s;
+}
+function barChart(host,rows,budget){
+  const w=560,h=210,pl=40,pb=26,pt=14,pr=14,ma=100;
+  const bw=(w-pl-pr)/rows.length*0.55;
+  const Y=v=>h-pb-(h-pb-pt)*v/ma;
+  let s=`<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto">`;
+  s+=`<line x1="${pl}" y1="${h-pb}" x2="${w-pr}" y2="${h-pb}" stroke="#24344F"/><line x1="${pl}" y1="${pt}" x2="${pl}" y2="${h-pb}" stroke="#24344F"/>`;
+  [0,25,50,75,100].forEach(v=>{s+=`<text x="${pl-6}" y="${Y(v)+4}" fill="#93A4BC" font-size="10" text-anchor="end">${v}</text>`;});
+  rows.forEach((r,i)=>{
+    const cx=pl+(w-pl-pr)*(i+0.5)/rows.length, x=cx-bw/2;
+    s+=`<rect x="${x}" y="${Y(r[1])}" width="${bw}" height="${h-pb-Y(r[1])}" rx="3" fill="${r[1]>budget?'#E8A33D':'#5FB3F0'}"/>`;
+    s+=`<text x="${cx}" y="${h-8}" fill="#93A4BC" font-size="10" text-anchor="middle">${r[0]}</text>`;
+    s+=`<text x="${cx}" y="${Y(r[1])-4}" fill="#E8EEF7" font-size="9.5" text-anchor="middle">${r[1]}</text>`;});
+  s+=`<line x1="${pl}" y1="${Y(budget)}" x2="${w-pr}" y2="${Y(budget)}" stroke="#C0392B" stroke-dasharray="4 4"/>`;
+  s+=`<text x="${w-pr}" y="${Y(budget)-5}" fill="#F0837A" font-size="10" text-anchor="end">budget ${budget} ms</text>`;
+  s+=`<text x="${pl+2}" y="${pt+10}" fill="#F2BE74" font-size="10">2 overruns in cruise — overlapping the exhibit window</text></svg>`;
+  host.innerHTML=s;
+}
+lineChart($('#chart1'),TXSER,180,'s','242 s vs 180 s · margin −62 s · SRS-DL-0142 rev C');
+barChart($('#chart2'),TMPART,80);
+(function(){const rows=[
+  ['0 s','uplink issued at the ground station','CSP feed'],
+  ['+3.5 s','ground station egress','ANSP / ground network'],
+  ['+6.1 s','aircraft receipt at the CMU','CSP + downlink record'],
+  ['+6.4 s','partition overrun 1 begins (71.4 ms, budget 80 ms)','OEM partition event'],
+  ['+7.2 s','partition overrun 2 begins','OEM partition event'],
+  ['+28.1 s','crew begins handling the message','crew action event'],
+  ['+31.0 s','WILCO transmitted','downlink record'],
+  ['+31.6 s','ground receipt of the response','ground network status']];
+  $('#partTable').innerHTML='<table><thead><tr><th>Offset</th><th>Observation</th><th>Source</th></tr></thead><tbody>'+
+   rows.map(r=>`<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td class="mut">${r[2]}</td></tr>`).join('')+'</tbody></table>';})();
+/* -------------------------------------------------------------- flight pg */
+(function(){
+  $('#timeline').innerHTML=TIMELINE.map(e=>`<div class="ev ${e.k}">
+    <div class="t1"><b class="mono">${e.t}</b> &nbsp;${e.a}</div><div class="t2">${e.b}</div></div>`).join('');
+  $('#txrec').innerHTML=[
+    ['transaction id','T-2026-10-08-4f9a'],['flight','AI102 · VT-XXX · 8 Oct 2026'],
+    ['uplink content hash','9c1f…b47e'],['legs (6)','uplink issued · station egress · aircraft receipt · crew start · WILCO sent · ground receipt'],
+    ['measured response','242 s'],['acceptance criterion','≤ 180 s, 95th percentile'],
+    ['margin','−62 s'],['clock uncertainty','±0.08 s propagated through every leg'],
+    ['freshness','CSP 13 s · ACMS 4 min · QAR post-flight'],
+    ['verdict version','v3 — revised when the partition events arrived; reason recorded']
+  ].map(r=>`<div>${r[0]}</div><div>${r[1]}</div>`).join('');
+  $('#flightReqs').querySelector('tbody').innerHTML=REQS.map(r=>`<tr>
+    <td class="mono">${r.id}</td><td class="mut">${r.cls}</td><td>${r.crit}</td><td>${r.m}</td>
+    <td>${r.margin}</td><td><span class="pill ${sv(r.v)}">${r.v}</span></td><td class="mut">${r.cause}</td><td class="mut">${r.obs}</td></tr>`).join('');
+  $('#aiNotes').innerHTML=`
+    <div class="block b-ok"><b>Accepted hypothesis.</b> The sequence-novelty model flagged the combination
+      <i>partition overrun inside the message-transmit window</i> with the link otherwise clean, and proposed the cause domain
+      HOST_PLATFORM. The deterministic rule <span class="mono">stall_overlap+clean_link</span> confirmed the same reading from
+      the partition telemetry, so the finding was admitted and the verdict was set by the rule, not by the model.</div>
+    <div class="block b-warn"><b>Rejected hypothesis.</b> A link-degradation model proposed VDL2 interference as the cause of the
+      delay. The admission gate measured the input window as out-of-distribution for that model and the finding was rejected —
+      logged with the model hash, the input-window hash and the gate values. Rejection is recorded evidence, not a failure.</div>
+    <div class="block b-bad"><b>Not the cause.</b> The crew-response interval, the subnetwork handover and the noise floor were all
+      examined; none of them explains why the message sat in the host queue for the first 21 s.</div>`;
+  $('#attrib').innerHTML=`
+    <div class="kv">
+      <div>Requirement</div><div>SRS-DL-0142 rev C — crew response to an uplink ≤ 180 s</div>
+      <div>Measured</div><div>242 s (margin −62 s)</div>
+      <div>Overlap evidence</div><div>2 partition overruns in the window, 71.4 ms peak against an 80 ms budget</div>
+      <div>Link evidence</div><div>clean — 0 losses, 0 retries, no handover in the window</div>
+      <div>Link-layer counterfactual</div><div>the same message flow on VT-ABC this week took 34 s end to end</div>
+      <div>Cause domain</div><div><b>HOST_PLATFORM</b> — the delay is in the host, not in the radio</div>
+      <div>Action</div><div>maintenance work order on the CMU host partition, trend watch on the same partition, NOC alert</div>
+    </div>`;
+})();
+/* --------------------------------------------------------------- req page */
+function renderReqs(){
+  const f=$('#verdictFilter').value;
+  $('#reqTable').querySelector('tbody').innerHTML=REQS.filter(r=>!f||r.v===f).map(r=>`<tr>
+    <td class="mono">${r.id}</td><td>${r.rev}</td><td class="mut">${r.cls}</td><td>${r.crit}</td>
+    <td class="mut">${r.ev}</td><td><span class="pill ${sv(r.v)}">${r.v}</span></td><td>${r.m} / ${r.lim}</td><td>${r.margin}</td></tr>`).join('');
+}
+$('#verdictFilter').onchange=renderReqs;renderReqs();
+$('#symCat').querySelector('tbody').innerHTML=[
+ ['Recurring per-tail failure','HIGH','CMU / host','Functional, robustness'],
+ ['Co-occurrence of symptoms in one window','MEDIUM','cross-domain','whichever requirements the group implicates'],
+ ['Route or airspace localisation','MEDIUM','link / interference','Interface, timing'],
+ ['Periodicity (time-of-day, sector handover)','LOW','link / ground','Interface'],
+ ['Margin decay against a criterion','HIGH','trend','the requirement whose margin is decaying'],
+ ['Link flapping (attach/detach storms)','MEDIUM','link','Interface'],
+ ['Loss bursts','HIGH','link / RF','Interface, robustness'],
+ ['Crew-response clustering','MEDIUM','human factors','Human factors, timing'],
+ ['Configuration drift across the fleet','HIGH','equipment','every requirement whose monitor depends on the config'],
+ ['Coverage erosion (a requirement stops being exercised)','MEDIUM','verification','the requirement that stopped being demonstrated']
+].map(r=>`<tr><td>${r[0]}</td><td><span class="pill ${r[1]==='HIGH'?'p-r':r[1]==='MEDIUM'?'p-a':'p-g'}">${r[1]}</span></td><td class="mut">${r[2]}</td><td class="mut">${r[3]}</td></tr>`).join('');
+/* -------------------------------------------------------------- cov page */
+(function(){
+  const max=40;
+  $('#covBars').innerHTML=COV.map(c=>{
+    const w=c[1]/max*100,nw=c[2]/max*100;
+    return `<div style="margin-bottom:12px">
+      <div class="mut" style="font-size:12px;margin-bottom:4px">${c[0]} <b style="color:#F2BE74;float:right">${c[2]} never exercised</b></div>
+      <div style="display:flex;height:16px;border-radius:3px;overflow:hidden">
+        <div style="width:${w}%;background:var(--green)"></div><div style="width:${nw}%;background:var(--amber)"></div>
+      </div></div>`;}).join('');
+  $('#neverTable').querySelector('tbody').innerHTML=NEVER.map(r=>`<tr><td class="mono">${r.id}</td><td class="mut">${r.cls}</td><td>${r.why}</td></tr>`).join('');
+  const w=900,h=190,pl=52,pb=26,pt=14,pr=20;
+  const X=i=>pl+(w-pl-pr)*i/(TREND.length-1), Y=v=>h-pb-(h-pb-pt)*(v-84)/(93-84);
+  let path='';TREND.forEach((t,i)=>path+=(i?'L':'M')+X(i)+' '+Y(t[1]));
+  let s=`<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto">`;
+  s+=`<line x1="${pl}" y1="${h-pb}" x2="${w-pr}" y2="${h-pb}" stroke="#24344F"/><line x1="${pl}" y1="${pt}" x2="${pl}" y2="${h-pb}" stroke="#24344F"/>`;
+  [84,87,90,93].forEach(v=>{s+=`<text x="${pl-6}" y="${Y(v)+4}" fill="#93A4BC" font-size="10" text-anchor="end">${v}%</text>`;});
+  s+=`<path d="${path}" fill="none" stroke="#1F9E8F" stroke-width="2"/>`;
+  TREND.forEach((t,i)=>{s+=`<circle cx="${X(i)}" cy="${Y(t[1])}" r="3" fill="#1F9E8F"/>`;});
+  s+=`<text x="${pl}" y="${h-8}" fill="#93A4BC" font-size="10">Nov 2025</text><text x="${w-pr}" y="${h-8}" fill="#93A4BC" font-size="10" text-anchor="end">Oct 2026</text>`;
+  s+=`<text x="${X(11)-6}" y="${Y(91.4)-8}" fill="#5FD08A" font-size="11" text-anchor="end">91.4 % · 175 of 191 demonstrated in service</text>`;
+  s+=`<text x="${pl+4}" y="${pt+12}" fill="#93A4BC" font-size="10.5">Coverage rises as requirements are exercised and fall out of service age — a trend no certificate currently tracks.</text></svg>`;
+  $('#covTrend').innerHTML=s;
+})();
+/* --------------------------------------------------------------- eq page */
+$('#eqTable').querySelector('tbody').innerHTML=EQUIP.map(r=>`<tr><td><b>${r[0]}</b></td><td class="mut">${r[1]}</td>
+  <td class="mono">${r[2]}</td><td class="mono">${r[3]}</td><td class="mono">${r[4]}</td><td class="mut">${r[5]}</td>
+  <td class="mut">${r[6]}</td><td>${r[7]==='none — stable'?'<span class="pill p-g">stable</span>':'<span class="pill p-a">'+r[7]+'</span>'}</td></tr>`).join('');
+</script>
+</body>
+</html>
